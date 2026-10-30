@@ -8,11 +8,130 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="m0">
-    <h1>章节写作器</h1>
-    <p class="muted">v0.1 · M0 骨架</p>
-    <p>空窗口已就绪，接下来做书架与写作闭环。</p>
-  </main>
+  <div id="app">
+    <!-- ============ 书架 ============ -->
+    <section id="shelf-view" class="view shelf-view">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">章</span>
+          <span class="brand-name">章节写作器</span>
+          <span class="version muted small">v0.1</span>
+        </div>
+        <div class="topbar-right">
+          <span id="books-root-label" class="muted small"></span>
+          <button id="btn-settings" class="btn ghost" type="button">设置</button>
+        </div>
+      </header>
+      <div class="shelf-body">
+        <div class="book-grid" id="book-grid"></div>
+      </div>
+      <footer class="shelf-footer muted small">
+        一本书 = 一个文件夹；正文就是普通 txt 文件，用记事本也能直接打开。保存只有你按 Ctrl+S 时才发生。
+      </footer>
+    </section>
+
+    <!-- ============ 编辑器 ============ -->
+    <section id="editor-view" class="view editor-view hidden">
+      <aside class="sidebar">
+        <button id="btn-back" class="btn ghost back-btn" type="button">← 书架</button>
+        <div class="sidebar-book">
+          <div class="book-title" id="book-title" title="书名"></div>
+          <button id="btn-rename-book" class="btn ghost tiny" type="button" title="修改书名（只改书目记录，不改文件夹名）">改名</button>
+        </div>
+        <div class="chapter-list" id="chapter-list"></div>
+        <div class="sidebar-actions">
+          <button id="btn-new-chapter" class="btn" type="button">＋ 新建章节</button>
+        </div>
+      </aside>
+      <main class="editor-main">
+        <header class="editor-header">
+          <div class="chapter-title" id="chapter-title"></div>
+          <div class="editor-actions">
+            <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
+            <div class="dropdown">
+              <button id="btn-export" class="btn ghost" type="button">导出 ▾</button>
+              <div class="dropdown-menu hidden" id="export-menu">
+                <button type="button" data-action="copy">复制整本到剪贴板</button>
+                <button type="button" data-action="txt">导出 TXT…</button>
+                <button type="button" data-action="folder">打开本书文件夹</button>
+              </div>
+            </div>
+            <button id="btn-save" class="btn primary" type="button" disabled>保存</button>
+          </div>
+        </header>
+        <textarea id="editor" class="editor" spellcheck="false"
+                  placeholder="开始写作…（只有按 Ctrl+S 或点「保存」才会写盘）"></textarea>
+        <footer class="statusbar">
+          <span class="dot ok" id="status-dot"></span>
+          <span id="status-text">已保存</span>
+          <span class="spacer"></span>
+          <span id="char-count" class="muted small"></span>
+          <span class="kbd">Ctrl+S 保存</span>
+        </footer>
+      </main>
+    </section>
+  </div>
+
+  <div id="toast-area"></div>
+
+  <!-- ============ 通用模态 ============ -->
+  <div id="modal-backdrop" class="backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 id="modal-title" class="modal-title"></h2>
+      <p id="modal-message" class="modal-message"></p>
+      <input id="modal-input" class="modal-input hidden" type="text" />
+      <div id="modal-buttons" class="modal-buttons"></div>
+    </div>
+  </div>
+
+  <!-- ============ 设置 ============ -->
+  <div id="settings-backdrop" class="backdrop hidden">
+    <div class="modal settings-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">设置</h2>
+      <label class="field">
+        <span>书架目录</span>
+        <div class="field-row">
+          <input id="settings-root" class="text-input" type="text" />
+          <button id="btn-pick-folder" class="btn ghost" type="button">选择…</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>正文字体</span>
+        <select id="settings-font" class="text-input">
+          <option value="serif">宋体 / 衬线</option>
+          <option value="sans">黑体 / 无衬线</option>
+          <option value="kai">楷体</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>字号</span>
+        <select id="settings-size" class="text-input">
+          <option value="16">16</option>
+          <option value="18">18</option>
+          <option value="20">20</option>
+          <option value="22">22</option>
+          <option value="24">24</option>
+        </select>
+      </label>
+      <p class="muted small">
+        本应用只在你点「保存」时写正文：没有自动保存、没有每日备份。切章、关窗、导出时会提醒你保存，
+        请自己定期把书库复制到网盘或移动硬盘。
+      </p>
+      <div class="modal-buttons">
+        <button id="btn-settings-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-settings-save" class="btn primary" type="button">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 章节右键菜单 ============ -->
+  <div id="context-menu" class="context-menu hidden">
+    <button type="button" data-action="rename">重命名</button>
+    <button type="button" data-action="insert-before">在此章之前插入</button>
+    <button type="button" data-action="insert-after">在此章之后插入</button>
+    <button type="button" data-action="delete" class="danger-text">删除（移到 _trash）</button>
+  </div>
+
   <script src="renderer.js"></script>
 </body>
 </html>
