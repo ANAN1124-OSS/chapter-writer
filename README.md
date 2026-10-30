@@ -31,6 +31,17 @@ pnpm install        # 第一次会下载 Electron（约 100MB，走 npmmirror �
 pnpm start          # 启动应用
 ```
 
+> **如果 `pnpm start` 报「无法加载文件 …pnpm.ps1，因为在此系统上禁止运行脚本」**
+>
+> 这是 Windows PowerShell 5.1 的默认执行策略（Restricted）拦住了 pnpm 的 `.ps1` 垫片，不是项目的问题。
+> 任选一种即可：
+>
+> 1. **双击项目根目录的 `启动写作器.cmd`**（最省事，不用记命令）；
+> 2. 在当前 PowerShell 里改用 **`pnpm.cmd start`**（走 `.cmd` 垫片，不受脚本策略限制）；
+> 3. 一次性放开当前用户策略（无需管理员）：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`，之后 `pnpm start` 就能用；想改回去：`Set-ExecutionPolicy -Scope CurrentUser Undefined`。
+>
+> 用 PowerShell 7（`pwsh`）打开终端也可以直接用 `pnpm start`。
+
 说明：
 
 - `.npmrc` 已配置 `electron_mirror=https://npmmirror.com/mirrors/electron/`，避免卡 GitHub。
@@ -153,6 +164,7 @@ chapter-writer/
 | 书架是空的 | 书架目录里还没有书；点「新建一本书」，或把书文件夹放进该目录 |
 | 书卡标红「书目损坏」 | 点开修复：从 `.bak` 恢复 / 从目录 txt 重建。不要自己删文件 |
 | `pnpm start` 闪退、提示 `Cannot read properties of undefined (reading 'whenReady')` | 环境里有 `ELECTRON_RUN_AS_NODE=1`；确认用 `pnpm start`（走 scripts/start.js），或手动清掉该变量 |
+| `pnpm start` 报「无法加载文件 …pnpm.ps1，因为在此系统上禁止运行脚本」 | Windows PowerShell 5.1 执行策略限制，与应用无关。改用 `pnpm.cmd start`、双击 `启动写作器.cmd`，或 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试（详见「安装与启动」） |
 | Electron 下载很慢/失败 | 检查 `.npmrc` 的镜像；或 `pnpm approve-builds` 放行 electron 的 install 脚本 |
 | 记事本打开 txt 是乱码 | 章节文件是 UTF-8 无 BOM；较老的记事本请升级到 Win11 自带版本，或用 VSCode 打开 |
 | 保存失败 | 看状态栏红字：磁盘满 / 文件被占用 / 无权限。处理后再按 `Ctrl+S`，关窗时也会阻止退出 |
