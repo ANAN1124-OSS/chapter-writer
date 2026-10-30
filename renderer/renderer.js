@@ -768,7 +768,7 @@
     return messages.join('。') || '没有可导入的内容';
   }
 
-  async function importBooksFlow(explicitPaths) {
+  async function importBooksFlow(explicitPaths, mode = 'raw') {
     if (state.importing) return { busy: true };
     state.importing = true;
     const importButton = $('btn-import');
@@ -781,7 +781,7 @@
     let data = null;
     let error = null;
     try {
-      data = await call(api.importBooks, explicitPaths);
+      data = await call(api.importBooks, explicitPaths, { mode });
     } catch (err) {
       error = err;
     } finally {
@@ -803,6 +803,26 @@
     );
     await refreshShelf();
     return data;
+  }
+
+  // 点「导入小说」先问导入方式：默认原封不动，也可选自动分章
+  async function onImportClick() {
+    if (state.importing) return;
+    const res = await openModal({
+      title: '导入小说',
+      message:
+        '请选择导入方式：\n\n' +
+        '• 按原文件导入（推荐）：每个 txt 一本书，全文原封不动作为一章，不改动任何文字\n' +
+        '• 自动分章：按「第X章 / 楔子」等标题行把每本拆成多章（适合排版规范的 txt）',
+      buttons: [
+        { label: '按原文件导入', value: 'raw', kind: 'primary' },
+        { label: '自动分章', value: 'split' },
+        { label: '取消', value: 'cancel' }
+      ],
+      cancelValue: 'cancel'
+    });
+    if (res.action !== 'raw' && res.action !== 'split') return;
+    await importBooksFlow(undefined, res.action);
   }
 
   async function deleteBookFlow(book, { skipConfirm = false } = {}) {
@@ -1043,7 +1063,7 @@
       }
     });
 
-    $('btn-import').addEventListener('click', () => importBooksFlow());
+    $('btn-import').addEventListener('click', onImportClick);
 
     $('book-menu').addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-action]');
@@ -1215,8 +1235,8 @@
       dialog: () => (state.modal ? state.modal.opts.title : null),
       modalButtons: () => (state.modal ? state.modal.opts.buttons.map((b) => b.value) : []),
       answerModal: (value) => answerModalValue(value),
-      async importPaths(paths) {
-        return importBooksFlow(paths);
+      async importPaths(paths, mode) {
+        return importBooksFlow(paths, mode || 'raw');
       },
       async deleteBookByFolder(folder, options) {
         const book = (state.books || []).find((b) => b.folder === folder || b.title === folder);

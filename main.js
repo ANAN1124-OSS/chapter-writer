@@ -248,7 +248,7 @@ function registerIpc() {
     throw new storage.StorageError('BAD_MODE', `未知的修复方式：${mode}`);
   });
 
-  handle('book:import', async (explicitPaths) => {
+  handle('book:import', async (explicitPaths, options) => {
     const cfg = await getConfig();
     await fs.mkdir(cfg.booksRoot, { recursive: true });
     let dirs = Array.isArray(explicitPaths)
@@ -266,6 +266,7 @@ function registerIpc() {
       dirs = filePaths;
     }
     return importer.importFolders(cfg.booksRoot, dirs, {
+      mode: options && options.mode,
       onProgress: (progress) => {
         if (win && !win.isDestroyed()) win.webContents.send('import:progress', progress);
       }

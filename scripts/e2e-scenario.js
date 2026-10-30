@@ -288,7 +288,7 @@ module.exports = async function runScenario(ctx) {
     '楔子\n\n乙的引子\n\n第一章 雪夜\n\n乙的正文',
     'utf8'
   );
-  await exec(`window.__cwTest.importPaths([${JSON.stringify(collectionSrc)}])`);
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(collectionSrc)}], 'split')`);
   await sleep(500);
   const shelfCollection = await storage.listBooks(booksRoot);
   const bookA = shelfCollection.find((b) => b.title === '小说甲 - 作者');
@@ -309,6 +309,26 @@ module.exports = async function runScenario(ctx) {
     '楔子 / 第一章 也能识别',
     JSON.stringify(importedMetaB.chapters.map((c) => c.name)) === JSON.stringify(['楔子', '雪夜'])
   );
+
+  // 19. 默认「原文件导入」：整篇一章、内容与源文件完全一致（不拆章、不改字）
+  const rawSrc = path.join(path.dirname(booksRoot), '原样导入源');
+  await fs.mkdir(rawSrc, { recursive: true });
+  const rawContent = '第1章 开端\n\n原文第一段\n\n第2章 转折\n\n原文第二段';
+  await fs.writeFile(path.join(rawSrc, '原样小说 - 作者.txt'), rawContent, 'utf8');
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(rawSrc)}])`);
+  const shelfRaw = await storage.listBooks(booksRoot);
+  const rawBook = shelfRaw.find((b) => b.title === '原样小说 - 作者');
+  check(
+    '默认导入：每个 txt 一本书、不拆章',
+    Boolean(rawBook && rawBook.chapterCount === 1),
+    rawBook && rawBook.chapterCount
+  );
+  await exec(
+    `window.__cwTest.openBookPath(${JSON.stringify(path.join(booksRoot, '原样小说 - 作者'))})`
+  );
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check('默认导入后只有一章「全文」', (await exec('window.__cwTest.currentTitle()')) === '第1章：全文');
+  check('默认导入正文与源文件完全一致', (await exec('window.__cwTest.text()')) === rawContent);
 
   return { ok: true, checks: checks.length, details: checks };
 };

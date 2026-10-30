@@ -126,7 +126,7 @@ test('不存在的路径记为跳过而不是崩溃', async () => {
   assert.match(res.skipped[0].reason, /不是文件夹/);
 });
 
-test('导入小说收藏夹：每个 txt 是一本书，自动分章', async () => {
+test('导入小说收藏夹（自动分章模式）：每个 txt 一本书并拆分章节', async () => {
   const base = await mkTmp();
   const src = path.join(base, '收藏夹');
   await fs.mkdir(src);
@@ -142,7 +142,7 @@ test('导入小说收藏夹：每个 txt 是一本书，自动分章', async () 
   );
 
   const booksRoot = path.join(base, '书架');
-  const res = await importer.importFolders(booksRoot, [src]);
+  const res = await importer.importFolders(booksRoot, [src], { mode: 'split' });
   assert.equal(res.imported.length, 2);
   assert.deepEqual(
     res.imported.map((b) => b.title).sort(),
@@ -177,7 +177,7 @@ test('单个 txt 小说（没有标题行）：导成一本书，一章「全文
   assert.ok((await storage.loadChapterText(res.imported[0].path, meta.chapters[0].file)).text.includes('正文第二段'));
 });
 
-test('GBK 编码的小说能自动识别并导入', async () => {
+test('GBK 编码的小说能自动识别并导入（默认原样模式）', async () => {
   const base = await mkTmp();
   const src = path.join(base, 'GBK收藏');
   await fs.mkdir(src);
@@ -189,5 +189,53 @@ test('GBK 编码的小说能自动识别并导入', async () => {
   assert.equal(res.imported[0].title, 'GBK小说');
   const meta = await storage.readBookMeta(res.imported[0].path);
   assert.equal(meta.chapters.length, 1);
-  assert.equal(meta.chapters[0].name, '中文');
+  assert.equal(meta.chapters[0].name, '全文');
+  assert.equal(
+    (await storage.loadChapterText(res.imported[0].path, meta.chapters[0].file)).text,
+    '第一章 中文'
+  );
+});
+
+test('默认「原文件导入」：不拆章，UTF-8 源文件按字节原样复制', async () => {
+  const base = await mkTmp();
+  const src = path.join(base, '原样');
+  await fs.mkdir(src);
+  // 故意包含标题行、BOM 之外的空白、CRLF，验证一个字节都不改
+  const original = '第1章 开端\r\n\r\n正文一，带 全角空格　。\r\n\r\n第2章 转折\r\n\r\n正文二\r\n';
+  const buffer = Buffer.from(original, 'utf8');
+  const filePath = path.join(src, '很长的书名 - 作者.txt');
+  await fs.writeFile(filePath, buffer);
+
+  const booksRoot = path.join(base, '书架');
+  const res = await importer.importFolders(booksRoot, [src]);
+  assert.equal(res.imported.length, 1);
+  assert.equal(res.imported[0].chapters, 1, '不拆章，全文只有一章');
+
+  const meta = await storage.readBookMeta(res.imported[0].path);
+  assert.equal(meta.chapters.length, 1);
+  assert.equal(meta.chapters[0].name, '全文');
+  const importedBytes = await fs.readFile(path.join(res.imported[0].path, meta.chapters[0].file));
+  assert.deepEqual(importedBytes, buffer, '导入的章节文件应与源 txt 字节完全一致');
+
+  const books = await storage.listBooks(booksRoot);
+  assert.equal(books.length, 1);
+  assert.equal(books[0].totalChars, 23);
+});
+
+test('收藏夹默认原样导入：每个 txt 一本书、各一章', async () => {
+  const base = await mkTmp();
+  const src = path.join(base, '收藏夹');
+  await fs.mkdir(src);
+  await fs.writeFile(path.join(src, '书甲.txt'), '第1章 一\n\n甲正文\n\n第2章 二\n\n甲二段', 'utf8');
+  await fs.writeFile(path.join(src, '书乙.txt'), '乙的整篇内容', 'utf8');
+  const booksRoot = path.join(base, '书架');
+  const res = await importer.importFolders(booksRoot, [src]);
+  assert.equal(res.imported.length, 2);
+  for (const book of res.imported) {
+    assert.equal(book.chapters, 1);
+    const meta = await storage.readBookMeta(book.path);
+    assert.equal(meta.chapters.length, 1);
+  }
+  const books = await storage.listBooks(booksRoot);
+  assert.equal(books.length, 2);
 });

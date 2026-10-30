@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('api', {
   exportBook: (bookPath) => invoke('book:export', bookPath),
   copyBook: (bookPath) => invoke('book:copy', bookPath),
   repairBook: (bookPath, mode) => invoke('book:repair', bookPath, mode),
-  importBooks: (paths) => invoke('book:import', paths),
+  importBooks: (paths, options) => invoke('book:import', paths, options),
   deleteBook: (bookPath) => invoke('book:delete', bookPath),
 
   getConfig: () => invoke('config:get'),
