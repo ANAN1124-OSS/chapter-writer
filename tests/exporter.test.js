@@ -24,7 +24,13 @@ test('整本拼接：标题行 + 空行 + 正文，章间一空行，\\r\\n', ()
 test('空章只输出标题行，不留半截格式', () => {
   const meta = metaOf('起风', '', '夜雨');
   const text = composeBook(meta, ['正文', '', '']);
-  assert.equal(text, '第1章：起风\r\n\r\n正文\r\n\r\n第2章：未命名\r\n\r\n第3章：夜雨\r\n');
+  assert.equal(text, '第1章：起风\r\n\r\n正文\r\n\r\n第2章\r\n\r\n第3章：夜雨\r\n');
+});
+
+test('原文自带章节标题的章节导出时原样保留', () => {
+  const meta = metaOf('第1章 关于本作品', '第2章');
+  const text = composeBook(meta, ['甲', '乙']);
+  assert.equal(text, '第1章 关于本作品\r\n\r\n甲\r\n\r\n第2章\r\n\r\n乙\r\n');
 });
 
 test('正文首尾多余空行被去掉，中间空行保留', () => {

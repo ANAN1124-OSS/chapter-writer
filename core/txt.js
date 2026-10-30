@@ -97,6 +97,32 @@ function splitChapters(text) {
   return parts;
 }
 
+// 把整本书文本按原文标题行切成 [{ title, body }]：
+// title = 原文标题行（去掉首尾空白），body = 标题行之后到下一标题行之前的原文（不做 trim，保留空行）
+// 用于「按原文章节导入」：章名和正文都保持原样。
+function splitChaptersRaw(text, { prefaceTitle = '开篇' } = {}) {
+  const normalized = stripBom(String(text == null ? '' : text)).replace(/\r\n?/g, '\n');
+  const lines = normalized.split('\n');
+  const marks = [];
+  lines.forEach((line, index) => {
+    const parsed = parseHeading(line);
+    if (parsed) marks.push({ index, title: line.trim() });
+  });
+
+  if (!marks.length) return [{ title: '', body: normalized }];
+
+  const parts = [];
+  if (marks[0].index > 0) {
+    parts.push({ title: prefaceTitle, body: lines.slice(0, marks[0].index).join('\n') });
+  }
+  for (let i = 0; i < marks.length; i += 1) {
+    const start = marks[i].index + 1;
+    const end = i + 1 < marks.length ? marks[i + 1].index : lines.length;
+    parts.push({ title: marks[i].title, body: lines.slice(start, end).join('\n') });
+  }
+  return parts;
+}
+
 module.exports = {
   decodeBuffer,
   normalizeText,
@@ -104,5 +130,6 @@ module.exports = {
   isChapterHeading,
   headingToName,
   splitChapters,
+  splitChaptersRaw,
   MAX_HEADING_LENGTH
 };

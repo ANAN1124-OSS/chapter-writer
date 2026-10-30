@@ -53,8 +53,8 @@ module.exports = async function runScenario(ctx) {
   await waitFor("window.__cwTest.view() === 'editor'");
   check('新建书后进入编辑视图', (await exec('window.__cwTest.view()')) === 'editor');
   check(
-    '初始一个空章且标题为「第1章：未命名」',
-    JSON.stringify(await exec('window.__cwTest.chapterTitles()')) === JSON.stringify(['第1章：未命名'])
+    '初始一个空章且标题为「第1章」',
+    JSON.stringify(await exec('window.__cwTest.chapterTitles()')) === JSON.stringify(['第1章'])
   );
 
   // 2. 改名 + 追加两章 → 章号按顺序自动生成
@@ -64,7 +64,7 @@ module.exports = async function runScenario(ctx) {
   check(
     '三章标题按顺序自动编号（含空名回退）',
     JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
-      JSON.stringify(['第1章：起风', '第2章：夜雨', '第3章：未命名'])
+      JSON.stringify(['第1章：起风', '第2章：夜雨', '第3章'])
   );
   check(
     '重命名不改文件名',
@@ -92,7 +92,7 @@ module.exports = async function runScenario(ctx) {
   check(
     '插入后章号自动顺延',
     JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
-      JSON.stringify(['第1章：起风', '第2章：灯塔', '第3章：夜雨', '第4章：未命名'])
+      JSON.stringify(['第1章：起风', '第2章：灯塔', '第3章：夜雨', '第4章'])
   );
   const meta2 = await storage.readBookMeta(bookDir);
   check(
@@ -125,7 +125,7 @@ module.exports = async function runScenario(ctx) {
     '重命名后标题变化、文件名不变',
     (await exec('window.__cwTest.currentTitle()')).length >= 0 &&
       JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
-        JSON.stringify(['第1章：起风', '第2章：灯塔改名', '第3章：夜雨', '第4章：未命名'])
+        JSON.stringify(['第1章：起风', '第2章：灯塔改名', '第3章：夜雨', '第4章'])
   );
   const meta3 = await storage.readBookMeta(bookDir);
   check('重命名只改 name 不动 file', meta3.chapters[1].file === '004-灯塔.txt' && meta3.chapters[1].name === '灯塔改名');
@@ -315,7 +315,7 @@ module.exports = async function runScenario(ctx) {
   await fs.mkdir(rawSrc, { recursive: true });
   const rawContent = '第1章 开端\n\n原文第一段\n\n第2章 转折\n\n原文第二段';
   await fs.writeFile(path.join(rawSrc, '原样小说 - 作者.txt'), rawContent, 'utf8');
-  await exec(`window.__cwTest.importPaths([${JSON.stringify(rawSrc)}])`);
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(rawSrc)}], 'raw')`);
   const shelfRaw = await storage.listBooks(booksRoot);
   const rawBook = shelfRaw.find((b) => b.title === '原样小说 - 作者');
   check(
@@ -329,6 +329,33 @@ module.exports = async function runScenario(ctx) {
   await waitFor("window.__cwTest.view() === 'editor'");
   check('默认导入后只有一章「全文」', (await exec('window.__cwTest.currentTitle()')) === '第1章：全文');
   check('默认导入正文与源文件完全一致', (await exec('window.__cwTest.text()')) === rawContent);
+
+  // 20. 默认「按原文章节导入」：按原文标题拆章，章名和正文照抄
+  const chaptersSrc = path.join(path.dirname(booksRoot), '按原文章节源');
+  await fs.mkdir(chaptersSrc, { recursive: true });
+  const chapteredText = '第1章 开端\n\n原文第一段\n\n第2章 转折\n\n原文第二段\n';
+  await fs.writeFile(path.join(chaptersSrc, '章节小说 - 作者.txt'), chapteredText, 'utf8');
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(chaptersSrc)}])`);
+  const shelfChaptered = await storage.listBooks(booksRoot);
+  const chapteredBook = shelfChaptered.find((b) => b.title === '章节小说 - 作者');
+  check(
+    '默认按原文章节导入：自动拆成多章',
+    Boolean(chapteredBook && chapteredBook.chapterCount === 2),
+    chapteredBook && chapteredBook.chapterCount
+  );
+  await exec(
+    `window.__cwTest.openBookPath(${JSON.stringify(path.join(booksRoot, '章节小说 - 作者'))})`
+  );
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '章名照抄原文标题',
+    JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
+      JSON.stringify(['第1章 开端', '第2章 转折'])
+  );
+  check(
+    '本章正文保留原文空行（没有 trim）',
+    (await exec('window.__cwTest.text()')) === '\n原文第一段\n'
+  );
 
   return { ok: true, checks: checks.length, details: checks };
 };

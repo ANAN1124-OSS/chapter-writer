@@ -4,15 +4,16 @@
 //   2) 一本书的章节目录（txt 文件名形如 001-xxx.txt / 第一章 xxx.txt）→ 复制后重建书目
 //   3) 一堆独立小说 txt（每个 txt 是一整本小说，如 小说txt文件夹 那种收藏夹）
 //      → 每个 txt 导入成一本书
-//        mode='raw'（默认）：原封不动，全文作为一章，UTF-8 源文件按字节原样复制
-//        mode='split'：按「第X章 / 楔子 / Chapter N」等标题行自动分章
+//        mode='chapters'（默认）：按原文的章节标题切开，章名和正文都保持原文，一字不改
+//        mode='raw'：整本作为一章「全文」，UTF-8 源文件按字节原样复制
+//        mode='split'（旧版自动分章，保留兼容）：按标题行拆分并重新编号
 // 只复制、不移动源文件；文件夹重名自动加 -2/-3。
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const chaptersLib = require('./chapters');
 const storage = require('./storage');
 const repair = require('./repair');
-const { decodeBuffer, normalizeText, splitChapters } = require('./txt');
+const { decodeBuffer, normalizeText, splitChapters, splitChaptersRaw } = require('./txt');
 
 const CHAPTER_FILE_RE =
   /^\s*(?:\d+\s*[-_.、\s]|第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部])/;
@@ -135,9 +136,10 @@ async function importBookFolder(booksRoot, sourceDir, analysis) {
 }
 
 // 一个完整小说 txt → 一本书。
-// mode='raw'（默认）：原封不动，全文作为一章；UTF-8 源文件按字节原样复制，不改一个字符、一个换行。
-// mode='split'：按标题行自动分章（会重排成应用自己的章节结构，文字本身不变）。
-async function importNovelFile(booksRoot, filePath, { mode = 'raw' } = {}) {
+// mode='chapters'（默认）：按原文标题行切章，章名照抄原文标题，正文原样保留（只切分、不改字）。
+// mode='raw'：整本作为一章「全文」；UTF-8 源文件按字节原样复制。
+// mode='split'：旧版自动分章（会重排编号），保留兼容。
+async function importNovelFile(booksRoot, filePath, { mode = 'chapters' } = {}) {
   const buffer = await fs.readFile(filePath);
   const baseName = path.basename(filePath, path.extname(filePath)).trim() || '未命名小说';
   const decoded = decodeBuffer(buffer);
@@ -159,7 +161,28 @@ async function importNovelFile(booksRoot, filePath, { mode = 'raw' } = {}) {
     const now = new Date().toISOString();
     let chapterList = [];
 
-    if (mode === 'split') {
+    if (mode === 'chapters') {
+      const parts = splitChaptersRaw(decoded);
+      if (!parts.length) {
+        throw new storage.StorageError('NO_CONTENT', `《${baseName}》没有可导入的正文`);
+      }
+      const usedFiles = [];
+      for (let i = 0; i < parts.length; i += 1) {
+        const seq = i + 1;
+        const title = parts[i].title || '';
+        const file = chaptersLib.uniqueFileName(seq, title || '全文', usedFiles);
+        // 正文按原文写入（不 trim、不改换行内容），只切分
+        await fs.writeFile(path.join(staging, file), parts[i].body, 'utf8');
+        usedFiles.push(file);
+        chapterList.push({
+          id: `ch_${chaptersLib.pad3(seq)}`,
+          file,
+          name: title,
+          chars: chaptersLib.countChars(`${title}${parts[i].body}`),
+          createdAt: now
+        });
+      }
+    } else if (mode === 'split') {
       const text = normalizeText(decoded).trim();
       const parts = splitChapters(text);
       if (!parts.length) {
@@ -181,7 +204,7 @@ async function importNovelFile(booksRoot, filePath, { mode = 'raw' } = {}) {
         });
       }
     } else {
-      // 原封不动：整篇作为一章「全文」
+      // 原封不动整本模式：整篇作为一章「全文」
       const file = chaptersLib.buildFileName(1, '全文');
       if (isUtf8(buffer)) {
         // 源文件本来就是 UTF-8：按字节原样复制，连 BOM/换行都不动
@@ -216,7 +239,7 @@ async function importNovelFile(booksRoot, filePath, { mode = 'raw' } = {}) {
     return {
       imported: true,
       kind: 'novel',
-      mode: mode === 'split' ? 'split' : 'raw',
+      mode,
       folder,
       path: target,
       title: baseName,
@@ -255,7 +278,8 @@ function normalizeSources(sources) {
 
 async function importFolders(booksRoot, sources, options = {}) {
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
-  const mode = options.mode === 'split' ? 'split' : 'raw';
+  const mode =
+    options.mode === 'split' ? 'split' : options.mode === 'raw' ? 'raw' : 'chapters';
   const imported = [];
   const skipped = [];
   const failed = [];

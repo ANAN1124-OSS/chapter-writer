@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { decodeBuffer, splitChapters, parseHeading, isChapterHeading } = require('../core/txt');
+const { decodeBuffer, splitChapters, splitChaptersRaw, parseHeading, isChapterHeading } = require('../core/txt');
 
 test('解码：UTF-8 无 BOM / 有 BOM', () => {
   assert.equal(decodeBuffer(Buffer.from('第一章 雪夜', 'utf8')), '第一章 雪夜');
@@ -73,4 +73,32 @@ test('切章：CRLF 与空章都能处理', () => {
   assert.equal(parts[1].title, '');
   assert.equal(parts[1].text, '');
   assert.equal(parts[2].text, '内容三');
+});
+
+test('原样切章：章名照抄原文标题、正文不做 trim', () => {
+  const text = '第1章 开端\n\n正文一，带 空格。\n\n第2章 转折\n\n正文二\n';
+  const parts = splitChaptersRaw(text);
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0].title, '第1章 开端');
+  assert.equal(parts[0].body, '\n正文一，带 空格。\n');
+  assert.equal(parts[1].title, '第2章 转折');
+  assert.equal(parts[1].body, '\n正文二\n');
+});
+
+test('原样切章：开头有引子时单独成「开篇」，原文标题保留空白差异', () => {
+  const text = '书名：测试\n作者：某人\n\n　　楔子\n\n引子内容\n\n第1章 开端\n\n正文一';
+  const parts = splitChaptersRaw(text);
+  assert.equal(parts.length, 3);
+  assert.equal(parts[0].title, '开篇');
+  assert.equal(parts[0].body, '书名：测试\n作者：某人\n');
+  assert.equal(parts[1].title, '楔子');
+  assert.equal(parts[2].title, '第1章 开端');
+});
+
+test('原样切章：没有标题行时整本一章、正文原样', () => {
+  const text = '这是一整篇没有章节标题的短篇小说。\n\n第二段。\n';
+  const parts = splitChaptersRaw(text);
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].title, '');
+  assert.equal(parts[0].body, text);
 });

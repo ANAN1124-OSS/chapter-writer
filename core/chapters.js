@@ -4,6 +4,9 @@ const TITLE_TEMPLATE = '第{num}章：{name}';
 const MAX_NAME_LENGTH = 40;
 const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g;
 const EDGE_DOTS_SPACES = /^[.\s]+|[.\s]+$/g;
+// 原文自带章节标题（导进来的书）：显示时原样保留，不再叠加「第N章：」
+const RAW_TITLE_RE =
+  /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部]|楔子|序章|序言|引子|前言|尾声|后记|番外|终章|大结局|开篇|Chapter\s+\d+)/i;
 
 function pad3(n) {
   return String(n).padStart(3, '0');
@@ -15,8 +18,12 @@ function formatTitle(meta, index, name) {
       ? meta.titleTemplate
       : TITLE_TEMPLATE;
   const number = String(index + 1);
-  const chapterName = name && String(name).trim() ? String(name).trim() : '未命名';
-  return template.split('{num}').join(number).split('{name}').join(chapterName);
+  const clean = String(name == null ? '' : name).trim();
+  // 原文自带的章节标题（如「第1章 关于本作品」）原样显示，避免「第1章：第1章 …」重复
+  if (clean && RAW_TITLE_RE.test(clean)) return clean;
+  // 没有名字的章节：显示「第N章」，不再显示「第N章：未命名」
+  if (!clean) return `第${number}章`;
+  return template.split('{num}').join(number).split('{name}').join(clean);
 }
 
 function safeName(raw) {
@@ -88,6 +95,7 @@ function toDiskNewlines(text) {
 module.exports = {
   TITLE_TEMPLATE,
   MAX_NAME_LENGTH,
+  RAW_TITLE_RE,
   pad3,
   formatTitle,
   safeName,

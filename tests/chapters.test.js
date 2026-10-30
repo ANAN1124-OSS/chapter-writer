@@ -5,9 +5,17 @@ const ch = require('../core/chapters');
 test('formatTitle：章号按数组下标现算，不在数据里存 N', () => {
   assert.equal(ch.formatTitle({}, 0, '起风'), '第1章：起风');
   assert.equal(ch.formatTitle({}, 11, '夜雨'), '第12章：夜雨');
-  assert.equal(ch.formatTitle({}, 0, ''), '第1章：未命名');
-  assert.equal(ch.formatTitle({}, 0, '   '), '第1章：未命名');
-  assert.equal(ch.formatTitle({}, 0, null), '第1章：未命名');
+  // 没有名字的章节显示「第N章」，不再显示「未命名」
+  assert.equal(ch.formatTitle({}, 0, ''), '第1章');
+  assert.equal(ch.formatTitle({}, 0, '   '), '第1章');
+  assert.equal(ch.formatTitle({}, 0, null), '第1章');
+});
+
+test('formatTitle：原文自带章节标题原样显示，不叠加「第N章：」', () => {
+  assert.equal(ch.formatTitle({}, 0, '第1章 关于本作品'), '第1章 关于本作品');
+  assert.equal(ch.formatTitle({}, 3, '第一章：雪夜'), '第一章：雪夜');
+  assert.equal(ch.formatTitle({}, 0, '楔子'), '楔子');
+  assert.equal(ch.formatTitle({}, 5, 'Chapter 6 The End'), 'Chapter 6 The End');
 });
 
 test('formatTitle：支持自定义模板', () => {

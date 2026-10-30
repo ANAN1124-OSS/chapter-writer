@@ -41,10 +41,16 @@
     return String(text == null ? '' : text).replace(/\s/g, '').length;
   }
 
-  // 章节标题（v0.1 格式固定：第N章：名字）
+  // 章节标题显示规则（与 core/chapters.js 的 formatTitle 保持一致）：
+  // 原文自带章节标题（第1章 / 楔子 / Chapter N…）原样显示；没有名字显示「第N章」；其余显示「第N章：名字」
+  const RAW_TITLE_RE =
+    /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部]|楔子|序章|序言|引子|前言|尾声|后记|番外|终章|大结局|开篇|Chapter\s+\d+)/i;
+
   function chapterTitle(index, name) {
-    const normal = String(name == null ? '' : name).trim() || '未命名';
-    return `第${index + 1}章：${normal}`;
+    const clean = String(name == null ? '' : name).trim();
+    if (clean && RAW_TITLE_RE.test(clean)) return clean;
+    if (!clean) return `第${index + 1}章`;
+    return `第${index + 1}章：${clean}`;
   }
 
   class ApiError extends Error {
@@ -768,7 +774,7 @@
     return messages.join('。') || '没有可导入的内容';
   }
 
-  async function importBooksFlow(explicitPaths, mode = 'raw') {
+  async function importBooksFlow(explicitPaths, mode = 'chapters') {
     if (state.importing) return { busy: true };
     state.importing = true;
     const importButton = $('btn-import');
@@ -805,23 +811,23 @@
     return data;
   }
 
-  // 点「导入小说」先问导入方式：默认原封不动，也可选自动分章
+  // 点「导入小说」先问导入方式：默认按原文章节拆开，也可整本一章
   async function onImportClick() {
     if (state.importing) return;
     const res = await openModal({
       title: '导入小说',
       message:
         '请选择导入方式：\n\n' +
-        '• 按原文件导入（推荐）：每个 txt 一本书，全文原封不动作为一章，不改动任何文字\n' +
-        '• 自动分章：按「第X章 / 楔子」等标题行把每本拆成多章（适合排版规范的 txt）',
+        '• 按原文章节导入（推荐）：按原文的「第X章 / 楔子」等标题拆成多章，章名照抄原文、正文一字不改\n' +
+        '• 整本一章导入：不拆章，整本小说放在一章「全文」里（原样复制）',
       buttons: [
-        { label: '按原文件导入', value: 'raw', kind: 'primary' },
-        { label: '自动分章', value: 'split' },
+        { label: '按原文章节导入', value: 'chapters', kind: 'primary' },
+        { label: '整本一章', value: 'raw' },
         { label: '取消', value: 'cancel' }
       ],
       cancelValue: 'cancel'
     });
-    if (res.action !== 'raw' && res.action !== 'split') return;
+    if (res.action !== 'chapters' && res.action !== 'raw') return;
     await importBooksFlow(undefined, res.action);
   }
 
@@ -1236,7 +1242,7 @@
       modalButtons: () => (state.modal ? state.modal.opts.buttons.map((b) => b.value) : []),
       answerModal: (value) => answerModalValue(value),
       async importPaths(paths, mode) {
-        return importBooksFlow(paths, mode || 'raw');
+        return importBooksFlow(paths, mode || 'chapters');
       },
       async deleteBookByFolder(folder, options) {
         const book = (state.books || []).find((b) => b.folder === folder || b.title === folder);
