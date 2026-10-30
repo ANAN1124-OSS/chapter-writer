@@ -1,0 +1,19 @@
+{
+  "name": "chapter-writer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "章节写作器 v0.1 - 整本保存、自动编号的 Windows 桌面写作工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "test": "node --test tests/"
+  },
+  "devDependencies": {
+    "electron": "45.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}
