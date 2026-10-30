@@ -188,3 +188,16 @@ test('并发写操作串行化：改名不会被「记住上次章节」覆盖',
   assert.equal(after.lastOpenChapterId, targetId);
   assert.equal(after.chapters.length, 3, '插入不能被并发写覆盖');
 });
+
+test('整本书兜底删除：移入书架 _trash，扫描时不再出现', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '待删的书');
+  const dest = await storage.trashBook(root, bookPath);
+  assert.ok(dest.includes('_trash'));
+  await fs.access(path.join(dest, '书目.json'));
+  const books = await storage.listBooks(root);
+  assert.equal(books.length, 0);
+  // 留在 _trash 里的书还能被人工读出来
+  const meta = await storage.readBookMeta(dest);
+  assert.equal(meta.title, '待删的书');
+});

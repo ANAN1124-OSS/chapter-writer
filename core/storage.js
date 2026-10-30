@@ -366,6 +366,16 @@ async function renameBook(bookPath, title) {
   return saved;
 }
 
+// 整本书的兜底删除：移动到书架根目录下的 _trash（回收站不可用时使用）
+async function trashBook(booksRoot, bookPath) {
+  const trashDir = path.join(booksRoot, TRASH_DIR);
+  await ensureDir(trashDir);
+  const folder = path.basename(bookPath);
+  const dest = path.join(trashDir, `${timestampForFile()}-${folder}`);
+  await fs.rename(bookPath, dest);
+  return dest;
+}
+
 async function setLastOpenChapter(bookPath, chapterId) {
   try {
     const meta = await readBookMeta(bookPath);
@@ -419,6 +429,7 @@ module.exports = {
   renameChapter: locked(renameChapter),
   deleteChapter: locked(deleteChapter),
   renameBook: locked(renameBook),
+  trashBook,
   setLastOpenChapter: locked(setLastOpenChapter),
   moveToTrash,
   timestampForFile,

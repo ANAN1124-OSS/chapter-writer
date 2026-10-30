@@ -82,6 +82,7 @@
     lastEditAt: 0,
     modal: null,
     contextIndex: -1,
+    contextBook: null,
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -273,7 +274,26 @@
         card.appendChild(repairBtn);
       }
 
-      card.addEventListener('click', () => openBookByPath(book.path));
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'book-card-more';
+      more.title = '更多操作（打开文件夹 / 删除）';
+      more.textContent = '⋯';
+      more.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const rect = more.getBoundingClientRect();
+        showBookMenu(book, rect.right - 186, rect.bottom + 4);
+      });
+      card.appendChild(more);
+
+      card.addEventListener('click', (event) => {
+        if (event.target.closest('.book-card-more')) return;
+        openBookByPath(book.path);
+      });
+      card.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        showBookMenu(book, event.clientX, event.clientY);
+      });
       grid.appendChild(card);
     }
 
@@ -718,6 +738,58 @@
     }
   }
 
+  // ---------- 导入 / 删除小说（书架级操作） ----------
+  async function importBooksFlow(explicitPaths) {
+    try {
+      const data = await call(api.importBooks, explicitPaths);
+      if (data.canceled) return { canceled: true };
+      const messages = [];
+      if (data.imported.length) {
+        messages.push(`已导入 ${data.imported.length} 本：${data.imported.map((b) => b.title).join('、')}`);
+      }
+      if (data.skipped.length) {
+        messages.push(`跳过 ${data.skipped.length} 个（${data.skipped.map((s) => s.reason).join('；')}）`);
+      }
+      if (data.failed.length) {
+        messages.push(`${data.failed.length} 个失败（${data.failed.map((f) => f.message).join('；')}）`);
+      }
+      if (!messages.length) messages.push('没有可导入的内容');
+      toast(messages.join('。'), data.failed.length ? 'error' : data.skipped.length ? 'warn' : 'info');
+      await refreshShelf();
+      return data;
+    } catch (err) {
+      toast(`导入失败：${err.message}`, 'error');
+      return { error: err.message };
+    }
+  }
+
+  async function deleteBookFlow(book, { skipConfirm = false } = {}) {
+    if (!book || !book.path) return;
+    if (!skipConfirm) {
+      const res = await openModal({
+        title: '删除这本书',
+        message: `确定删除「${book.title}」吗？\n\n整本书（${book.chapterCount} 章）会被移到 Windows 回收站，可以从回收站还原。`,
+        buttons: [
+          { label: '删除这本书', value: 'delete', kind: 'danger' },
+          { label: '取消', value: 'cancel', kind: 'primary' }
+        ],
+        cancelValue: 'cancel'
+      });
+      if (res.action !== 'delete') return;
+    }
+    try {
+      const data = await call(api.deleteBook, book.path);
+      if (data.method === 'recycle') {
+        toast(`已删除「${book.title}」，可在 Windows 回收站里还原`);
+      } else {
+        toast(`已删除「${book.title}」，已移到书架 _trash${data.note ? `（${data.note}）` : ''}`);
+      }
+      await refreshShelf();
+    } catch (err) {
+      toast(`删除失败：${err.message}`, 'error');
+    }
+  }
+
   // ---------- 返回书架 ----------
   async function backToShelf() {
     if (state.dirty) {
@@ -859,6 +931,24 @@
     $('context-menu').classList.add('hidden');
   }
 
+  function showBookMenu(book, x, y) {
+    state.contextBook = book;
+    const menu = $('book-menu');
+    menu.classList.remove('hidden');
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    const rect = menu.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - 8;
+    const maxY = window.innerHeight - rect.height - 8;
+    if (x > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
+    if (y > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+  }
+
+  function hideBookMenu() {
+    $('book-menu').classList.add('hidden');
+    state.contextBook = null;
+  }
+
   function toggleExportMenu() {
     $('export-menu').classList.toggle('hidden');
   }
@@ -911,6 +1001,27 @@
       }
     });
 
+    $('btn-import').addEventListener('click', () => importBooksFlow());
+
+    $('book-menu').addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action]');
+      if (!btn) return;
+      const book = state.contextBook;
+      hideBookMenu();
+      if (!book) return;
+      if (btn.dataset.action === 'open') {
+        await openBookByPath(book.path);
+      } else if (btn.dataset.action === 'folder') {
+        try {
+          await call(api.openBookFolder, book.path);
+        } catch (err) {
+          toast(`打开文件夹失败：${err.message}`, 'error');
+        }
+      } else if (btn.dataset.action === 'delete') {
+        await deleteBookFlow(book);
+      }
+    });
+
     $('btn-back').addEventListener('click', backToShelf);
     $('btn-rename-book').addEventListener('click', renameBookFlow);
     $('btn-new-chapter').addEventListener('click', () => createChapterAt(state.chapters.length));
@@ -950,6 +1061,7 @@
     document.addEventListener('click', (event) => {
       if (!event.target.closest('#context-menu') && !event.target.closest('.chapter-item')) hideContextMenu();
       if (!event.target.closest('#btn-export') && !event.target.closest('#export-menu')) hideExportMenu();
+      if (!event.target.closest('#book-menu') && !event.target.closest('.book-card-more')) hideBookMenu();
     });
 
     document.addEventListener('keydown', (event) => {
@@ -981,12 +1093,14 @@
       } else if (event.key === 'Escape') {
         hideContextMenu();
         hideExportMenu();
+        hideBookMenu();
       }
     });
 
     window.addEventListener('resize', () => {
       hideContextMenu();
       hideExportMenu();
+      hideBookMenu();
     });
   }
 
@@ -1043,6 +1157,18 @@
       dialog: () => (state.modal ? state.modal.opts.title : null),
       modalButtons: () => (state.modal ? state.modal.opts.buttons.map((b) => b.value) : []),
       answerModal: (value) => answerModalValue(value),
+      async importPaths(paths) {
+        return importBooksFlow(paths);
+      },
+      async deleteBookByFolder(folder, options) {
+        const book = (state.books || []).find((b) => b.folder === folder || b.title === folder);
+        if (!book) throw new Error(`书架上找不到：${folder}`);
+        await deleteBookFlow(book, { skipConfirm: Boolean(options && options.skipConfirm) });
+      },
+      async backToShelf() {
+        await backToShelf();
+      },
+      shelfTitles: () => state.books.map((b) => b.title),
       async handleCloseRequest() {
         await handleCloseRequest();
       }

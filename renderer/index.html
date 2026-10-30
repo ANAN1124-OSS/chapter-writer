@@ -19,6 +19,7 @@
         </div>
         <div class="topbar-right">
           <span id="books-root-label" class="muted small"></span>
+          <button id="btn-import" class="btn ghost" type="button" title="把一个外部文件夹导入成书架里的一本书">导入小说</button>
           <button id="btn-settings" class="btn ghost" type="button">设置</button>
         </div>
       </header>
@@ -130,6 +131,13 @@
     <button type="button" data-action="insert-before">在此章之前插入</button>
     <button type="button" data-action="insert-after">在此章之后插入</button>
     <button type="button" data-action="delete" class="danger-text">删除（移到 _trash）</button>
+  </div>
+
+  <!-- ============ 书卡右键菜单 ============ -->
+  <div id="book-menu" class="context-menu hidden">
+    <button type="button" data-action="open">打开这本书</button>
+    <button type="button" data-action="folder">打开所在文件夹</button>
+    <button type="button" data-action="delete" class="danger-text">删除这本书…</button>
   </div>
 
   <script src="renderer.js"></script>

@@ -30,6 +30,7 @@ const { createConfigStore } = require('./core/config');
 const { atomicWriteFile } = require('./core/atomic');
 const storage = require('./core/storage');
 const repair = require('./core/repair');
+const importer = require('./core/importer');
 const exporter = require('./core/exporter');
 
 let win = null;
@@ -242,6 +243,55 @@ function registerIpc() {
     throw new storage.StorageError('BAD_MODE', `未知的修复方式：${mode}`);
   });
 
+  handle('book:import', async (explicitPaths) => {
+    const cfg = await getConfig();
+    await fs.mkdir(cfg.booksRoot, { recursive: true });
+    let dirs = Array.isArray(explicitPaths)
+      ? explicitPaths.filter((p) => typeof p === 'string' && p.trim())
+      : [];
+    if (!dirs.length) {
+      const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: '导入小说（选择一个或多个书文件夹）',
+        buttonLabel: '导入',
+        properties: ['openDirectory', 'multiSelections', 'dontAddToRecent']
+      });
+      if (canceled || !filePaths || !filePaths.length) {
+        return { canceled: true, imported: [], skipped: [], failed: [] };
+      }
+      dirs = filePaths;
+    }
+    return importer.importFolders(cfg.booksRoot, dirs);
+  });
+
+  handle('book:delete', async (bookPath) => {
+    const cfg = await getConfig();
+    const root = path.resolve(cfg.booksRoot);
+    const target = path.resolve(String(bookPath || ''));
+    if (path.dirname(target).toLowerCase() !== root.toLowerCase()) {
+      throw new storage.StorageError('BAD_PATH', '只能删除书架目录下的书');
+    }
+    if (!(await storage.exists(target))) {
+      throw new storage.StorageError('NOT_FOUND', '这本书的文件夹已经不存在了');
+    }
+    // 测试环境用固定兜底路径，避免把测试数据丢进你的回收站
+    if (isE2E) {
+      const trashPath = await storage.trashBook(cfg.booksRoot, target);
+      return { method: 'move', folder: path.basename(target), trashPath };
+    }
+    try {
+      await shell.trashItem(target);
+      return { method: 'recycle', folder: path.basename(target) };
+    } catch (err) {
+      const trashPath = await storage.trashBook(cfg.booksRoot, target);
+      return {
+        method: 'move',
+        folder: path.basename(target),
+        trashPath,
+        note: `回收站不可用（${err.message}），已移到书架的 _trash`
+      };
+    }
+  });
+
   handle('shell:pick-folder', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       title: '选择书架目录',
@@ -360,6 +410,12 @@ async function runAutomation() {
       } else if (screenshotDialog === 'settings') {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
+          true
+        );
+        await sleep(500);
+      } else if (screenshotDialog === 'bookmenu') {
+        await win.webContents.executeJavaScript(
+          `const more = document.querySelector('.book-card-more'); if (more) more.click();`,
           true
         );
         await sleep(500);

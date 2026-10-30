@@ -233,5 +233,47 @@ module.exports = async function runScenario(ctx) {
   const shelfAfter = await storage.listBooks(booksRoot);
   check('修复后书架恢复 normal', shelfAfter.find((b) => b.folder === '坏书')?.status === 'ok');
 
+  // 16. 导入小说：外部文件夹（纯 txt）→ 书架里的一本书
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const importSrc = path.join(path.dirname(booksRoot), '外部导入源');
+  await fs.mkdir(importSrc, { recursive: true });
+  await fs.writeFile(path.join(importSrc, '001-风起.txt'), '外部的第一章内容', 'utf8');
+  await fs.writeFile(path.join(importSrc, '002-雨落.txt'), '外部的第二章内容', 'utf8');
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(importSrc)}])`);
+  const shelfAfterImport = await storage.listBooks(booksRoot);
+  const importedBook = shelfAfterImport.find((b) => b.folder === '外部导入源');
+  check(
+    '导入纯 txt 小说成功（按文件名重建书目）',
+    importedBook && importedBook.status === 'ok' && importedBook.chapterCount === 2,
+    importedBook
+  );
+  const importedPath = path.join(booksRoot, '外部导入源');
+  check('导入后原文件夹仍保留（只复制不移动）', await fs.access(importSrc).then(() => true, () => false));
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(importedPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '导入的小说章节顺序正确',
+    JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
+      JSON.stringify(['第1章：风起', '第2章：雨落'])
+  );
+  check('导入的小说正文完整', (await exec('window.__cwTest.chapterTextAt(0)')) === '外部的第一章内容');
+
+  // 17. 删除小说：整本书进 _trash（e2e 走兜底路径，不往你的回收站丢测试数据）
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.deleteBookByFolder('外部导入源', { skipConfirm: true })");
+  await sleep(500);
+  const shelfAfterDelete = await storage.listBooks(booksRoot);
+  check('删除后书架上不再有这本书', !shelfAfterDelete.some((b) => b.folder === '外部导入源'));
+  const rootTrashDir = path.join(booksRoot, '_trash');
+  const rootTrash = await fs.readdir(rootTrashDir);
+  check(
+    '删除的书进入书架 _trash（可人工找回，没有真删）',
+    rootTrash.some((f) => f.endsWith('外部导入源')),
+    rootTrash
+  );
+  check('删除后原书文件夹已从书架目录移走', await fs.access(importedPath).then(() => false, () => true));
+
   return { ok: true, checks: checks.length, details: checks };
 };

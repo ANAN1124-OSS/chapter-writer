@@ -115,6 +115,30 @@ html, body {
 .book-card.corrupt .book-card-title { color: var(--danger); }
 .book-card.corrupt .btn { align-self: flex-start; margin-top: 4px; }
 
+.book-card-more {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease, background .12s ease;
+}
+.book-card:hover .book-card-more,
+.book-card-more:focus-visible { opacity: 1; }
+.book-card-more:hover { background: var(--paper-deep); color: var(--ink); }
+
 .book-card.new-book {
   align-items: center;
   justify-content: center;
