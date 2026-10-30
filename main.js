@@ -429,6 +429,12 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'splitter') {
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.setSidebarWidth(420);`,
+          true
+        );
+        await sleep(400);
       }
       await sleep(500);
       const image = await win.webContents.capturePage();

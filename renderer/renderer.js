@@ -90,6 +90,8 @@
     contextIndex: -1,
     contextBook: null,
     importing: false,
+    sidebarWidth: 250,
+    sidebarDragging: false,
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -219,6 +221,59 @@
       fonts[cfg.editorFont] || fonts.serif
     );
     document.documentElement.style.setProperty('--editor-font-size', `${cfg.editorFontSize || 18}px`);
+  }
+
+  // ---------- 章节栏 / 写作区 可拖动分隔条 ----------
+  function clampSidebarWidth(width) {
+    const maxByWindow = Math.max(180, Math.round(window.innerWidth * 0.6));
+    return Math.min(Math.min(800, maxByWindow), Math.max(180, Math.round(Number(width) || 250)));
+  }
+
+  function applySidebarWidth(width) {
+    state.sidebarWidth = clampSidebarWidth(width);
+    document.documentElement.style.setProperty('--sidebar-width', `${state.sidebarWidth}px`);
+    return state.sidebarWidth;
+  }
+
+  function setupSidebarResizer() {
+    const resizer = $('sidebar-resizer');
+    if (!resizer) return;
+    let dragStartX = 0;
+    let dragStartWidth = 0;
+
+    resizer.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      state.sidebarDragging = true;
+      dragStartX = event.clientX;
+      dragStartWidth = state.sidebarWidth;
+      resizer.classList.add('dragging');
+      document.body.classList.add('resizing');
+      try { resizer.setPointerCapture(event.pointerId); } catch { /* 忽略 */ }
+    });
+
+    window.addEventListener('pointermove', (event) => {
+      if (!state.sidebarDragging) return;
+      applySidebarWidth(dragStartWidth + (event.clientX - dragStartX));
+    });
+
+    window.addEventListener('pointerup', async () => {
+      if (!state.sidebarDragging) return;
+      state.sidebarDragging = false;
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      try {
+        state.config = await call(api.setConfig, { editorSidebarWidth: state.sidebarWidth });
+      } catch { /* 记不住宽度不影响使用 */ }
+    });
+
+    // 双击恢复默认宽度
+    resizer.addEventListener('dblclick', async () => {
+      applySidebarWidth(250);
+      try {
+        state.config = await call(api.setConfig, { editorSidebarWidth: 250 });
+      } catch { /* 忽略 */ }
+    });
   }
 
   // ---------- 书架 ----------
@@ -1123,6 +1178,8 @@
 
     editorEl.addEventListener('input', onEditorInput);
 
+    setupSidebarResizer();
+
     // 导入进度（大书库导入可能要几十秒，分章/复制逐项汇报）
     api.onImportProgress((progress) => {
       if (!importProgressEl) return;
@@ -1185,6 +1242,7 @@
       hideContextMenu();
       hideExportMenu();
       hideBookMenu();
+      applySidebarWidth(state.sidebarWidth);
     });
   }
 
@@ -1253,6 +1311,8 @@
         await backToShelf();
       },
       shelfTitles: () => state.books.map((b) => b.title),
+      sidebarWidth: () => state.sidebarWidth,
+      setSidebarWidth: (width) => applySidebarWidth(width),
       async handleCloseRequest() {
         await handleCloseRequest();
       }
@@ -1268,6 +1328,7 @@
       toast(`读取配置失败：${err.message}`, 'error');
     }
     applyEditorStyle();
+    applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);
     showView('shelf');
     await refreshShelf();
     if (state.testMode) {

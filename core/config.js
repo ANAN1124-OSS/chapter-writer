@@ -11,7 +11,8 @@ const DEFAULTS = Object.freeze({
   booksRoot: DEFAULT_BOOKS_ROOT,
   windowBounds: { x: 60, y: 40, width: 1200, height: 760 },
   editorFont: 'serif',
-  editorFontSize: 18
+  editorFontSize: 18,
+  editorSidebarWidth: 250
 });
 
 function clampInt(value, min, max, fallback) {
@@ -29,6 +30,8 @@ function sanitize(raw) {
 
   cfg.editorFont = FONTS.includes(cfg.editorFont) ? cfg.editorFont : DEFAULTS.editorFont;
   cfg.editorFontSize = clampInt(cfg.editorFontSize, 12, 30, DEFAULTS.editorFontSize);
+  // 章节栏宽度（拖动分隔条调整，双击恢复默认）
+  cfg.editorSidebarWidth = clampInt(cfg.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

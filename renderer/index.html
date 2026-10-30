@@ -33,7 +33,7 @@
 
     <!-- ============ 编辑器 ============ -->
     <section id="editor-view" class="view editor-view hidden">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <button id="btn-back" class="btn ghost back-btn" type="button">← 书架</button>
         <div class="sidebar-book">
           <div class="book-title" id="book-title" title="书名"></div>
@@ -44,6 +44,7 @@
           <button id="btn-new-chapter" class="btn" type="button">＋ 新建章节</button>
         </div>
       </aside>
+      <div id="sidebar-resizer" class="sidebar-resizer" title="拖动调整章节栏宽度（双击恢复默认）"></div>
       <main class="editor-main">
         <header class="editor-header">
           <div class="chapter-title" id="chapter-title"></div>

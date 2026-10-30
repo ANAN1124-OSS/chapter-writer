@@ -357,5 +357,50 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.text()')) === '\n原文第一段\n'
   );
 
+  // 21. 章节栏 / 写作区 之间的分隔条可拖动，宽度写入配置
+  const initialSidebarWidth = await exec('window.__cwTest.sidebarWidth()');
+  const splitterScriptResult = await exec(`(() => {
+    try {
+      const resizer = document.getElementById('sidebar-resizer');
+      const rect = resizer.getBoundingClientRect();
+      const x = rect.left + 3;
+      const y = rect.top + 20;
+      resizer.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, button: 0, pointerId: 1 }));
+      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: x + 120, clientY: y }));
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x + 120, clientY: y, button: 0, pointerId: 1 }));
+      return 'ok';
+    } catch (err) {
+      return 'ERR:' + String((err && err.stack) || err);
+    }
+  })()`);
+  if (splitterScriptResult !== 'ok') throw new Error('分隔条模拟失败：' + splitterScriptResult);
+  await sleep(500);
+  const draggedWidth = await exec('window.__cwTest.sidebarWidth()');
+  check(
+    '拖动分隔条可以调整章节栏宽度',
+    Math.abs(draggedWidth - initialSidebarWidth - 120) <= 3,
+    { initialSidebarWidth, draggedWidth }
+  );
+  const domSidebarWidth = await exec(
+    `parseFloat(getComputedStyle(document.getElementById('sidebar')).width)`
+  );
+  check('章节栏宽度实际应用到页面', Math.abs(domSidebarWidth - draggedWidth) <= 1, {
+    domSidebarWidth,
+    draggedWidth
+  });
+  const savedSidebarWidth = await exec(
+    `window.api.getConfig().then((r) => (r.ok ? r.data.editorSidebarWidth : null))`
+  );
+  check('章节栏宽度写入配置（下次启动保持）', savedSidebarWidth === draggedWidth, {
+    savedSidebarWidth,
+    draggedWidth
+  });
+  await exec(
+    `document.getElementById('sidebar-resizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`
+  );
+  await sleep(400);
+  const resetWidth = await exec('window.__cwTest.sidebarWidth()');
+  check('双击分隔条恢复默认宽度', resetWidth === 250, { resetWidth });
+
   return { ok: true, checks: checks.length, details: checks };
 };
