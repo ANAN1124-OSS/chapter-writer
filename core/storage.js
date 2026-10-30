@@ -122,28 +122,68 @@ async function listTxtFiles(bookPath) {
     .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
 }
 
+// 并发上限工具：书架扫描时并行读多本书的 书目.json（机械盘/杀软环境下串行会明显慢）
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        results[index] = await mapper(items[index], index);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+// 书架扫描用的统计：字数走 书目.json 缓存，不再每次重读整本书；
+// 缓存缺失时只读缺的那几章并把缓存写回（老书首次扫描慢一点，之后秒开）。
 async function bookStats(bookPath, meta) {
   let totalChars = 0;
-  let latestMtime = 0;
-  const missing = [];
-  for (const c of meta.chapters) {
-    const p = assertInside(bookPath, c.file);
-    try {
-      const stat = await fs.stat(p);
-      const text = await fs.readFile(p, 'utf8');
-      totalChars += chaptersLib.countChars(stripBom(text));
-      if (stat.mtimeMs > latestMtime) latestMtime = stat.mtimeMs;
-    } catch (err) {
-      if (err.code === 'ENOENT') missing.push(c.file);
-      else throw err;
+  const needRead = [];
+  for (const chapter of meta.chapters) {
+    if (Number.isFinite(chapter.chars)) totalChars += chapter.chars;
+    else needRead.push(chapter);
+  }
+  if (needRead.length) {
+    let changed = false;
+    for (const chapter of needRead) {
+      try {
+        const text = await fs.readFile(assertInside(bookPath, chapter.file), 'utf8');
+        chapter.chars = chaptersLib.countChars(stripBom(text));
+        totalChars += chapter.chars;
+        changed = true;
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+    }
+    if (changed) {
+      try {
+        await writeBookMeta(bookPath, meta);
+      } catch { /* 缓存写不进去不影响书架显示 */ }
     }
   }
-  if (!latestMtime) {
+  const updatedAt = Date.parse(meta.updatedAt || meta.createdAt || '');
+  return { totalChars, latestMtime: Number.isFinite(updatedAt) ? updatedAt : Date.now() };
+}
+
+// 打开书/保存后校验用：并行 stat 每章文件，找出缺失的章节文件
+async function findMissingChapters(bookPath, meta, concurrency = 16) {
+  const flags = await mapLimit(meta.chapters, concurrency, async (chapter) => {
     try {
-      latestMtime = (await fs.stat(path.join(bookPath, BOOK_FILE))).mtimeMs;
-    } catch { latestMtime = Date.now(); }
-  }
-  return { totalChars, missing, latestMtime };
+      await fs.stat(assertInside(bookPath, chapter.file));
+      return null;
+    } catch (err) {
+      if (err.code === 'ENOENT') return chapter.file;
+      throw err;
+    }
+  });
+  return flags.filter(Boolean);
 }
 
 async function listBooks(booksRoot) {
@@ -154,39 +194,42 @@ async function listBooks(booksRoot) {
   } catch (err) {
     throw new StorageError('ROOT_UNREADABLE', `书架目录无法读取：${err.message}`);
   }
-  const books = [];
-  for (const ent of entries) {
-    if (!ent.isDirectory()) continue;
-    if (ent.name.startsWith('_') || ent.name.startsWith('.')) continue;
-    const bookPath = path.join(booksRoot, ent.name);
-    if (!(await exists(path.join(bookPath, BOOK_FILE)))) continue;
+
+  const candidates = entries
+    .filter((ent) => ent.isDirectory() && !ent.name.startsWith('_') && !ent.name.startsWith('.'))
+    .map((ent) => ({ folder: ent.name, bookPath: path.join(booksRoot, ent.name) }));
+
+  const scanned = await mapLimit(candidates, 12, async ({ folder, bookPath }) => {
     try {
       const meta = await readBookMeta(bookPath);
       const stats = await bookStats(bookPath, meta);
-      books.push({
+      return {
         path: bookPath,
-        folder: ent.name,
+        folder,
         status: 'ok',
-        title: meta.title || ent.name,
+        title: meta.title || folder,
         chapterCount: meta.chapters.length,
         totalChars: stats.totalChars,
         lastModified: stats.latestMtime,
-        missing: stats.missing
-      });
+        missing: []
+      };
     } catch (err) {
-      books.push({
+      if (err && err.code === 'NO_BOOK') return null; // 没有书目的普通文件夹，跳过
+      return {
         path: bookPath,
-        folder: ent.name,
+        folder,
         status: 'corrupt',
-        title: ent.name,
+        title: folder,
         chapterCount: 0,
         totalChars: 0,
         lastModified: 0,
         reason: err.message,
         missing: []
-      });
+      };
     }
-  }
+  });
+
+  const books = scanned.filter(Boolean);
   books.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
   return books;
 }
@@ -230,14 +273,20 @@ async function createBook(booksRoot, title) {
 
 async function openBook(bookPath) {
   const meta = await readBookMeta(bookPath);
-  const stats = await bookStats(bookPath, meta);
-  return { meta, missing: stats.missing, totalChars: stats.totalChars };
+  const [stats, missing] = await Promise.all([
+    bookStats(bookPath, meta),
+    findMissingChapters(bookPath, meta)
+  ]);
+  return { meta, missing, totalChars: stats.totalChars };
 }
 
 async function verifyBook(bookPath) {
   const meta = await readBookMeta(bookPath);
-  const stats = await bookStats(bookPath, meta);
-  return { chapterCount: meta.chapters.length, totalChars: stats.totalChars, missing: stats.missing };
+  const [missing, stats] = await Promise.all([
+    findMissingChapters(bookPath, meta),
+    bookStats(bookPath, meta)
+  ]);
+  return { chapterCount: meta.chapters.length, totalChars: stats.totalChars, missing };
 }
 
 async function loadChapterText(bookPath, file) {

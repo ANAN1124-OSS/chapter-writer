@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('api', {
   onCloseRequested: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());
   },
+  onImportProgress: (cb) => {
+    if (typeof cb === 'function') ipcRenderer.on('import:progress', (_event, progress) => cb(progress));
+  },
   reportDirty: (dirty) => ipcRenderer.send('app:dirty', Boolean(dirty)),
   closeReady: (allowed) => ipcRenderer.send('app:close-ready', Boolean(allowed))
 });

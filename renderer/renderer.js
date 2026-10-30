@@ -83,6 +83,7 @@
     modal: null,
     contextIndex: -1,
     contextBook: null,
+    importing: false,
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -739,28 +740,69 @@
   }
 
   // ---------- 导入 / 删除小说（书架级操作） ----------
-  async function importBooksFlow(explicitPaths) {
-    try {
-      const data = await call(api.importBooks, explicitPaths);
-      if (data.canceled) return { canceled: true };
-      const messages = [];
-      if (data.imported.length) {
-        messages.push(`已导入 ${data.imported.length} 本：${data.imported.map((b) => b.title).join('、')}`);
-      }
-      if (data.skipped.length) {
-        messages.push(`跳过 ${data.skipped.length} 个（${data.skipped.map((s) => s.reason).join('；')}）`);
-      }
-      if (data.failed.length) {
-        messages.push(`${data.failed.length} 个失败（${data.failed.map((f) => f.message).join('；')}）`);
-      }
-      if (!messages.length) messages.push('没有可导入的内容');
-      toast(messages.join('。'), data.failed.length ? 'error' : data.skipped.length ? 'warn' : 'info');
-      await refreshShelf();
-      return data;
-    } catch (err) {
-      toast(`导入失败：${err.message}`, 'error');
-      return { error: err.message };
+  let importProgressEl = null;
+
+  function setImportProgressText(text) {
+    if (importProgressEl) importProgressEl.textContent = text;
+  }
+
+  function summarizeImport(imported, skipped, failed) {
+    const messages = [];
+    if (imported.length) {
+      const titles = imported.map((b) => b.title);
+      const shown = titles.slice(0, 3).join('、');
+      messages.push(
+        imported.length > 3
+          ? `已导入 ${imported.length} 本：${shown} 等`
+          : `已导入 ${imported.length} 本：${shown}`
+      );
     }
+    if (skipped.length) {
+      const reasons = [...new Set(skipped.map((s) => s.reason))].slice(0, 2).join('；');
+      messages.push(`跳过 ${skipped.length} 个（${reasons}）`);
+    }
+    if (failed.length) {
+      const reasons = failed.map((f) => f.message).slice(0, 2).join('；');
+      messages.push(`${failed.length} 个失败（${reasons}）`);
+    }
+    return messages.join('。') || '没有可导入的内容';
+  }
+
+  async function importBooksFlow(explicitPaths) {
+    if (state.importing) return { busy: true };
+    state.importing = true;
+    const importButton = $('btn-import');
+    if (importButton) importButton.disabled = true;
+    importProgressEl = document.createElement('div');
+    importProgressEl.className = 'toast';
+    importProgressEl.textContent = '正在分析要导入的内容…';
+    $('toast-area').appendChild(importProgressEl);
+
+    let data = null;
+    let error = null;
+    try {
+      data = await call(api.importBooks, explicitPaths);
+    } catch (err) {
+      error = err;
+    } finally {
+      if (importProgressEl && importProgressEl.parentNode) importProgressEl.remove();
+      importProgressEl = null;
+      state.importing = false;
+      if (importButton) importButton.disabled = false;
+    }
+
+    if (error) {
+      toast(`导入失败：${error.message}`, 'error');
+      return { error: error.message };
+    }
+    if (data.canceled) return { canceled: true };
+
+    toast(
+      summarizeImport(data.imported, data.skipped, data.failed),
+      data.failed.length ? 'error' : data.skipped.length ? 'warn' : 'info'
+    );
+    await refreshShelf();
+    return data;
   }
 
   async function deleteBookFlow(book, { skipConfirm = false } = {}) {
@@ -1054,6 +1096,22 @@
     });
 
     editorEl.addEventListener('input', onEditorInput);
+
+    // 导入进度（大书库导入可能要几十秒，分章/复制逐项汇报）
+    api.onImportProgress((progress) => {
+      if (!importProgressEl) return;
+      if (!progress || !progress.total) {
+        setImportProgressText('正在分析要导入的内容…');
+        return;
+      }
+      if (progress.done >= progress.total) {
+        setImportProgressText(`正在收尾（共 ${progress.total} 项）…`);
+        return;
+      }
+      setImportProgressText(
+        `正在导入 ${Math.min(progress.done + 1, progress.total)}/${progress.total}：${progress.current || ''}`
+      );
+    });
 
     // 主进程拦截到关窗/退出时，由这里决定「保存并退出 / 不保存退出 / 取消」
     api.onCloseRequested(handleCloseRequest);

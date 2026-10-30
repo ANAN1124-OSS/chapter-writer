@@ -186,11 +186,16 @@ function registerIpc() {
   handle('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
 
   handle('chapter:save', async (bookPath, chapterId, text) => {
-    const meta = await storage.readBookMeta(bookPath);
-    const chapter = meta.chapters.find((c) => c.id === chapterId);
-    if (!chapter) throw new storage.StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
-    const result = await storage.saveChapterText(bookPath, chapter.file, String(text == null ? '' : text));
-    return { ...result, file: chapter.file };
+    return storage.withBookLock(bookPath, async () => {
+      const meta = await storage.readBookMeta(bookPath);
+      const chapter = meta.chapters.find((c) => c.id === chapterId);
+      if (!chapter) throw new storage.StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+      const result = await storage.saveChapterText(bookPath, chapter.file, String(text == null ? '' : text));
+      // 同步章节字数缓存，书架就不用为了算字数去重读整本书
+      chapter.chars = result.chars;
+      await storage.writeBookMeta(bookPath, meta);
+      return { ...result, file: chapter.file };
+    });
   });
 
   handle('chapter:create', async (bookPath, insertIndex, name) =>
@@ -260,7 +265,11 @@ function registerIpc() {
       }
       dirs = filePaths;
     }
-    return importer.importFolders(cfg.booksRoot, dirs);
+    return importer.importFolders(cfg.booksRoot, dirs, {
+      onProgress: (progress) => {
+        if (win && !win.isDestroyed()) win.webContents.send('import:progress', progress);
+      }
+    });
   });
 
   handle('book:delete', async (bookPath) => {

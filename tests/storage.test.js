@@ -201,3 +201,18 @@ test('整本书兜底删除：移入书架 _trash，扫描时不再出现', asyn
   const meta = await storage.readBookMeta(dest);
   assert.equal(meta.title, '待删的书');
 });
+
+test('字数缓存：旧书首次扫描会补缓存，之后书架统计不再重读全书', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '字数缓存');
+  const meta = await storage.readBookMeta(bookPath);
+  // 直接写文件，模拟「没有 chars 缓存的旧书」
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '雨下了一夜。');
+  const books = await storage.listBooks(root);
+  assert.equal(books[0].totalChars, 6);
+  const cached = await storage.readBookMeta(bookPath);
+  assert.equal(cached.chapters[0].chars, 6, '首次扫描应把字数缓存写回书目');
+  // 再扫一次结果一致
+  const again = await storage.listBooks(root);
+  assert.equal(again[0].totalChars, 6);
+});

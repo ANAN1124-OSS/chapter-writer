@@ -275,5 +275,40 @@ module.exports = async function runScenario(ctx) {
   );
   check('删除后原书文件夹已从书架目录移走', await fs.access(importedPath).then(() => false, () => true));
 
+  // 18. 导入小说收藏夹：每个 txt 是一本书，自动分章
+  const collectionSrc = path.join(path.dirname(booksRoot), '小说收藏夹');
+  await fs.mkdir(collectionSrc, { recursive: true });
+  await fs.writeFile(
+    path.join(collectionSrc, '小说甲 - 作者.txt'),
+    '第1章 开端\n\n甲的正文\n\n第2章 转折\n\n甲的二段',
+    'utf8'
+  );
+  await fs.writeFile(
+    path.join(collectionSrc, '小说乙 - 作者.txt'),
+    '楔子\n\n乙的引子\n\n第一章 雪夜\n\n乙的正文',
+    'utf8'
+  );
+  await exec(`window.__cwTest.importPaths([${JSON.stringify(collectionSrc)}])`);
+  await sleep(500);
+  const shelfCollection = await storage.listBooks(booksRoot);
+  const bookA = shelfCollection.find((b) => b.title === '小说甲 - 作者');
+  const bookB = shelfCollection.find((b) => b.title === '小说乙 - 作者');
+  check('收藏夹里的每个 txt 都导入成一本书', Boolean(bookA && bookB), shelfCollection.map((b) => b.title));
+  check(
+    '导入时自动按标题行分章',
+    Boolean(bookA && bookA.chapterCount === 2 && bookB && bookB.chapterCount === 2),
+    { a: bookA && bookA.chapterCount, b: bookB && bookB.chapterCount }
+  );
+  const importedMetaA = await storage.readBookMeta(bookA.path);
+  check(
+    '分章后的章节名正确',
+    JSON.stringify(importedMetaA.chapters.map((c) => c.name)) === JSON.stringify(['开端', '转折'])
+  );
+  const importedMetaB = await storage.readBookMeta(bookB.path);
+  check(
+    '楔子 / 第一章 也能识别',
+    JSON.stringify(importedMetaB.chapters.map((c) => c.name)) === JSON.stringify(['楔子', '雪夜'])
+  );
+
   return { ok: true, checks: checks.length, details: checks };
 };
