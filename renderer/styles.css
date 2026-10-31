@@ -1321,6 +1321,21 @@ body.resizing .editor {
   border-top: 1px solid var(--line);
 }
 
+/* ---------- 敏感词预检（结果列表复用校对面板的 .proofread-* 样式） ---------- */
+.sensitive-wordlist {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-deep);
+}
+.sensitive-wordlist #sensitive-wordlist-text { flex: 1; min-width: 0; }
+.sensitive-wordlist .warn { color: var(--warn); }
+.sensitive-word { color: var(--danger); font-weight: 600; }
+
 /* ---------- 灵感箱（碎片速记） ---------- */
 .fragment-modal { width: min(640px, 92vw); }
 .fragment-text {

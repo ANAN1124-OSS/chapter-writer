@@ -92,6 +92,7 @@
                 <button type="button" data-action="copy">复制整本到剪贴板</button>
                 <button type="button" data-action="txt">导出 TXT…</button>
                 <button type="button" data-action="epub" title="整本书导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
+                <button type="button" data-action="sensitive" title="按你自己的词表检查命中位置：只报告、不改正文、不写盘（应用不内置任何词表）">敏感词预检…</button>
                 <button type="button" data-action="folder">打开本书文件夹</button>
                 <div class="dropdown-sep"></div>
                 <button type="button" data-action="history" title="查看书内 _trash 的替换 / 整理 / 删除章节 / 书目备份">本书历史…</button>
@@ -191,6 +192,42 @@
       </p>
       <div class="modal-buttons">
         <button id="btn-proofread-close" class="btn ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 敏感词预检（只报告，不改动；词表归作者管理） ============ -->
+  <div id="sensitive-backdrop" class="backdrop hidden">
+    <div class="modal proofread-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">敏感词预检</h2>
+      <p class="modal-message">
+        只按<strong>你自己的词表</strong>检查，<strong>应用不内置任何词表</strong>；把命中的位置列出来，
+        <strong>不改正文、不写盘</strong>。要不要改、怎么改都由你自己决定。
+      </p>
+      <div class="sensitive-wordlist">
+        <span id="sensitive-wordlist-text" class="muted small">正在读取词表…</span>
+        <button id="btn-sensitive-pick" class="btn ghost tiny" type="button">选择词表…</button>
+      </div>
+      <div class="proofread-row">
+        <label class="field inline">
+          <span>范围</span>
+          <select id="sensitive-scope" class="text-input">
+            <option value="current">当前这一章</option>
+            <option value="book">整本书</option>
+          </select>
+        </label>
+        <button id="btn-sensitive-run" class="btn ghost" type="button">开始预检</button>
+        <span id="sensitive-busy" class="muted small hidden">正在检查…</span>
+      </div>
+      <div class="proofread-summary" id="sensitive-summary"></div>
+      <div class="proofread-results" id="sensitive-results"></div>
+      <p class="muted small">
+        词表每行一个词，空行忽略、重复的词只算一次；只做字面匹配（<strong>区分大小写</strong>），
+        同一处有多个词重叠时只报最长的那个。当前章未保存的内容也参与检查，但不会写盘；
+        整本检查只读磁盘，不改任何 txt 和 <code>书目.json</code>。
+      </p>
+      <div class="modal-buttons">
+        <button id="btn-sensitive-close" class="btn ghost" type="button">关闭</button>
       </div>
     </div>
   </div>
@@ -539,6 +576,17 @@
         （只清理应用自己生成的快照目录，不动其它备份）。切章、关窗、导出时会提醒你保存，
         也请自己定期把书库复制到网盘或移动硬盘。
       </p>
+      <div class="field-group" id="settings-sensitive-group">敏感词预检</div>
+      <label class="field" id="settings-sensitive-field">
+        <span>敏感词表（每行一个词；应用不内置任何词表，只按你的词表报告，不改正文）</span>
+        <div class="field-row">
+          <input id="settings-sensitive-path" class="text-input" type="text" readonly
+                 placeholder="未选择（预检前需要先选一个自己的词表 txt）" />
+          <button id="btn-pick-sensitive" class="btn ghost" type="button">选择…</button>
+          <button id="btn-clear-sensitive" class="btn ghost" type="button">清除</button>
+        </div>
+        <span id="settings-sensitive-status" class="muted small"></span>
+      </label>
       </div>
       <div class="modal-buttons">
         <button id="btn-reset-book-display" class="btn ghost hidden" type="button" title="忘掉这本书的单独显示设置，恢复用全局默认">恢复本书默认</button>

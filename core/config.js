@@ -58,7 +58,10 @@ const DEFAULTS = Object.freeze({
   snapshotKeepDays: snapshotLib.DEFAULT_KEEP_DAYS,
   // 每日写作目标（字数）：0 = 不设目标；只统计保存动作写下的正字数。
   // 统计本身存在 userData/stats.json，不写进书库。
-  dailyGoal: statsLib.DEFAULT_GOAL
+  dailyGoal: statsLib.DEFAULT_GOAL,
+  // 敏感词预检用的词表（作者自己的 txt，每行一个词）。应用不内置任何词表；
+  // 这里只记绝对路径，词表文件本身只读、不复制、不改写。没设置 = ''。
+  sensitiveWordsPath: ''
 });
 
 function clampInt(value, min, max, fallback) {
@@ -185,6 +188,11 @@ function sanitize(raw) {
   );
   // 每日目标：0 = 不设目标；负数 / NaN 回落 0，超大值夹到上限；旧配置没有这个键照常启动。
   cfg.dailyGoal = statsLib.normalizeGoal(cfg.dailyGoal, DEFAULTS.dailyGoal);
+  // 敏感词表路径：只做基本清洗（非字符串 / 超长 → 未设置）；文件不存在时由预检面板提示，
+  // 不会因为词表被移走就让应用起不来。旧配置没有这个键 = 未设置。
+  const sensitiveWordsPath =
+    typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath.trim() : '';
+  cfg.sensitiveWordsPath = sensitiveWordsPath.length > 1000 ? '' : sensitiveWordsPath;
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

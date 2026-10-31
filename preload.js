@@ -33,6 +33,12 @@ contextBridge.exposeInMainWorld('api', {
   proofreadText: (text, options) => invoke('text:proofread', text, options),
   proofreadBook: (bookPath, options, override) =>
     invoke('book:proofread', bookPath, options, override),
+  // 敏感词预检（只报告、不改动）：词表由作者指定，主进程只读词表；渲染层拿不到词表内容
+  sensitiveWordsInfo: () => invoke('sensitive:words-info'),
+  pickSensitiveWords: () => invoke('sensitive:pick-words'),
+  sensitiveCheckText: (text, options) => invoke('text:sensitive-check', text, options),
+  sensitiveCheckBook: (bookPath, options, override) =>
+    invoke('book:sensitive-check', bookPath, options, override),
   // Ctrl+G 跳章：章号 / 章名关键词的纯匹配（主进程只算不读盘）
   jumpMatch: (chapters, query, options) => invoke('jump:match', chapters, query, options),
   createChapter: (bookPath, insertIndex, name, volumeId) =>

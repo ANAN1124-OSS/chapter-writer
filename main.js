@@ -41,6 +41,7 @@ const textMenu = require('./core/textmenu');
 const statsLib = require('./core/stats');
 const epubLib = require('./core/epub');
 const fragmentsLib = require('./core/fragments');
+const sensitiveLib = require('./core/sensitive');
 
 let win = null;
 let configStore = null;
@@ -369,6 +370,40 @@ function registerIpc() {
     return proofreadLib.proofreadText(text, options);
   });
 
+  // 敏感词预检（提案 5.2）：词表完全由作者管理，应用不内置任何词表。
+  // 词表路径存在 config 里（渲染层不传路径）；这里只读词表、只报告命中，绝不改正文、不写盘。
+  // 渲染层也拿不到词表内容——只回数量与状态（publicWordListInfo 会剥掉 words）。
+  handle('sensitive:words-info', async () => {
+    const cfg = await getConfig();
+    return sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(cfg.sensitiveWordsPath));
+  });
+
+  // 选词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
+  handle('sensitive:pick-words', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: '选择敏感词表（每行一个词）',
+      buttonLabel: '使用这个词表',
+      properties: ['openFile'],
+      filters: [
+        { name: '文本文件', extensions: ['txt'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    });
+    if (canceled || !filePaths || !filePaths.length) return { canceled: true };
+    const picked = sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(filePaths[0]));
+    return { canceled: false, ...picked };
+  });
+
+  handle('text:sensitive-check', async (text, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    const cfg = await getConfig();
+    const list = await sensitiveLib.readWordListFile(cfg.sensitiveWordsPath);
+    const wordList = sensitiveLib.publicWordListInfo(list);
+    if (!list.ok) return { ok: false, code: list.code, message: list.message, wordList };
+    const result = sensitiveLib.scanText(text, list.words, options);
+    return { ok: true, ...result, wordList };
+  });
+
   // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
   handle('text:find', async (text, query, options) => {
     if (typeof text !== 'string') throw new Error('正文必须是文本');
@@ -604,6 +639,89 @@ function registerIpc() {
       chapterHitCount: chapters.length,
       skippedChapters,
       truncated: truncated || total > issues.length,
+      options: limits
+    };
+  });
+
+  // 敏感词预检整本（提案 5.2）：逐章只读磁盘，按作者词表列出命中；全程不写盘。
+  // 当前章未保存的内容用 override 传进来（只参与这一次检查，和导出 / 校对同一个惯例）。
+  // 每章明细上限由 core/sensitive.js 的 maxIssues 控制，整本明细上限 1500 条，但总数照实统计。
+  handleBook('book:sensitive-check', async (bookPath, options, override) => {
+    const cfg = await getConfig();
+    const list = await sensitiveLib.readWordListFile(cfg.sensitiveWordsPath);
+    const wordList = sensitiveLib.publicWordListInfo(list);
+    if (!list.ok) return { ok: false, code: list.code, message: list.message, wordList };
+    const meta = await storage.readBookMeta(bookPath);
+    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    const limits = sensitiveLib.sanitizeOptions(options);
+    const matches = [];
+    const chapters = [];
+    const byWordMap = new Map();
+    let total = 0;
+    let truncated = false;
+    let skippedChapters = 0;
+    for (let index = 0; index < meta.chapters.length; index += 1) {
+      const chapter = meta.chapters[index];
+      let text;
+      if (index === overrideIndex) {
+        text = override.text;
+      } else {
+        try {
+          text = (await storage.loadChapterText(bookPath, chapter.file)).text;
+        } catch (err) {
+          if (err.code === 'CHAPTER_MISSING') {
+            skippedChapters += 1; // 缺文件的章节跳过，不让整本预检失败
+            continue;
+          }
+          throw err;
+        }
+      }
+      const result = sensitiveLib.scanText(text, list.words, limits);
+      total += result.total;
+      for (const item of result.byWord) {
+        byWordMap.set(item.word, (byWordMap.get(item.word) || 0) + item.count);
+      }
+      if (result.total) {
+        chapters.push({
+          chapterId: chapter.id,
+          chapterIndex: index,
+          name: chapter.name,
+          total: result.total,
+          truncated: result.truncated
+        });
+      }
+      if (result.truncated) truncated = true;
+      for (const match of result.issues) {
+        if (matches.length >= sensitiveLib.BOOK_ISSUE_LIMIT) {
+          truncated = true;
+          break;
+        }
+        matches.push({
+          ...match,
+          chapterId: chapter.id,
+          chapterIndex: index,
+          chapterName: chapter.name
+        });
+      }
+    }
+    const byWord = Array.from(byWordMap, ([word, count]) => ({ word, count }))
+      .sort((a, b) => b.count - a.count || (a.word < b.word ? -1 : a.word > b.word ? 1 : 0))
+      .slice(0, sensitiveLib.BY_WORD_LIMIT);
+    return {
+      ok: true,
+      scope: 'book',
+      total,
+      matches,
+      byWord,
+      wordHitCount: byWordMap.size,
+      wordCount: list.words.length,
+      chapters,
+      chapterCount: meta.chapters.length,
+      // 有命中的章数（chapters 只收有命中的章）
+      chapterHitCount: chapters.length,
+      skippedChapters,
+      truncated: truncated || total > matches.length,
+      wordList,
       options: limits
     };
   });
@@ -1027,7 +1145,8 @@ async function runAutomation() {
       } else if (
         screenshotDialog === 'settings' ||
         screenshotDialog === 'settings-snapshot' ||
-        screenshotDialog === 'settings-stats'
+        screenshotDialog === 'settings-stats' ||
+        screenshotDialog === 'settings-sensitive'
       ) {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
@@ -1045,6 +1164,13 @@ async function runAutomation() {
           await sleep(600);
           await win.webContents.executeJavaScript(
             `const el = document.getElementById('settings-stats-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-sensitive') {
+          // 开发截图用：滚到「敏感词预检」词表设置
+          await sleep(600);
+          await win.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-sensitive-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         }
@@ -1111,6 +1237,14 @@ async function runAutomation() {
         await sleep(120);
         await win.webContents.executeJavaScript(`window.__cwTest.proofreadRun();`, true);
         await sleep(800);
+      } else if (screenshotDialog === 'sensitive') {
+        // 开发截图用：打开敏感词预检面板（先等当前章自动预检完），再切整本跑一遍（只读）
+        await win.webContents.executeJavaScript(`window.__cwTest.openSensitivePanel();`, true);
+        await sleep(900);
+        await win.webContents.executeJavaScript(`window.__cwTest.setSensitiveScope('book');`, true);
+        await sleep(120);
+        await win.webContents.executeJavaScript(`window.__cwTest.sensitiveRun();`, true);
+        await sleep(900);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',

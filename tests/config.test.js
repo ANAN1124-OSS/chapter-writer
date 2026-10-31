@@ -396,3 +396,39 @@ test('每日目标配置：写盘 / 读回，只影响 dailyGoal', async () => {
   await store.set({ dailyGoal: 0 });
   assert.equal((await createConfigStore(dir).get()).dailyGoal, 0);
 });
+
+test('敏感词表配置：默认未设置，旧配置缺字段照常启动，脏值清洗成空', async () => {
+  const dir = await mkTmp();
+  assert.equal((await createConfigStore(dir).get()).sensitiveWordsPath, '');
+  // 模拟旧配置：完全没有 sensitiveWordsPath
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 1200 }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.sensitiveWordsPath, '');
+  assert.equal(cfg.dailyGoal, 1200, '其它字段不受影响');
+
+  assert.equal(sanitize({ sensitiveWordsPath: 123 }).sensitiveWordsPath, '');
+  assert.equal(sanitize({ sensitiveWordsPath: null }).sensitiveWordsPath, '');
+  assert.equal(sanitize({ sensitiveWordsPath: '   ' }).sensitiveWordsPath, '');
+  assert.equal(
+    sanitize({ sensitiveWordsPath: '  D:\\词表\\敏感词.txt  ' }).sensitiveWordsPath,
+    'D:\\词表\\敏感词.txt'
+  );
+  assert.equal(sanitize({ sensitiveWordsPath: 'x'.repeat(1001) }).sensitiveWordsPath, '');
+});
+
+test('敏感词表配置：写盘 / 读回，清除后落盘为空', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ sensitiveWordsPath: 'D:\\词表\\我的词表.txt' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.sensitiveWordsPath, 'D:\\词表\\我的词表.txt');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.sensitiveWordsPath, 'D:\\词表\\我的词表.txt');
+
+  await store.set({ sensitiveWordsPath: '' });
+  assert.equal((await createConfigStore(dir).get()).sensitiveWordsPath, '');
+});

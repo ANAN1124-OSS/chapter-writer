@@ -136,6 +136,12 @@
     proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, ... }
     proofreadScope: 'current', // 校对范围：current = 当前章；book = 整本
     proofreadBusy: false, // 校对进行中（防重复触发）
+    sensitive: null, // 敏感词预检结果：{ ok, scope, total, matches, byWord, chapters, ... }
+    sensitiveScope: 'current', // 预检范围：current = 当前章；book = 整本
+    sensitiveBusy: false, // 预检进行中（防重复触发）
+    sensitiveWordList: null, // 当前词表状态：{ ok, path, name, count, code, message, stats }
+    sensitiveWordsDraft: '', // 设置里刚选的词表路径（点「保存设置」才落配置）
+    sensitiveWordsInfo: null, // 设置弹层里显示的词表状态（读取当前草稿对应的词表）
     fragments: [], // 灵感箱列表（_碎片 顶层的 txt，最新在前）
     fragmentSelected: null, // 插入面板里当前选中的碎片 { name, text, chars }
     fragmentBusy: false, // 正在保存碎片（防重复写）
@@ -3529,7 +3535,8 @@
   }
 
   // 正文可能在上次检查之后被改过：先按位置核对，对不上就在附近再找一次，找不到就落回原位置
-  function proofreadRangeAt(text, issue) {
+  // （校对 / 敏感词预检共用：都是「按 index + 命中的文字」在编辑区里定位）
+  function matchRangeAt(text, issue) {
     const source = String(text == null ? '' : text);
     const match = String(issue.match || '');
     const fallbackStart = Math.min(Math.max(0, Number(issue.index) || 0), source.length);
@@ -3567,7 +3574,7 @@
         return { ok: false, canceled: Boolean(switched && switched.canceled) };
       }
     }
-    const range = proofreadRangeAt(editorEl.value, issue);
+    const range = matchRangeAt(editorEl.value, issue);
     editorEl.focus();
     editorEl.setSelectionRange(range.start, range.end);
     scrollCaretIntoView(range.start);
@@ -3633,6 +3640,331 @@
       return { ok: false, message: err.message };
     } finally {
       setProofreadBusy(false);
+    }
+  }
+
+  // ---------- 敏感词预检（只报告，不改动；提案 5.2） ----------
+  // 词表完全由作者管理：应用不内置任何词表，只按作者在设置里选的 txt（每行一个词）报告命中。
+  // 当前章用编辑区内容（未保存也算，只参与检查）；整本由主进程逐章只读磁盘，全程不写盘。
+  const SENSITIVE_ROW_LIMIT = 300;
+
+  // 词表状态文案（面板 / 设置共用）：未设置、文件没了、编码坏了都直说
+  function sensitiveWordListText(info) {
+    if (!info) return '正在读取词表…';
+    if (!info.ok) {
+      if (info.code === 'WORD_LIST_NOT_CONFIGURED') {
+        return '还没有指定词表（应用不内置词表，请选一个自己的 txt）';
+      }
+      return info.message || '词表读取失败';
+    }
+    let text = `词表：${info.name}（${info.count} 个词）`;
+    const skipped = [];
+    if (info.stats && info.stats.duplicates) skipped.push(`${info.stats.duplicates} 个重复`);
+    if (info.stats && info.stats.tooLong) skipped.push(`${info.stats.tooLong} 行超长`);
+    if (info.stats && info.stats.truncated) skipped.push('超过 5000 个只取前 5000 个');
+    if (skipped.length) text += `（已跳过 ${skipped.join('、')}）`;
+    return text;
+  }
+
+  function renderSensitiveWordList() {
+    const el = $('sensitive-wordlist-text');
+    if (!el) return;
+    const info = state.sensitiveWordList;
+    el.textContent = sensitiveWordListText(info);
+    el.classList.toggle('warn', Boolean(info && info.ok === false));
+  }
+
+  // 只读：取当前配置里的词表状态（不把词表内容带到渲染层）
+  async function refreshSensitiveWordList() {
+    try {
+      state.sensitiveWordList = await call(api.sensitiveWordsInfo);
+    } catch (err) {
+      state.sensitiveWordList = { ok: false, code: 'ERROR', message: `读取词表失败：${err.message}` };
+    }
+    renderSensitiveWordList();
+    return state.sensitiveWordList;
+  }
+
+  async function openSensitivePanel() {
+    if (!state.bookPath) {
+      toast('先打开一本书再预检', 'warn');
+      return false;
+    }
+    hideFormatMenu();
+    hideExportMenu();
+    if (!$('find-backdrop').classList.contains('hidden')) closeFindPanel();
+    if (!$('proofread-backdrop').classList.contains('hidden')) closeProofreadPanel();
+    $('sensitive-scope').value = state.sensitiveScope === 'book' ? 'book' : 'current';
+    $('sensitive-backdrop').classList.remove('hidden');
+    await refreshSensitiveWordList();
+    // 词表可用就先检查一遍当前章，不用再点一次；词表有问题只显示提示
+    if (state.sensitiveWordList && state.sensitiveWordList.ok) {
+      await runSensitiveCheck();
+    } else {
+      state.sensitive = null;
+      renderSensitiveSummary();
+      renderSensitiveResults();
+    }
+    return true;
+  }
+
+  function closeSensitivePanel() {
+    $('sensitive-backdrop').classList.add('hidden');
+  }
+
+  function sensitiveScope() {
+    return $('sensitive-scope').value === 'book' ? 'book' : 'current';
+  }
+
+  function setSensitiveBusy(busy) {
+    state.sensitiveBusy = Boolean(busy);
+    $('sensitive-busy').classList.toggle('hidden', !busy);
+    $('btn-sensitive-run').disabled = Boolean(busy);
+  }
+
+  function sensitiveChapterTitle(match) {
+    let index = Number(match.chapterIndex);
+    const byIndex =
+      Number.isInteger(index) && index >= 0 && state.chapters[index] && state.chapters[index].id === match.chapterId;
+    if (!byIndex) index = state.chapters.findIndex((chapter) => chapter.id === match.chapterId);
+    if (index < 0) return String(match.chapterName || '').trim() || '（已删除的章节）';
+    return chapterTitle(index, match.chapterName);
+  }
+
+  function sensitivePositionText(match) {
+    const line = Number(match.line);
+    const column = Number(match.column);
+    if (!Number.isFinite(line) || !Number.isFinite(column)) return '';
+    return `第 ${line} 行 · 第 ${column} 字`;
+  }
+
+  function sensitiveWordSummary(payload) {
+    if (!payload.byWord || !payload.byWord.length) return '';
+    return (
+      '：' +
+      payload.byWord
+        .slice(0, 6)
+        .map((item) => `${item.word} ${item.count}`)
+        .join(' · ')
+    );
+  }
+
+  function renderSensitiveSummary() {
+    const summary = $('sensitive-summary');
+    if (!summary) return;
+    const payload = state.sensitive;
+    const info = state.sensitiveWordList;
+    if (!payload) {
+      if (info && info.ok) {
+        summary.textContent = '点「开始预检」检查当前章；切成整本后点一次会通读全书。';
+      } else if (info) {
+        summary.textContent = info.message || '词表不可用';
+      } else {
+        summary.textContent = '';
+      }
+      return;
+    }
+    if (payload.ok === false) {
+      summary.textContent = payload.message || '词表不可用';
+      return;
+    }
+    const truncatedNote = payload.truncated ? '（明细只列出一部分）' : '';
+    const words = sensitiveWordSummary(payload);
+    if (payload.scope === 'book') {
+      const skipped = Number(payload.skippedChapters) || 0;
+      summary.textContent = payload.total
+        ? `全书 ${payload.chapterCount} 章命中 ${payload.total} 处，涉及 ${payload.chapterHitCount} 章、${payload.wordHitCount} 个词${words}${truncatedNote}`
+        : `全书 ${payload.chapterCount} 章没有命中词表里的词${
+            skipped ? `（跳过 ${skipped} 个缺文件的章节）` : ''
+          }`;
+      return;
+    }
+    summary.textContent = payload.total
+      ? `本章命中 ${payload.total} 处，涉及 ${payload.wordHitCount} 个词${words}${truncatedNote}`
+      : '本章没有命中词表里的词（只按你的词表做字面匹配，不判断文字好坏）';
+  }
+
+  function renderSensitiveResults() {
+    const box = $('sensitive-results');
+    if (!box) return;
+    box.innerHTML = '';
+    const payload = state.sensitive;
+    if (!payload || payload.ok === false) return;
+    if (!payload.matches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'proofread-empty';
+      empty.textContent = payload.scope === 'book' ? '整本书没有命中词表里的词' : '这一章没有命中词表里的词';
+      box.appendChild(empty);
+      return;
+    }
+    const rows = payload.matches.slice(0, SENSITIVE_ROW_LIMIT);
+    for (const match of rows) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'proofread-result sensitive-result';
+      row.dataset.word = match.word;
+      row.dataset.chapterId = match.chapterId == null ? '' : match.chapterId;
+      row.dataset.index = String(match.index);
+
+      const head = document.createElement('div');
+      head.className = 'proofread-head';
+      const word = document.createElement('span');
+      word.className = 'proofread-rule sensitive-word';
+      word.textContent = `「${match.word}」`;
+      head.appendChild(word);
+      if (payload.scope === 'book') {
+        const chapter = document.createElement('span');
+        chapter.className = 'proofread-chapter';
+        chapter.textContent = sensitiveChapterTitle(match);
+        head.appendChild(chapter);
+      }
+      const pos = document.createElement('span');
+      pos.className = 'proofread-pos';
+      pos.textContent = sensitivePositionText(match);
+      head.appendChild(pos);
+
+      const snippet = document.createElement('div');
+      snippet.className = 'proofread-snippet';
+      if (match.snippet) {
+        if (match.snippet.ellipsisStart) snippet.appendChild(document.createTextNode('…'));
+        snippet.appendChild(document.createTextNode(match.snippet.before || ''));
+        const mark = document.createElement('mark');
+        mark.textContent = match.snippet.match || '';
+        snippet.appendChild(mark);
+        snippet.appendChild(document.createTextNode(match.snippet.after || ''));
+        if (match.snippet.ellipsisEnd) snippet.appendChild(document.createTextNode('…'));
+      }
+      row.append(head, snippet);
+      row.addEventListener('click', () => jumpToSensitiveMatch(match));
+      box.appendChild(row);
+    }
+    if (payload.matches.length > rows.length) {
+      const more = document.createElement('div');
+      more.className = 'proofread-more';
+      more.textContent = `还有 ${payload.matches.length - rows.length} 条没有显示（一次最多列 ${SENSITIVE_ROW_LIMIT} 条；可以先只预检当前章）`;
+      box.appendChild(more);
+    }
+  }
+
+  async function jumpToSensitiveMatch(match) {
+    if (!state.bookPath) return { ok: false };
+    let index = Number(match.chapterIndex);
+    const byIndex =
+      Number.isInteger(index) && index >= 0 && state.chapters[index] && state.chapters[index].id === match.chapterId;
+    if (!byIndex) index = state.chapters.findIndex((chapter) => chapter.id === match.chapterId);
+    if (index < 0 && match.chapterId == null) index = state.index;
+    if (index < 0) {
+      toast('这一章已经不存在了', 'warn');
+      return { ok: false };
+    }
+    closeSensitivePanel();
+    if (index !== state.index) {
+      const switched = await switchChapter(index);
+      if (!switched || switched.ok === false) {
+        return { ok: false, canceled: Boolean(switched && switched.canceled) };
+      }
+    }
+    const range = matchRangeAt(editorEl.value, match);
+    editorEl.focus();
+    editorEl.setSelectionRange(range.start, range.end);
+    scrollCaretIntoView(range.start);
+    return { ok: true, start: range.start, end: range.end };
+  }
+
+  async function runSensitiveCheck() {
+    if (!state.bookPath || !state.chapters.length) {
+      $('sensitive-summary').textContent = '这本书里还没有章节';
+      return { ok: false, message: '没有章节' };
+    }
+    if (state.sensitiveBusy) return { ok: false, message: '正在预检中' };
+    const scope = sensitiveScope();
+    state.sensitiveScope = scope;
+    setSensitiveBusy(true);
+    $('sensitive-summary').textContent =
+      scope === 'book' ? '正在通读全书（只读，不改正文）…' : '正在检查当前章…';
+    $('sensitive-results').innerHTML = '';
+    try {
+      let payload;
+      if (scope === 'book') {
+        const override = currentChapterRef();
+        payload = await call(api.sensitiveCheckBook, state.bookPath, {}, override);
+        payload.scope = 'book';
+      } else {
+        const chapter = state.chapters[state.index];
+        const res = await call(api.sensitiveCheckText, editorEl.value, {});
+        payload = res.ok === false
+          ? {
+              ...res,
+              scope: 'current',
+              total: 0,
+              matches: [],
+              byWord: [],
+              wordHitCount: 0,
+              chapterId: chapter ? chapter.id : null,
+              chapterIndex: state.index,
+              chapterName: chapter ? chapter.name : ''
+            }
+          : {
+              ...res,
+              // 当前章的结果也带上章信息，点结果时才能定位（和整本结果结构保持一致）
+              matches: res.issues.map((issue) => ({
+                ...issue,
+                chapterId: chapter ? chapter.id : null,
+                chapterIndex: state.index,
+                chapterName: chapter ? chapter.name : ''
+              })),
+              scope: 'current',
+              chapterId: chapter ? chapter.id : null,
+              chapterIndex: state.index,
+              chapterName: chapter ? chapter.name : ''
+            };
+      }
+      state.sensitive = payload;
+      if (payload.wordList) state.sensitiveWordList = payload.wordList;
+      renderSensitiveWordList();
+      renderSensitiveSummary();
+      renderSensitiveResults();
+      return { ok: payload.ok !== false, total: payload.total, scope: payload.scope };
+    } catch (err) {
+      state.sensitive = null;
+      $('sensitive-summary').textContent = `预检失败：${err.message}`;
+      $('sensitive-results').innerHTML = '';
+      return { ok: false, message: err.message };
+    } finally {
+      setSensitiveBusy(false);
+    }
+  }
+
+  // 选词表：persist=false 只放进设置草稿（点「保存设置」才落配置）；
+  // persist=true 用于预检面板里直接选，选完立刻写配置并重跑一次预检。
+  async function pickSensitiveWords({ persist = false } = {}) {
+    try {
+      const picked = await call(api.pickSensitiveWords);
+      if (!picked || picked.canceled) return { canceled: true };
+      if (!picked.ok) {
+        toast(`这个词表不能用：${picked.message}`, 'error');
+        return picked;
+      }
+      if (persist) {
+        const cfg = await call(api.setConfig, { sensitiveWordsPath: picked.path });
+        state.globalConfig = cfg;
+        state.config = effectiveConfig();
+        state.sensitiveWordsDraft = cfg.sensitiveWordsPath || '';
+      } else {
+        state.sensitiveWordsDraft = picked.path;
+      }
+      state.sensitiveWordsInfo = picked;
+      state.sensitiveWordList = picked;
+      renderSensitiveWordList();
+      renderSensitiveSettings();
+      toast(`已选择词表：${picked.name}（${picked.count} 个词）`);
+      if (persist && !$('sensitive-backdrop').classList.contains('hidden')) {
+        await runSensitiveCheck();
+      }
+      return picked;
+    } catch (err) {
+      toast(`选择词表失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
     }
   }
 
@@ -4105,7 +4437,48 @@
     setSelectValue('settings-snapshot-days', cfg.snapshotKeepDays, 7);
     const goal = Math.max(0, Math.round(Number(cfg.dailyGoal) || 0));
     $('settings-daily-goal').value = String(goal);
+    // 敏感词表：只记路径，词表本身只读；具体状态在 openSettings 里异步读一次
+    state.sensitiveWordsDraft = typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath : '';
+    state.sensitiveWordsInfo = null;
+    renderSensitiveSettings();
     renderStatsChart();
+  }
+
+  // 设置弹层里的词表状态（未设置 / 词表 N 个词 / 文件不存在 / 编码异常都直说）
+  function renderSensitiveSettings() {
+    const pathEl = $('settings-sensitive-path');
+    if (pathEl) pathEl.value = state.sensitiveWordsDraft || '';
+    const status = $('settings-sensitive-status');
+    if (!status) return;
+    if (!state.sensitiveWordsDraft) {
+      status.textContent = '未设置：预检前需要先选一个自己的词表 txt（应用不内置任何词表）';
+      status.className = 'muted small';
+      return;
+    }
+    const info = state.sensitiveWordsInfo;
+    if (!info) {
+      status.textContent = '正在读取词表…';
+      status.className = 'muted small';
+      return;
+    }
+    status.textContent = sensitiveWordListText(info);
+    status.className = info.ok ? 'muted small' : 'muted small warn';
+  }
+
+  // 打开设置时按已保存的路径读一次词表状态（刚选的草稿直接用 pick 返回的信息，不重读）
+  async function refreshSensitiveSettingsInfo() {
+    if (!state.sensitiveWordsDraft) {
+      state.sensitiveWordsInfo = null;
+      renderSensitiveSettings();
+      return null;
+    }
+    try {
+      state.sensitiveWordsInfo = await call(api.sensitiveWordsInfo);
+    } catch (err) {
+      state.sensitiveWordsInfo = { ok: false, message: `读取词表失败：${err.message}` };
+    }
+    renderSensitiveSettings();
+    return state.sensitiveWordsInfo;
   }
 
   function readSnapshotForm() {
@@ -4140,6 +4513,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 敏感词表同样是全局设置（所有书共用一份词表），写作页的按书设置里不显示
+    for (const id of ['settings-sensitive-group', 'settings-sensitive-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -4165,6 +4543,8 @@
     fillSettingsFields(cfg);
     updateSettingsScopeUi();
     $('settings-backdrop').classList.remove('hidden');
+    // 全局设置里顺手读一次词表状态（只读；写作页的按书设置里不显示这一组）
+    if (state.settingsScope === 'global') await refreshSensitiveSettingsInfo();
   }
 
   function closeSettings({ restore = true } = {}) {
@@ -4216,7 +4596,8 @@
         booksRoot: $('settings-root').value.trim(),
         ...form,
         ...readSnapshotForm(),
-        ...readStatsForm()
+        ...readStatsForm(),
+        sensitiveWordsPath: (state.sensitiveWordsDraft || '').trim()
       });
       state.globalConfig = cfg;
       state.config = effectiveConfig();
@@ -4224,6 +4605,8 @@
       closeSettings({ restore: false });
       toast('设置已保存（全局默认）');
       await refreshShelf();
+      // 词表路径可能刚改过：刷新一下状态，下次打开预检面板直接可用
+      await refreshSensitiveWordList();
     } catch (err) {
       toast(`保存设置失败：${err.message}`, 'error');
     }
@@ -4242,6 +4625,15 @@
       } catch (err) {
         toast(`选择目录失败：${err.message}`, 'error');
       }
+    });
+
+    // 敏感词预检：词表归作者管理，应用不内置任何词表；设置里只记路径（点「保存设置」才落配置）
+    $('btn-pick-sensitive').addEventListener('click', () => pickSensitiveWords({ persist: false }));
+    $('btn-clear-sensitive').addEventListener('click', () => {
+      state.sensitiveWordsDraft = '';
+      state.sensitiveWordsInfo = null;
+      renderSensitiveSettings();
+      toast('已清除敏感词表（点「保存设置」后生效）');
     });
 
     // 自定义字体：选择 → 主进程读文件 → FontFace 注册 → 实时预览（点「保存设置」才记住）
@@ -4397,6 +4789,20 @@
           : '已切到当前这一章：点「开始校对」检查编辑区里的最新内容。';
     });
     $('btn-restore-replace').addEventListener('click', () => restoreReplaceBackupFlow());
+    // 敏感词预检（只报告，不改动；词表由作者管理）
+    $('btn-sensitive-run').addEventListener('click', runSensitiveCheck);
+    $('btn-sensitive-close').addEventListener('click', closeSensitivePanel);
+    $('btn-sensitive-pick').addEventListener('click', () => pickSensitiveWords({ persist: true }));
+    $('sensitive-scope').addEventListener('change', () => {
+      state.sensitiveScope = sensitiveScope();
+      // 换了范围就先收起旧结果，免得摘要写着「整本」、列表还是上一章的内容
+      state.sensitive = null;
+      $('sensitive-results').innerHTML = '';
+      $('sensitive-summary').textContent =
+        state.sensitiveScope === 'book'
+          ? '已切到整本书：点「开始预检」按词表通读全书（只读，缺文件的章节会跳过）。'
+          : '已切到当前这一章：点「开始预检」检查编辑区里的最新内容。';
+    });
     $('find-query').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -4422,6 +4828,7 @@
       if (btn.dataset.action === 'copy') await copyBookFlow();
       else if (btn.dataset.action === 'txt') openExportDialog();
       else if (btn.dataset.action === 'epub') await exportEpubFlow();
+      else if (btn.dataset.action === 'sensitive') await openSensitivePanel();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
       else if (btn.dataset.action === 'history') await openHistoryForCurrentBook();
     });
@@ -4640,6 +5047,12 @@
       if (!$('proofread-backdrop').classList.contains('hidden') && event.key === 'Escape') {
         event.preventDefault();
         closeProofreadPanel();
+        return;
+      }
+      // 敏感词预检面板：Esc 关闭
+      if (!$('sensitive-backdrop').classList.contains('hidden') && event.key === 'Escape') {
+        event.preventDefault();
+        closeSensitivePanel();
         return;
       }
       // 复制本章（平台格式）：Ctrl+Shift+C；不抢 Ctrl+C 的普通复制
@@ -5042,6 +5455,72 @@
         row.click();
         return true;
       },
+      // 敏感词预检（只报告，不改动）
+      openSensitivePanel: () => openSensitivePanel(),
+      closeSensitivePanel: () => closeSensitivePanel(),
+      sensitivePanelOpen: () => !$('sensitive-backdrop').classList.contains('hidden'),
+      setSensitiveScope(scope) {
+        $('sensitive-scope').value = scope === 'book' ? 'book' : 'current';
+        state.sensitiveScope = sensitiveScope();
+        return state.sensitiveScope;
+      },
+      async sensitiveRun() {
+        return runSensitiveCheck();
+      },
+      sensitiveSummary: () => $('sensitive-summary').textContent,
+      sensitiveWordListText: () => $('sensitive-wordlist-text').textContent,
+      sensitiveRowCount: () => $('sensitive-results').querySelectorAll('.sensitive-result').length,
+      sensitiveWordTexts: () =>
+        Array.from($('sensitive-results').querySelectorAll('.sensitive-word')).map((el) => el.textContent),
+      sensitiveRowTexts: () =>
+        Array.from($('sensitive-results').querySelectorAll('.sensitive-result')).map((el) => el.textContent),
+      sensitivePayload: () =>
+        state.sensitive
+          ? {
+              ok: state.sensitive.ok !== false,
+              code: state.sensitive.code,
+              scope: state.sensitive.scope,
+              total: state.sensitive.total,
+              wordHitCount: state.sensitive.wordHitCount,
+              byWord: (state.sensitive.byWord || []).map((item) => ({ ...item })),
+              truncated: state.sensitive.truncated,
+              chapterCount: state.sensitive.chapterCount,
+              chapterHitCount: state.sensitive.chapterHitCount,
+              skippedChapters: state.sensitive.skippedChapters,
+              wordList: state.sensitive.wordList ? { ...state.sensitive.wordList } : null,
+              matches: (state.sensitive.matches || []).map((match) => ({
+                word: match.word,
+                index: match.index,
+                length: match.length,
+                line: match.line,
+                column: match.column,
+                chapterId: match.chapterId,
+                chapterIndex: match.chapterIndex
+              }))
+            }
+          : null,
+      clickSensitiveRow(index) {
+        const rows = $('sensitive-results').querySelectorAll('.sensitive-result');
+        const row = rows[index];
+        if (!row) return false;
+        row.click();
+        return true;
+      },
+      // 测试用：直接把词表路径写进配置（正常流程走系统对话框选文件，E2E 没法点原生对话框）
+      async setSensitiveWordsPath(wordPath) {
+        const cfg = await call(api.setConfig, {
+          sensitiveWordsPath: String(wordPath == null ? '' : wordPath)
+        });
+        state.globalConfig = cfg;
+        state.config = effectiveConfig();
+        state.sensitiveWordsDraft = cfg.sensitiveWordsPath || '';
+        state.sensitiveWordsInfo = await refreshSensitiveWordList();
+        renderSensitiveSettings();
+        return cfg.sensitiveWordsPath;
+      },
+      sensitiveSettingsPath: () => $('settings-sensitive-path').value,
+      sensitiveSettingsStatus: () => $('settings-sensitive-status').textContent,
+      sensitiveSettingsVisible: () => !$('settings-sensitive-field').classList.contains('hidden'),
       selection: () => ({ start: editorEl.selectionStart || 0, end: editorEl.selectionEnd || 0 }),
       selectionText: () =>
         editorEl.value.slice(editorEl.selectionStart || 0, editorEl.selectionEnd || 0),
