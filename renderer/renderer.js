@@ -1487,9 +1487,174 @@
   }
 
   function outputSummary(data) {
-    const parts = [`${data.chapterCount} 章`, `${Number(data.chars) || 0} 字`];
+    const parts = [];
+    // 范围导出时先说是哪一段（全书不用重复说）
+    if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
+    parts.push(`${data.chapterCount} 章`, `${Number(data.chars) || 0} 字`);
     if (data.includedUnsaved) parts.push('含当前章未保存内容');
     return `（${parts.join(' · ')}）`;
+  }
+
+  // ---------- 导出范围对话框 ----------
+  // 默认「全书」和以前完全一样；也可以只导某一卷 / 第 X–Y 章。
+  // 章数、字数、默认文件名都由主进程算（book:export-plan 只读），避免界面和导出两套规则。
+  const EXPORT_UNVOLUMED = '__none__';
+  let exportPlanTimer = null;
+  let exportPlanToken = 0;
+  let lastExportPlan = null;
+
+  function readExportRange() {
+    const checked = document.querySelector('input[name="export-scope"]:checked');
+    const mode = checked ? checked.value : 'all';
+    if (mode === 'volume') {
+      const value = $('export-volume').value;
+      return { mode: 'volume', volumeId: value === EXPORT_UNVOLUMED ? null : value };
+    }
+    if (mode === 'range') {
+      return {
+        mode: 'range',
+        from: Number.parseInt($('export-from').value, 10),
+        to: Number.parseInt($('export-to').value, 10)
+      };
+    }
+    return { mode: 'all' };
+  }
+
+  // 返回空字符串 = 合法；否则是给作者看的中文提示
+  function validateExportRange(range) {
+    if (range.mode !== 'range') return '';
+    const total = state.chapters.length;
+    if (!Number.isInteger(range.from) || !Number.isInteger(range.to)) return '请输入起始章和结束章';
+    if (range.from < 1 || range.to < 1 || range.from > total || range.to > total) {
+      return `章节范围要在第 1–${total} 章之间`;
+    }
+    if (range.from > range.to) return '起始章不能大于结束章';
+    return '';
+  }
+
+  function fillExportVolumeOptions() {
+    const row = $('export-volume-row');
+    const select = $('export-volume');
+    const volumes = volumeList();
+    row.classList.toggle('hidden', volumes.length === 0);
+    select.innerHTML = '';
+    const addOption = (value, label) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    };
+    const unvolumed = state.chapters.filter((chapter) => !chapterVolumeId(chapter)).length;
+    if (unvolumed > 0) addOption(EXPORT_UNVOLUMED, `未分卷（${unvolumed} 章）`);
+    volumes.forEach((volume) => {
+      const count = state.chapters.filter((chapter) => chapterVolumeId(chapter) === volume.id).length;
+      addOption(volume.id, `${String(volume.name || '未命名卷')}（${count} 章）`);
+    });
+    if (!select.options.length) addOption(EXPORT_UNVOLUMED, '未分卷（0 章）');
+  }
+
+  // 单选了哪种范围，就把另外两个范围的输入框灰掉，避免误以为能同时选
+  function syncExportScopeInputs() {
+    const range = readExportRange();
+    $('export-volume').disabled = range.mode !== 'volume';
+    $('export-from').disabled = range.mode !== 'range';
+    $('export-to').disabled = range.mode !== 'range';
+  }
+
+  async function refreshExportSummary() {
+    syncExportScopeInputs();
+    const summaryEl = $('export-summary');
+    const confirmBtn = $('btn-export-confirm');
+    const range = readExportRange();
+    const error = validateExportRange(range);
+    if (error) {
+      lastExportPlan = null;
+      summaryEl.textContent = error;
+      summaryEl.classList.add('warn');
+      confirmBtn.disabled = true;
+      return;
+    }
+    const token = ++exportPlanToken;
+    let res;
+    try {
+      res = await call(api.exportPlan, state.bookPath, currentChapterOverride(), range);
+    } catch (err) {
+      if (token !== exportPlanToken) return;
+      lastExportPlan = null;
+      summaryEl.textContent = `无法读取导出信息：${err.message}`;
+      summaryEl.classList.add('warn');
+      confirmBtn.disabled = true;
+      return;
+    }
+    if (token !== exportPlanToken) return;
+    if (!res || res.empty) {
+      lastExportPlan = null;
+      summaryEl.textContent = '所选范围里没有章节，换个范围试试';
+      summaryEl.classList.add('warn');
+      confirmBtn.disabled = true;
+      return;
+    }
+    lastExportPlan = res;
+    const bits = [`将导出 ${res.chapterCount} 章`, `${res.chars} 字`];
+    if (res.includedUnsaved) bits.push('含当前章未保存内容');
+    summaryEl.textContent = `${bits.join(' · ')}；默认文件名：${res.fileName}`;
+    summaryEl.classList.remove('warn');
+    confirmBtn.disabled = false;
+  }
+
+  function scheduleExportSummary(delay = 0) {
+    if (exportPlanTimer) clearTimeout(exportPlanTimer);
+    exportPlanTimer = setTimeout(() => {
+      exportPlanTimer = null;
+      refreshExportSummary();
+    }, delay);
+  }
+
+  function openExportDialog() {
+    hideExportMenu();
+    if (!state.bookPath) return;
+    if (!state.chapters.length) {
+      toast('这本书里还没有章节，没有可导出的内容', 'warn');
+      return;
+    }
+    const total = state.chapters.length;
+    fillExportVolumeOptions();
+    const allRadio = document.querySelector('input[name="export-scope"][value="all"]');
+    if (allRadio) allRadio.checked = true;
+    $('export-all-count').textContent = `（${total} 章）`;
+    $('export-from').value = '1';
+    $('export-to').value = String(total);
+    $('export-from').max = String(total);
+    $('export-to').max = String(total);
+    $('export-from').min = '1';
+    $('export-to').min = '1';
+    $('export-backdrop').classList.remove('hidden');
+    refreshExportSummary();
+  }
+
+  function closeExportDialog() {
+    $('export-backdrop').classList.add('hidden');
+    exportPlanToken += 1; // 让还没回来的摘要失效
+    if (exportPlanTimer) {
+      clearTimeout(exportPlanTimer);
+      exportPlanTimer = null;
+    }
+    lastExportPlan = null;
+  }
+
+  async function confirmExportDialog() {
+    const range = readExportRange();
+    const error = validateExportRange(range);
+    if (error) {
+      toast(error, 'warn');
+      return;
+    }
+    if (!lastExportPlan || lastExportPlan.empty) {
+      toast('所选范围里没有章节，换个范围试试', 'warn');
+      return;
+    }
+    closeExportDialog();
+    await exportBookFlow(range);
   }
 
   async function copyBookFlow() {
@@ -1527,10 +1692,11 @@
     }
   }
 
-  async function exportBookFlow() {
+  // range 不传 = 全书；传 { mode:'volume'|'range' } 只导出选中的部分
+  async function exportBookFlow(range) {
     if (!state.bookPath) return;
     try {
-      const data = await call(api.exportBook, state.bookPath, currentChapterOverride());
+      const data = await call(api.exportBook, state.bookPath, currentChapterOverride(), range);
       if (data.canceled) return;
       toast(`已导出：${data.filePath}${outputSummary(data)}`);
     } catch (err) {
@@ -1720,9 +1886,10 @@
       api.closeReady(false);
       return;
     }
-    // 关窗前先把排版/设置弹层收掉：否则「保存 / 不保存 / 取消」的询问会被它们压住
+    // 关窗前先把排版/设置/导出弹层收掉：否则「保存 / 不保存 / 取消」的询问会被它们压住
     hideFormatMenu();
     closeFormatDialog();
+    if (!$('export-backdrop').classList.contains('hidden')) closeExportDialog();
     if (!$('settings-backdrop').classList.contains('hidden')) closeSettings();
     if (!state.dirty || !state.bookPath) {
       api.closeReady(true);
@@ -2959,9 +3126,19 @@
       if (!btn) return;
       hideExportMenu();
       if (btn.dataset.action === 'copy') await copyBookFlow();
-      else if (btn.dataset.action === 'txt') await exportBookFlow();
+      else if (btn.dataset.action === 'txt') openExportDialog();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
     });
+
+    // 导出范围对话框
+    document.querySelectorAll('input[name="export-scope"]').forEach((radio) => {
+      radio.addEventListener('change', () => refreshExportSummary());
+    });
+    $('export-volume').addEventListener('change', () => refreshExportSummary());
+    $('export-from').addEventListener('input', () => scheduleExportSummary(120));
+    $('export-to').addEventListener('input', () => scheduleExportSummary(120));
+    $('btn-export-cancel').addEventListener('click', closeExportDialog);
+    $('btn-export-confirm').addEventListener('click', () => confirmExportDialog());
 
     // 排版：写作页「排版 ▾」
     $('btn-format').addEventListener('click', (event) => {
@@ -3089,6 +3266,13 @@
         if (event.key === 'Escape') {
           event.preventDefault();
           closeFormatDialog();
+        }
+        return;
+      }
+      if (!$('export-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeExportDialog();
         }
         return;
       }
@@ -3222,6 +3406,11 @@
       async copyChapterPlatformAt(index) {
         return copyChapterPlatformFlow(index == null ? state.index : index);
       },
+      // 导出范围对话框
+      exportDialogOpen: () => !$('export-backdrop').classList.contains('hidden'),
+      exportSummary: () => $('export-summary').textContent,
+      exportConfirmDisabled: () => $('btn-export-confirm').disabled,
+      readExportRange: () => readExportRange(),
       contextMenuItems: () =>
         Array.from(document.querySelectorAll('#context-menu button')).map((el) => el.textContent),
       // 分卷

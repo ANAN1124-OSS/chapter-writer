@@ -51,7 +51,8 @@ contextBridge.exposeInMainWorld('api', {
   formatPreviewBook: (bookPath, options) => invoke('book:format-preview', bookPath, options),
   formatBook: (bookPath, options) => invoke('book:format', bookPath, options),
 
-  exportBook: (bookPath, override) => invoke('book:export', bookPath, override),
+  exportPlan: (bookPath, override, range) => invoke('book:export-plan', bookPath, override, range),
+  exportBook: (bookPath, override, range) => invoke('book:export', bookPath, override, range),
   copyBook: (bookPath, override) => invoke('book:copy', bookPath, override),
   copyChapterPlatform: (bookPath, ref) => invoke('chapter:copy-platform', bookPath, ref),
   repairBook: (bookPath, mode) => invoke('book:repair', bookPath, mode),

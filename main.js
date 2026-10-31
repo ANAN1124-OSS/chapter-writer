@@ -375,11 +375,17 @@ function registerIpc() {
 
   // 拼导出/复制用的正文：默认读磁盘；override 是编辑区里当前章的最新内容（未保存也算，只参与拼接不写盘）
   // chars 回报的是「正文字数」（去掉空白/换行，和编辑页字数统计同一口径），不是文件字节数
-  async function collectExportTexts(bookPath, meta, override) {
+  // indexes 可选：只读选中的章（按范围导出用），没选中的位置留空字符串但保持下标对齐
+  async function collectExportTexts(bookPath, meta, override, indexes) {
+    const selected = Array.isArray(indexes) ? new Set(indexes) : null;
     const overrideIndex = exporter.chapterIndexOf(meta, override);
     const texts = [];
     let chars = 0;
     for (let i = 0; i < meta.chapters.length; i += 1) {
+      if (selected && !selected.has(i)) {
+        texts.push('');
+        continue;
+      }
       let text;
       if (i === overrideIndex) {
         text = override.text;
@@ -389,12 +395,55 @@ function registerIpc() {
       texts.push(text);
       chars += chaptersLib.countChars(text);
     }
-    return { texts, chars, includedUnsaved: overrideIndex >= 0 };
+    return {
+      texts,
+      chars,
+      includedUnsaved: overrideIndex >= 0 && (!selected || selected.has(overrideIndex))
+    };
   }
 
-  handleBook('book:export', async (bookPath, override) => {
+  // 导出范围预览（只读）：对话框里实时显示「选中几章 / 多少字 / 默认文件名」
+  handleBook('book:export-plan', async (bookPath, override, range) => {
     const meta = await storage.readBookMeta(bookPath);
-    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
+    const plan = exporter.resolveExportRange(meta, range);
+    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    let chars = 0;
+    for (const index of plan.indexes) {
+      const text =
+        index === overrideIndex
+          ? override.text
+          : (await storage.loadChapterText(bookPath, meta.chapters[index].file)).text;
+      chars += chaptersLib.countChars(text);
+    }
+    return {
+      mode: plan.mode,
+      label: plan.label,
+      chapterCount: plan.count,
+      chars,
+      from: plan.from,
+      to: plan.to,
+      volumeId: plan.volumeId,
+      empty: plan.empty,
+      fileName: exporter.exportFileName(meta, range),
+      includedUnsaved: overrideIndex >= 0 && plan.indexes.includes(overrideIndex)
+    };
+  });
+
+  handleBook('book:export', async (bookPath, override, range) => {
+    const meta = await storage.readBookMeta(bookPath);
+    const plan = exporter.resolveExportRange(meta, range);
+    if (!plan.count) {
+      throw new storage.StorageError(
+        'EMPTY_EXPORT_RANGE',
+        plan.mode === 'all' ? '这本书里还没有章节' : '所选范围里没有章节'
+      );
+    }
+    const { texts, chars, includedUnsaved } = await collectExportTexts(
+      bookPath,
+      meta,
+      override,
+      plan.indexes
+    );
     const cfg = await getConfig();
     // 默认落到「上一次导出保存到的目录」；没记过、或那个目录已经不存在了，才退回「文档」
     const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
@@ -404,14 +453,15 @@ function registerIpc() {
         return false;
       }
     });
-    const defaultName = `${require('./core/chapters').safeName(meta.title)}.txt`;
+    // 文件名默认带上范围：书名.txt / 书名-卷名.txt / 书名-第X-Y章.txt（可在保存对话框里改）
+    const defaultName = exporter.exportFileName(meta, range);
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
       title: '导出 TXT',
       defaultPath: path.join(defaultDir, defaultName),
       filters: [{ name: '文本文件', extensions: ['txt'] }]
     });
     if (canceled || !filePath) return { canceled: true };
-    const text = exporter.composeBook(meta, texts);
+    const text = exporter.composeBook(meta, texts, range);
     await atomicWriteFile(filePath, exporter.exportBufferFromText(text));
     // 记住这次导出的目录，下次导出默认还开在这里（记不住也不影响导出结果）
     const chosenDir = path.dirname(filePath);
@@ -426,9 +476,10 @@ function registerIpc() {
     return {
       canceled: false,
       filePath,
-      chapterCount: meta.chapters.length,
+      chapterCount: plan.count,
       chars,
-      includedUnsaved
+      includedUnsaved,
+      rangeLabel: plan.label
     };
   });
 

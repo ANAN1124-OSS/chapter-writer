@@ -682,6 +682,64 @@ body.resizing .editor {
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+
+/* ---------- 导出范围 ---------- */
+.export-modal {
+  width: min(600px, 92vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.export-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.export-modal .modal-buttons {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.export-scopes { margin-top: 12px; }
+.export-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13.5px;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.export-scope-row input[type="radio"] {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.export-scope-row .text-input { width: auto; }
+#export-volume { flex: 1 1 auto; min-width: 0; max-width: 280px; }
+.export-range-input {
+  width: 76px !important;
+  text-align: center;
+}
+.export-scope-row .text-input:disabled { opacity: .5; cursor: default; }
+.export-summary {
+  min-height: 20px;
+  margin-top: 14px;
+  padding: 9px 11px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  background: var(--paper-deep);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  white-space: pre-line;
+  user-select: text;
+}
+.export-summary.warn { color: var(--danger); }
 .format-rules { margin-top: 12px; }
 .check-row-pair {
   display: flex;

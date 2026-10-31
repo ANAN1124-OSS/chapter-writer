@@ -137,6 +137,45 @@
     </div>
   </div>
 
+  <!-- ============ 导出范围 ============ -->
+  <div id="export-backdrop" class="backdrop hidden">
+    <div class="modal export-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">导出 TXT</h2>
+      <div class="export-scroll">
+        <p class="modal-message">
+          选择导出范围。格式和以前一样（标题行 + 空行 + 正文，UTF-8 带 BOM，CRLF）；当前章没保存的内容也会一起导出，但不会写盘。
+        </p>
+        <div class="export-scopes">
+          <label class="export-scope-row">
+            <input type="radio" name="export-scope" value="all" checked />
+            <span>全书 <span class="muted small" id="export-all-count"></span></span>
+          </label>
+          <label class="export-scope-row" id="export-volume-row">
+            <input type="radio" name="export-scope" value="volume" />
+            <span>按卷导出</span>
+            <select id="export-volume" class="text-input"></select>
+          </label>
+          <label class="export-scope-row" id="export-range-row">
+            <input type="radio" name="export-scope" value="range" />
+            <span>第</span>
+            <input id="export-from" class="text-input export-range-input" type="number" min="1" inputmode="numeric" />
+            <span>章 到 第</span>
+            <input id="export-to" class="text-input export-range-input" type="number" min="1" inputmode="numeric" />
+            <span>章</span>
+          </label>
+        </div>
+        <div class="export-summary" id="export-summary"></div>
+        <p class="muted small">
+          按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的 txt 里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。
+        </p>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-export-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-export-confirm" class="btn primary" type="button">导出…</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ 通用模态 ============ -->
   <div id="modal-backdrop" class="backdrop hidden">
     <div class="modal" role="dialog" aria-modal="true">
