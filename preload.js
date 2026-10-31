@@ -51,6 +51,13 @@ contextBridge.exposeInMainWorld('api', {
   listReplaceBackups: (bookPath) => invoke('book:list-replace-backups', bookPath),
   restoreReplaceBackup: (bookPath, backupName) =>
     invoke('book:restore-replace-backup', bookPath, backupName),
+  listHistory: (bookPath) => invoke('book:list-history', bookPath),
+  previewHistoryFile: (bookPath, groupId, fileName) =>
+    invoke('book:preview-history-file', bookPath, groupId, fileName),
+  restoreHistoryFile: (bookPath, groupId, fileName) =>
+    invoke('book:restore-history-file', bookPath, groupId, fileName),
+  restoreHistoryDir: (bookPath, groupId) =>
+    invoke('book:restore-history-dir', bookPath, groupId),
   formatPreviewBook: (bookPath, options) => invoke('book:format-preview', bookPath, options),
   formatBook: (bookPath, options) => invoke('book:format', bookPath, options),
 

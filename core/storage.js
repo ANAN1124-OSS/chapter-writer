@@ -8,6 +8,7 @@ const findLib = require('./find');
 const formatLib = require('./format');
 const schemaLib = require('./schema');
 const conflictLib = require('./conflict');
+const historyLib = require('./history');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -900,6 +901,171 @@ async function restoreReplaceBackup(bookPath, backupName) {
   };
 }
 
+// ---------- 「本书历史」：统一查看 / 还原 _trash 备份 ----------
+// 备份来源：替换备份-* / 整理备份-* / 还原前备份-* / 快照-* / 删章散文件 / 书目.json.bak。
+// 还原规则（安全优先）：
+// - 目录备份只还原「现在仍在书目里」的章节，已删章节不会偷偷复活；
+// - 删章备份还原成书文件夹里的孤立 txt，不自动改章节列表/章号；
+// - 书目.json.bak 只供查看，不提供覆盖还原（损坏走「修复」流程）；
+// - 每次还原前把书里现在的内容复制到 _trash/还原前备份-时间戳/，绝不静默覆盖。
+async function findHistoryGroup(bookPath, groupId, chapterFiles) {
+  // 先做 id / 路径校验：非法 id（目录穿越等）直接拒绝，不去扫描
+  historyLib.resolveGroup(bookPath, groupId);
+  const data = await historyLib.listHistory(bookPath, { chapterFiles });
+  const group = data.groups.find((item) => item.id === groupId);
+  if (!group) throw new StorageError('HISTORY_GROUP_MISSING', '这个备份已经不存在了');
+  return group;
+}
+
+async function refreshChapterChars(bookPath, meta, files) {
+  const touched = new Set(files);
+  for (const chapter of meta.chapters) {
+    if (!touched.has(chapter.file)) continue;
+    try {
+      const text = await fs.readFile(assertInside(bookPath, chapter.file), 'utf8');
+      chapter.chars = chaptersLib.countChars(stripBom(text));
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+  }
+}
+
+async function restoreDeletedChapter(bookPath, group, entry) {
+  if (!entry || !/\.txt$/i.test(entry.name)) {
+    throw new StorageError('HISTORY_NOT_CHAPTER', '这个备份不是章节 txt，不能放回书里');
+  }
+  const target = assertInside(bookPath, entry.name);
+  if (await exists(target)) {
+    throw new StorageError('HISTORY_TARGET_EXISTS', `书文件夹里已经有 ${entry.name}，没有覆盖`);
+  }
+  const source = historyLib.resolveHistoryPath(bookPath, group.id, entry.name);
+  const buffer = await fs.readFile(source);
+  await atomicWriteFile(target, buffer);
+  return {
+    restored: 1,
+    skipped: 0,
+    total: group.fileCount,
+    restoreBackupDir: null,
+    file: entry.name,
+    addedToBook: false,
+    needsRebuild: true,
+    sourceLabel: group.sourceLabel
+  };
+}
+
+async function restoreHistoryFile(bookPath, groupId, fileName) {
+  const meta = await readBookMeta(bookPath);
+  const chapterFiles = meta.chapters.map((chapter) => chapter.file);
+  const group = await findHistoryGroup(bookPath, groupId, chapterFiles);
+  if (group.source === 'bookmeta') {
+    throw new StorageError('HISTORY_NOT_RESTORABLE', '书目备份只供查看，不能直接覆盖现在的书目');
+  }
+  if (group.kind === 'file') {
+    if (group.source !== 'delete') {
+      throw new StorageError('HISTORY_NOT_RESTORABLE', '这种备份只供查看，不能还原');
+    }
+    const entry =
+      group.files.find((file) => file.name === fileName || file.trashName === fileName) || group.files[0];
+    return restoreDeletedChapter(bookPath, group, entry);
+  }
+  if (!group.restorableCount) {
+    throw new StorageError('HISTORY_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
+  }
+  const entry = group.files.find((file) => file.name === fileName);
+  if (!entry) throw new StorageError('HISTORY_FILE_MISSING', '这个备份文件已经不存在了');
+  if (!entry.restorable) {
+    throw new StorageError('HISTORY_NOT_CURRENT', entry.reason || '这个文件不是当前章节，不能还原');
+  }
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  const restoreDir = await uniqueTrashDir(trashDir, RESTORE_BACKUP_PREFIX);
+  await ensureDir(restoreDir);
+  const target = assertInside(bookPath, entry.name);
+  if (await exists(target)) await fs.copyFile(target, path.join(restoreDir, entry.name));
+  const source = historyLib.resolveHistoryPath(bookPath, group.id, entry.name);
+  const buffer = await fs.readFile(source);
+  await atomicWriteFile(target, buffer);
+  await refreshChapterChars(bookPath, meta, [entry.name]);
+  await writeBookMeta(bookPath, meta);
+  return {
+    restored: 1,
+    skipped: group.fileCount - 1,
+    total: group.fileCount,
+    restoreBackupDir: restoreDir,
+    file: entry.name,
+    sourceLabel: group.sourceLabel
+  };
+}
+
+async function restoreHistoryGroup(bookPath, groupId) {
+  const meta = await readBookMeta(bookPath);
+  const chapterFiles = meta.chapters.map((chapter) => chapter.file);
+  const group = await findHistoryGroup(bookPath, groupId, chapterFiles);
+  if (group.source === 'bookmeta') {
+    throw new StorageError('HISTORY_NOT_RESTORABLE', '书目备份只供查看，不能直接覆盖现在的书目');
+  }
+  if (group.kind === 'file') {
+    if (group.source !== 'delete') {
+      throw new StorageError('HISTORY_NOT_RESTORABLE', '这种备份只供查看，不能还原');
+    }
+    return restoreDeletedChapter(bookPath, group, group.files[0]);
+  }
+  if (!group.restorableCount) {
+    throw new StorageError('HISTORY_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
+  }
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  const restoreDir = await uniqueTrashDir(trashDir, RESTORE_BACKUP_PREFIX);
+  let restored = 0;
+  let skipped = 0;
+  for (const entry of group.files) {
+    if (!entry.restorable) {
+      skipped += 1;
+      continue;
+    }
+    const target = assertInside(bookPath, entry.name);
+    if (await exists(target)) {
+      await ensureDir(restoreDir);
+      await fs.copyFile(target, path.join(restoreDir, entry.name));
+    }
+    const source = historyLib.resolveHistoryPath(bookPath, group.id, entry.name);
+    const buffer = await fs.readFile(source);
+    await atomicWriteFile(target, buffer);
+    restored += 1;
+  }
+  if (restored) {
+    await refreshChapterChars(
+      bookPath,
+      meta,
+      group.files.filter((file) => file.restorable).map((file) => file.name)
+    );
+    await writeBookMeta(bookPath, meta);
+  }
+  return {
+    restored,
+    skipped,
+    total: group.fileCount,
+    restoreBackupDir: restored ? restoreDir : null,
+    sourceLabel: group.sourceLabel
+  };
+}
+
+// 统一的历史列表：书目损坏也允许看备份（修书时可能正需要）。
+// 注意：只读扫描，不改任何文件；还原只发生在上面的显式调用里。
+async function listBookHistory(bookPath) {
+  let chapterFiles = [];
+  let title = '';
+  try {
+    const meta = await readBookMeta(bookPath);
+    chapterFiles = meta.chapters.map((chapter) => chapter.file);
+    title = meta.title;
+  } catch { /* 书目坏了就按「没有当前章节」扫描，预览照常 */ }
+  const data = await historyLib.listHistory(bookPath, { chapterFiles });
+  return { ...data, title };
+}
+
+async function previewHistoryFile(bookPath, groupId, fileName) {
+  return historyLib.readHistoryFile(bookPath, groupId, fileName);
+}
+
 async function renameBook(bookPath, title) {
   const meta = await readBookMeta(bookPath);
   const nextTitle = String(title == null ? '' : title).trim() || meta.title;
@@ -999,6 +1165,10 @@ module.exports = {
   formatBook: locked(formatBook),
   listReplaceBackups,
   restoreReplaceBackup: locked(restoreReplaceBackup),
+  listBookHistory,
+  previewHistoryFile,
+  restoreHistoryFile: locked(restoreHistoryFile),
+  restoreHistoryGroup: locked(restoreHistoryGroup),
   renameBook: locked(renameBook),
   trashBook,
   setLastOpenChapter: locked(setLastOpenChapter),

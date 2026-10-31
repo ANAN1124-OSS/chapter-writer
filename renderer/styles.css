@@ -907,6 +907,147 @@ body.resizing .editor {
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+
+/* ---------- 本书历史（_trash 备份） ---------- */
+.history-modal {
+  width: min(760px, 94vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.history-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.history-modal .modal-buttons {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.history-empty {
+  padding: 20px 14px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  background: var(--input-bg);
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+}
+.history-empty.warn { color: var(--danger); }
+.history-group {
+  overflow: hidden;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.history-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 9px 12px;
+  background: var(--paper-deep);
+  border-bottom: 1px solid var(--line);
+}
+.history-source {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.history-time {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.history-count {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+.history-restore-group { margin-left: auto; }
+.history-note {
+  padding: 8px 12px 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink-faint);
+}
+.history-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line);
+}
+.history-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  word-break: break-all;
+  user-select: text;
+}
+.history-file-tag {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+.history-file-tag.current { color: var(--ok); }
+.history-file-tag.deleted { color: var(--warn); }
+.history-file-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+}
+.history-file-actions .btn.tiny { padding: 3px 8px; font-size: 12px; }
+.history-preview {
+  margin-top: 12px;
+  overflow: hidden;
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+}
+.history-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  background: var(--paper-deep);
+  border-bottom: 1px solid var(--line);
+}
+.history-preview-text {
+  max-height: 32vh;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--editor-font-family);
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink);
+  user-select: text;
+}
+
+/* ---------- 排版 ---------- */
 .format-rules { margin-top: 12px; }
 .check-row-pair {
   display: flex;

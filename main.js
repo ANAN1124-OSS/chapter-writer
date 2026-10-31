@@ -439,6 +439,18 @@ function registerIpc() {
     storage.restoreReplaceBackup(bookPath, backupName)
   );
 
+  // 本书历史：统一列出 / 预览 / 还原书内 _trash 的各种备份（替换/整理/还原前/快照/删章 + 书目.json.bak）
+  handleBook('book:list-history', async (bookPath) => storage.listBookHistory(bookPath));
+  handleBook('book:preview-history-file', async (bookPath, groupId, fileName) =>
+    storage.previewHistoryFile(bookPath, groupId, fileName)
+  );
+  handleBook('book:restore-history-file', async (bookPath, groupId, fileName) =>
+    storage.restoreHistoryFile(bookPath, groupId, fileName)
+  );
+  handleBook('book:restore-history-dir', async (bookPath, groupId) =>
+    storage.restoreHistoryGroup(bookPath, groupId)
+  );
+
   // 整本智能排版：预检查只算不写；正式整理逐章写盘（写前把原章节备份到 _trash/整理备份-*）
   handleBook('book:format-preview', async (bookPath, options) =>
     storage.previewFormatBook(bookPath, options)
@@ -854,6 +866,15 @@ async function runAutomation() {
           );
         }
         await sleep(500);
+      } else if (screenshotDialog === 'history') {
+        const opened = screenshotBook
+          ? await win.webContents.executeJavaScript(
+              `window.__cwTest.openHistoryForPath(${JSON.stringify(screenshotBook)})`,
+              true
+            )
+          : await win.webContents.executeJavaScript('window.__cwTest.openHistoryForFirstBook()', true);
+        if (!opened) console.log('[screenshot] 没有可打开历史面板的书');
+        await sleep(900);
       }
       await sleep(500);
       const image = await win.webContents.capturePage();

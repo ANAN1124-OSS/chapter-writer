@@ -124,6 +124,7 @@
     bookDisplay: {}, // 当前书的显示设置覆盖（只覆盖改过的项）
     recentBook: null, // 上次写作的书 / 章（书架顶部「继续上次写作」；主进程从 config 读）
     conflictBook: null, // 正在看「同步冲突副本」弹层的那本书（只用于打开文件夹）
+    history: null, // 正在看的「本书历史」：{ path, title, groups, preview, loading, error, token }
     shelfQuery: '', // 书架搜索词（书名 / 章节名）
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
@@ -2143,6 +2144,7 @@
     if (!$('export-backdrop').classList.contains('hidden')) closeExportDialog();
     if (!$('jump-backdrop').classList.contains('hidden')) closeJumpDialog();
     if (!$('conflict-backdrop').classList.contains('hidden')) closeConflictDialog();
+    if (!$('history-backdrop').classList.contains('hidden')) closeHistoryDialog();
     if (!$('settings-backdrop').classList.contains('hidden')) closeSettings();
     if (!state.dirty || !state.bookPath) {
       api.closeReady(true);
@@ -2469,21 +2471,7 @@
     if (confirmed.action !== 'ok') return { ok: false, canceled: true };
     try {
       const data = await call(api.restoreReplaceBackup, state.bookPath, target.name);
-      const currentId = state.chapters[state.index] && state.chapters[state.index].id;
-      const opened = await call(api.openBook, state.bookPath);
-      state.meta = opened.meta;
-      state.chapters = opened.meta.chapters;
-      state.dirty = false;
-      state.baseText = '';
-      $('book-title').textContent = opened.meta.title;
-      $('book-title').title = opened.meta.title;
-      const index = Math.max(
-        0,
-        state.chapters.findIndex((chapter) => chapter.id === currentId)
-      );
-      await loadChapterAt(index);
-      renderChapterList();
-      renderEditorHeader();
+      await reloadOpenBookFromDisk();
       await refreshShelf();
       await refreshReplaceBackups();
       toast(
@@ -2497,6 +2485,333 @@
       return { ok: false, message: err.message };
     }
   }
+
+  // 还原 / 外部改动后从磁盘重载当前书（章节列表、字数、当前章）。
+  // 章节 id 保持不变就回到原来那一章；章节被删/书目重建时回到第 1 章。
+  async function reloadOpenBookFromDisk() {
+    if (!state.bookPath) return null;
+    const currentId = state.chapters[state.index] && state.chapters[state.index].id;
+    const opened = await call(api.openBook, state.bookPath);
+    state.meta = opened.meta;
+    state.chapters = opened.meta.chapters;
+    state.bookId = opened.meta.id;
+    state.dirty = false;
+    state.saveError = null;
+    state.baseText = '';
+    $('book-title').textContent = opened.meta.title;
+    $('book-title').title = opened.meta.title;
+    const index = Math.max(
+      0,
+      state.chapters.findIndex((chapter) => chapter.id === currentId)
+    );
+    await loadChapterAt(index);
+    renderChapterList();
+    renderEditorHeader();
+    await applyBookDisplay(opened.meta.id);
+    updateWindowTitle();
+    return opened;
+  }
+
+  // ---------- 本书历史（统一查看 / 还原 _trash 备份） ----------
+  // 备份来源由 core/history.js 扫描：替换 / 整理 / 还原前 / 快照 / 删章散文件 / 书目.json.bak。
+  // 这里只负责展示、预览和二次确认；真正的写盘在 storage（先备份当前内容再原子写）。
+  function sameBookPath(a, b) {
+    return String(a == null ? '' : a).toLowerCase() === String(b == null ? '' : b).toLowerCase();
+  }
+
+  async function openHistoryForPath(bookPath, title) {
+    if (!bookPath) return false;
+    hideExportMenu();
+    hideBookMenu();
+    state.history = {
+      path: bookPath,
+      title: String(title == null ? '' : title),
+      groups: [],
+      fileCount: 0,
+      totalBytes: 0,
+      loading: true,
+      error: '',
+      preview: null,
+      token: 0
+    };
+    $('history-backdrop').classList.remove('hidden');
+    renderHistory();
+    await refreshHistory();
+    return true;
+  }
+
+  function openHistoryForCurrentBook() {
+    if (!state.bookPath) {
+      toast('先打开一本书再查看历史', 'warn');
+      return Promise.resolve(false);
+    }
+    return openHistoryForPath(state.bookPath, state.meta ? state.meta.title : '');
+  }
+
+  async function refreshHistory() {
+    const current = state.history;
+    if (!current) return null;
+    const token = current.token + 1;
+    current.token = token;
+    current.loading = true;
+    current.error = '';
+    renderHistory();
+    let data;
+    try {
+      data = await call(api.listHistory, current.path);
+    } catch (err) {
+      if (state.history !== current || current.token !== token) return null;
+      current.loading = false;
+      current.error = err.message;
+      renderHistory();
+      return null;
+    }
+    if (state.history !== current || current.token !== token) return null;
+    current.loading = false;
+    current.title = data && data.title ? data.title : current.title;
+    current.groups = Array.isArray(data && data.groups) ? data.groups : [];
+    current.fileCount = Number(data && data.fileCount) || 0;
+    current.totalBytes = Number(data && data.totalBytes) || 0;
+    renderHistory();
+    return data;
+  }
+
+  function closeHistoryDialog() {
+    state.history = null;
+    $('history-backdrop').classList.add('hidden');
+    $('history-preview').classList.add('hidden');
+  }
+
+  function closeHistoryPreview() {
+    if (state.history) state.history.preview = null;
+    renderHistoryPreview();
+  }
+
+  function renderHistoryPreview() {
+    const current = state.history;
+    const pane = $('history-preview');
+    if (!pane) return;
+    if (!current || !current.preview) {
+      pane.classList.add('hidden');
+      return;
+    }
+    pane.classList.remove('hidden');
+    $('history-preview-title').textContent =
+      `${current.preview.sourceLabel} · ${current.preview.fileName}` +
+      (current.preview.truncated ? '（文件较大，只预览开头）' : '');
+    $('history-preview-text').textContent = current.preview.text || '（空文件）';
+  }
+
+  function historyFileTag(group, file) {
+    if (group.source === 'delete') return { text: file.inBook ? '书里已有同名文件' : '已从书中删除', className: 'deleted' };
+    if (group.source === 'bookmeta') return { text: '只供查看', className: '' };
+    if (file.inBook && file.restorable) return { text: '当前章节', className: 'current' };
+    if (group.source === 'other') return { text: '未识别备份', className: '' };
+    if (!file.inBook) return { text: '已不在书里', className: '' };
+    return { text: '只供查看', className: '' };
+  }
+
+  function buildHistoryGroup(group) {
+    const card = document.createElement('div');
+    card.className = 'history-group';
+    card.dataset.groupId = group.id;
+    card.dataset.source = group.source;
+
+    const head = document.createElement('div');
+    head.className = 'history-group-head';
+    const source = document.createElement('span');
+    source.className = 'history-source';
+    source.textContent = group.sourceLabel;
+    const time = document.createElement('span');
+    time.className = 'history-time';
+    time.textContent = group.timeText || '时间未知';
+    const count = document.createElement('span');
+    count.className = 'history-count';
+    count.textContent = `${group.fileCount} 个文件 · ${formatBytes(group.totalBytes)}`;
+    head.append(source, time, count);
+    if (group.kind === 'dir' && group.restorableCount > 0) {
+      const restoreGroupBtn = document.createElement('button');
+      restoreGroupBtn.type = 'button';
+      restoreGroupBtn.className = 'btn ghost tiny history-restore-group';
+      restoreGroupBtn.textContent = `还原整组（${group.restorableCount}）`;
+      restoreGroupBtn.title = '只还原现在仍在书里的章节；还原前先把当前内容备份一份';
+      restoreGroupBtn.addEventListener('click', () => confirmHistoryRestore(group, null, true));
+      head.appendChild(restoreGroupBtn);
+    }
+    card.appendChild(head);
+
+    const note = document.createElement('div');
+    note.className = 'history-note';
+    note.textContent = group.note;
+    card.appendChild(note);
+
+    for (const file of group.files) {
+      const row = document.createElement('div');
+      row.className = 'history-file';
+      row.dataset.fileName = file.name;
+
+      const name = document.createElement('span');
+      name.className = 'history-file-name';
+      name.textContent = file.name;
+      name.title = file.reason || file.name;
+
+      const tagInfo = historyFileTag(group, file);
+      const tag = document.createElement('span');
+      tag.className = `history-file-tag ${tagInfo.className}`.trim();
+      tag.textContent = tagInfo.text;
+
+      const actions = document.createElement('span');
+      actions.className = 'history-file-actions';
+      if (file.previewable) {
+        const previewBtn = document.createElement('button');
+        previewBtn.type = 'button';
+        previewBtn.className = 'btn ghost tiny';
+        previewBtn.textContent = '预览';
+        previewBtn.addEventListener('click', () => previewHistoryBackup(group.id, file.name));
+        actions.appendChild(previewBtn);
+      }
+      if (file.restorable) {
+        const restoreBtn = document.createElement('button');
+        restoreBtn.type = 'button';
+        restoreBtn.className = 'btn ghost tiny';
+        restoreBtn.textContent = group.source === 'delete' ? '放回书文件夹' : '还原';
+        restoreBtn.title =
+          group.source === 'delete'
+            ? '只把 txt 放回书文件夹，不改章节列表；书里已有同名文件时不覆盖'
+            : '用备份覆盖这一章；还原前会先把现在的内容备份一份';
+        restoreBtn.addEventListener('click', () => confirmHistoryRestore(group, file, false));
+        actions.appendChild(restoreBtn);
+      }
+      row.append(name, tag, actions);
+      card.appendChild(row);
+    }
+    return card;
+  }
+
+  function renderHistory() {
+    const current = state.history;
+    if (!current) return;
+    const titleEl = $('history-title');
+    if (titleEl) {
+      titleEl.textContent = current.title ? `本书历史 · 《${current.title}》` : '本书历史';
+    }
+    const summary = $('history-summary');
+    const list = $('history-list');
+    list.innerHTML = '';
+    if (current.loading) {
+      summary.textContent = '正在读取备份…';
+    } else if (current.error) {
+      summary.textContent = '读取失败';
+      const empty = document.createElement('div');
+      empty.className = 'history-empty warn';
+      empty.textContent = `读取备份失败：${current.error}`;
+      list.appendChild(empty);
+    } else if (!current.groups.length) {
+      summary.textContent = '没有历史备份';
+      const empty = document.createElement('div');
+      empty.className = 'history-empty';
+      empty.textContent =
+        '这本书里还没有历史备份。做过替换、整本整理、删除章节或保存过书目后，备份会自动出现在这里。';
+      list.appendChild(empty);
+    } else {
+      summary.textContent =
+        `共 ${current.groups.length} 组备份 · ${current.fileCount} 个文件 · ` +
+        `${formatBytes(current.totalBytes)}（新 → 旧）`;
+      for (const group of current.groups) list.appendChild(buildHistoryGroup(group));
+    }
+    renderHistoryPreview();
+  }
+
+  async function previewHistoryBackup(groupId, fileName) {
+    const current = state.history;
+    if (!current) return null;
+    try {
+      const data = await call(api.previewHistoryFile, current.path, groupId, fileName);
+      if (state.history !== current) return null;
+      current.preview = data;
+      renderHistoryPreview();
+      return data;
+    } catch (err) {
+      toast(`预览失败：${err.message}`, 'error');
+      return null;
+    }
+  }
+
+  async function confirmHistoryRestore(group, file, wholeGroup) {
+    const current = state.history;
+    if (!current || !group) return { ok: false };
+    if (state.dirty && sameBookPath(state.bookPath, current.path)) {
+      const action = await askUnsaved({
+        title: '还原前先处理未保存的修改',
+        message: '还原会从磁盘重新载入这本书的正文；当前章未保存的修改会丢失。',
+        saveLabel: '保存修改后再还原',
+        discardLabel: '放弃修改并还原'
+      });
+      if (action === 'cancel') return { ok: false, canceled: true };
+      if (action === 'save') {
+        const saved = await saveCurrent();
+        if (!saved.ok) return saved;
+      }
+    }
+    const skippedHint =
+      wholeGroup && group.files.length > group.restorableCount
+        ? `\n\n另有 ${group.files.length - group.restorableCount} 个文件不是当前章节，会跳过（不会复活已删章节）。`
+        : '';
+    let title;
+    let message;
+    if (wholeGroup) {
+      title = '还原整组备份';
+      message =
+        `会用「${group.sourceLabel}」这组备份里的 ${group.restorableCount} 个当前章节覆盖书里的同名章节。` +
+        `${skippedHint}\n\n还原前会先把现在的内容备份到 _trash/还原前备份-时间戳/，这一步也能找回。`;
+    } else if (group.source === 'delete') {
+      title = '把删除的章节放回书文件夹';
+      message =
+        `会把「${file.name}」复制回书文件夹。\n\n` +
+        '它不会自动加回章节列表（避免乱改章号和顺序）；需要的话可以用书卡的「修复 → 从目录重建」找回。' +
+        '书里已有同名文件时不会覆盖。';
+    } else {
+      title = '还原这一章';
+      message =
+        `会用备份里的「${file.name}」覆盖书里这一章。\n\n` +
+        '还原前会先把现在的内容备份到 _trash/还原前备份-时间戳/。';
+    }
+    const confirmed = await openModal({
+      title,
+      message,
+      buttons: [
+        { label: '取消', value: 'cancel' },
+        { label: '还原', value: 'ok', kind: 'danger' }
+      ],
+      cancelValue: 'cancel'
+    });
+    if (confirmed.action !== 'ok') return { ok: false, canceled: true };
+    try {
+      const data = wholeGroup
+        ? await call(api.restoreHistoryDir, current.path, group.id)
+        : await call(api.restoreHistoryFile, current.path, group.id, file.name);
+      const wasOpen = sameBookPath(state.bookPath, current.path);
+      if (wasOpen && Number(data && data.restored) > 0 && group.source !== 'delete') {
+        await reloadOpenBookFromDisk();
+      }
+      await refreshShelf();
+      if (state.history === current) await refreshHistory();
+      if (data && data.file && group.source === 'delete') {
+        toast(`已把「${data.file}」放回书文件夹（章节列表未变，需要时可从目录重建找回）`);
+      } else {
+        toast(
+          `已还原 ${Number(data && data.restored) || 0} 章` +
+            `${data && data.skipped ? `（跳过 ${data.skipped} 个不是当前章节的文件）` : ''}，` +
+            '还原前的内容已备份到 _trash'
+        );
+      }
+      return { ok: true, data };
+    } catch (err) {
+      toast(`还原失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
 
   function renderFindResults(payload) {
     const box = $('find-results');
@@ -3341,6 +3656,22 @@
         }
       } else if (btn.dataset.action === 'delete') {
         await deleteBookFlow(book);
+      } else if (btn.dataset.action === 'history') {
+        await openHistoryForPath(book.path, book.title);
+      }
+    });
+
+    $('btn-history-close').addEventListener('click', closeHistoryDialog);
+    $('btn-history-refresh').addEventListener('click', () => refreshHistory());
+    $('btn-history-preview-close').addEventListener('click', closeHistoryPreview);
+    $('btn-history-open-folder').addEventListener('click', async () => {
+      const target = state.history;
+      if (!target) return;
+      try {
+        await call(api.openBookFolder, target.path);
+        toast('已在资源管理器打开书文件夹（备份在 _trash 里）');
+      } catch (err) {
+        toast(`打开文件夹失败：${err.message}`, 'error');
       }
     });
 
@@ -3393,6 +3724,7 @@
       if (btn.dataset.action === 'copy') await copyBookFlow();
       else if (btn.dataset.action === 'txt') openExportDialog();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
+      else if (btn.dataset.action === 'history') await openHistoryForCurrentBook();
     });
 
     // 导出范围对话框
@@ -3542,6 +3874,14 @@
         if (event.key === 'Escape') {
           event.preventDefault();
           closeConflictDialog();
+        }
+        return;
+      }
+      if (!$('history-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          if (state.history && state.history.preview) closeHistoryPreview();
+          else closeHistoryDialog();
         }
         return;
       }
@@ -3948,6 +4288,93 @@
       async restoreReplaceBackupFlow(backupName) {
         return restoreReplaceBackupFlow(backupName);
       },
+      // 本书历史
+      async openHistoryForCurrentBook() {
+        return openHistoryForCurrentBook();
+      },
+      async openHistoryForPath(bookPath, title) {
+        return openHistoryForPath(bookPath, title);
+      },
+      async openHistoryForFirstBook() {
+        const book = (state.books || [])[0];
+        return book ? openHistoryForPath(book.path, book.title) : false;
+      },
+      historyOpen: () => !$('history-backdrop').classList.contains('hidden'),
+      historyTitle: () => $('history-title').textContent,
+      historySummary: () => $('history-summary').textContent,
+      historyGroupCount: () => (state.history ? state.history.groups.length : 0),
+      historyGroups: () =>
+        (state.history ? state.history.groups : []).map((group) => ({
+          id: group.id,
+          source: group.source,
+          sourceLabel: group.sourceLabel,
+          timeText: group.timeText,
+          fileCount: group.fileCount,
+          restorableCount: group.restorableCount,
+          files: group.files.map((file) => ({
+            name: file.name,
+            inBook: file.inBook,
+            restorable: file.restorable,
+            previewable: file.previewable,
+            reason: file.reason
+          }))
+        })),
+      historyGroupIndexBySource: (source) =>
+        state.history ? state.history.groups.findIndex((group) => group.source === source) : -1,
+      historyGroupTexts: () =>
+        Array.from(document.querySelectorAll('#history-list .history-group')).map((el) => el.textContent),
+      historyFileTexts: () =>
+        Array.from(document.querySelectorAll('#history-list .history-file')).map((el) => el.textContent),
+      async previewHistoryAt(groupIndex, fileIndex) {
+        const group = state.history && state.history.groups[groupIndex];
+        const file = group && group.files[fileIndex];
+        if (!file) return null;
+        return previewHistoryBackup(group.id, file.name);
+      },
+      historyPreviewVisible: () => !$('history-preview').classList.contains('hidden'),
+      historyPreviewTitle: () => $('history-preview-title').textContent,
+      historyPreviewText: () => $('history-preview-text').textContent,
+      closeHistoryPreview: () => closeHistoryPreview(),
+      async restoreHistoryFileAt(groupIndex, fileIndex) {
+        const group = state.history && state.history.groups[groupIndex];
+        const file = group && group.files[fileIndex];
+        if (!file) return { ok: false, message: '没有这个备份文件' };
+        return confirmHistoryRestore(group, file, false);
+      },
+      async restoreHistoryGroupAt(groupIndex) {
+        const group = state.history && state.history.groups[groupIndex];
+        if (!group) return { ok: false, message: '没有这个备份组' };
+        return confirmHistoryRestore(group, null, true);
+      },
+      clickHistoryFileButton(groupIndex, fileIndex, label) {
+        const cards = document.querySelectorAll('#history-list .history-group');
+        const card = cards[groupIndex];
+        if (!card) return false;
+        const rows = card.querySelectorAll('.history-file');
+        const row = rows[fileIndex];
+        if (!row) return false;
+        const button = Array.from(row.querySelectorAll('.history-file-actions button')).find((el) =>
+          el.textContent.includes(label)
+        );
+        if (!button) return false;
+        button.click();
+        return true;
+      },
+      clickHistoryGroupRestore(groupIndex) {
+        const cards = document.querySelectorAll('#history-list .history-group');
+        const card = cards[groupIndex];
+        const button = card ? card.querySelector('.history-restore-group') : null;
+        if (!button) return false;
+        button.click();
+        return true;
+      },
+      async refreshHistory() {
+        return refreshHistory();
+      },
+      closeHistory: () => closeHistoryDialog(),
+      bookMenuTexts: () => Array.from(document.querySelectorAll('#book-menu button')).map((el) => el.textContent),
+      exportMenuTexts: () =>
+        Array.from(document.querySelectorAll('#export-menu button')).map((el) => el.textContent),
       findSummary: () => $('find-summary').textContent,
       findResultCount: () => $('find-results').querySelectorAll('.find-result').length,
       clickFindResult(index) {

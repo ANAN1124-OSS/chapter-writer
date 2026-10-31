@@ -84,6 +84,8 @@
                 <button type="button" data-action="copy">复制整本到剪贴板</button>
                 <button type="button" data-action="txt">导出 TXT…</button>
                 <button type="button" data-action="folder">打开本书文件夹</button>
+                <div class="dropdown-sep"></div>
+                <button type="button" data-action="history" title="查看书内 _trash 的替换 / 整理 / 删除章节 / 书目备份">本书历史…</button>
               </div>
             </div>
             <button id="btn-save" class="btn primary" type="button" disabled>保存</button>
@@ -215,6 +217,35 @@
       <div class="modal-buttons">
         <button id="btn-conflict-open-folder" class="btn ghost" type="button">打开书文件夹</button>
         <button id="btn-conflict-close" class="btn primary" type="button">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 本书历史（_trash 备份） ============ -->
+  <div id="history-backdrop" class="backdrop hidden">
+    <div class="modal history-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title" id="history-title">本书历史</h2>
+      <p class="modal-message">
+        这里统一列出书内 <code>_trash</code> 里的备份：整本替换、整本整理、还原前备份、删除的章节，以及书文件夹里的上一版书目。
+        所有操作都只读取备份；还原前会先把书里<strong>现在的内容</strong>再备份一份到 <code>_trash\还原前备份-时间戳\</code>，不会静默覆盖。
+      </p>
+      <div class="history-scroll">
+        <div class="history-toolbar">
+          <span id="history-summary" class="muted small"></span>
+          <button id="btn-history-refresh" class="btn ghost tiny" type="button" title="重新扫描 _trash（只读）">刷新</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
+        <div id="history-preview" class="history-preview hidden">
+          <div class="history-preview-head">
+            <span id="history-preview-title"></span>
+            <button id="btn-history-preview-close" class="btn ghost tiny" type="button">收起预览</button>
+          </div>
+          <pre id="history-preview-text" class="history-preview-text"></pre>
+        </div>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-history-open-folder" class="btn ghost" type="button">打开书文件夹</button>
+        <button id="btn-history-close" class="btn primary" type="button">关闭</button>
       </div>
     </div>
   </div>
@@ -411,6 +442,7 @@
   <div id="book-menu" class="context-menu hidden">
     <button type="button" data-action="open">打开这本书</button>
     <button type="button" data-action="folder">打开所在文件夹</button>
+    <button type="button" data-action="history">本书历史…</button>
     <button type="button" data-action="delete" class="danger-text">删除这本书…</button>
   </div>
 
