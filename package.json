@@ -2,15 +2,68 @@
   "name": "chapter-writer",
   "version": "0.1.0",
   "private": true,
-  "description": "章节写作器 v0.1 - 整本保存、自动编号的 Windows 桌面写作工具",
+  "description": "章节写作器 - 整本保存、自动编号的 Windows 桌面写作工具",
   "main": "main.js",
   "scripts": {
     "start": "node scripts/start.js",
     "test": "node --test",
     "e2e": "node scripts/run-e2e.js",
-    "demo": "node scripts/demo-data.js"
+    "demo": "node scripts/demo-data.js",
+    "icon": "python scripts/make-icon.py",
+    "dist": "electron-builder --win nsis",
+    "dist:dir": "electron-builder --win dir"
   },
   "devDependencies": {
-    "electron": "45.1.0"
+    "electron": "45.1.0",
+    "electron-builder": "^26.18.0"
+  },
+  "author": "个人自用",
+  "build": {
+    "appId": "local.chapter-writer",
+    "productName": "章节写作器",
+    "copyright": "Copyright © 2026 个人自用",
+    "npmRebuild": false,
+    "asar": true,
+    "compression": "normal",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "章节写作器-${version}-安装包.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "章节写作器",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

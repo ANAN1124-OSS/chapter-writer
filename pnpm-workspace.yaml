@@ -1,2 +1,4 @@
-onlyBuiltDependencies:
-  - electron
+# electron-winstaller 只有打 Squirrel 包时才会用到，本项目用 NSIS，不需要跑它的安装脚本
+allowBuilds:
+  electron: true
+  electron-winstaller: false
