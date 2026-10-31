@@ -51,6 +51,19 @@
           <div class="editor-actions">
             <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
             <div class="dropdown">
+              <button id="btn-format" class="btn ghost" type="button" title="整理本章正文 / 调整正文显示">排版 ▾</button>
+              <div class="dropdown-menu hidden" id="format-menu">
+                <button type="button" data-action="apply">一键整理本章…</button>
+                <button type="button" data-action="undo" id="format-undo-item">撤销上次整理</button>
+                <div class="dropdown-sep"></div>
+                <button type="button" data-action="preset-compact">显示：紧凑</button>
+                <button type="button" data-action="preset-normal">显示：标准</button>
+                <button type="button" data-action="preset-loose">显示：宽松</button>
+                <div class="dropdown-sep"></div>
+                <button type="button" data-action="display-settings">正文显示设置…</button>
+              </div>
+            </div>
+            <div class="dropdown">
               <button id="btn-export" class="btn ghost" type="button">导出 ▾</button>
               <div class="dropdown-menu hidden" id="export-menu">
                 <button type="button" data-action="copy">复制整本到剪贴板</button>
@@ -86,10 +99,44 @@
     </div>
   </div>
 
+  <!-- ============ 排版：整理本章 ============ -->
+  <div id="format-backdrop" class="backdrop hidden">
+    <div class="modal format-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">整理本章正文</h2>
+      <p class="modal-message">
+        只处理正在编辑的这一章，不改章名、不碰别的章。整理结果先放进编辑区，仍是「未保存」状态：
+        按 Ctrl+S 才写盘，Ctrl+Z 或「排版 → 撤销上次整理」可退回。
+      </p>
+      <div class="format-rules">
+        <label class="check-row"><input type="checkbox" id="fmt-indent" /> 段首缩进两格（两个全角空格）</label>
+        <label class="check-row"><input type="checkbox" id="fmt-trailing" /> 删除每行行尾空白</label>
+        <label class="check-row"><input type="checkbox" id="fmt-punct" /> 中文旁边的半角标点转全角（，。；：！？）</label>
+        <label class="check-row"><input type="checkbox" id="fmt-cjkspace" /> 删除中文之间的多余空格（可能影响语感，默认不勾）</label>
+        <label class="field inline">
+          <span>段落之间</span>
+          <select id="fmt-blank" class="text-input">
+            <option value="keep">保持原样</option>
+            <option value="single">空一行</option>
+            <option value="none">不空行（紧凑）</option>
+          </select>
+        </label>
+      </div>
+      <div class="format-summary" id="fmt-summary"></div>
+      <pre class="format-preview" id="fmt-preview"></pre>
+      <p class="muted small">预览只显示整理后的开头，实际套用会处理整章。</p>
+      <div class="modal-buttons">
+        <button id="btn-format-reset" class="btn ghost" type="button" title="恢复默认规则">默认规则</button>
+        <button id="btn-format-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-format-apply" class="btn primary" type="button">套用到本章</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ 设置 ============ -->
   <div id="settings-backdrop" class="backdrop hidden">
     <div class="modal settings-modal" role="dialog" aria-modal="true">
       <h2 class="modal-title">设置</h2>
+      <div class="settings-scroll">
       <label class="field">
         <span>书架目录</span>
         <div class="field-row">
@@ -115,10 +162,48 @@
           <option value="24">24</option>
         </select>
       </label>
+      <label class="field">
+        <span>行距</span>
+        <select id="settings-line-height" class="text-input">
+          <option value="1.6">1.6 · 紧凑</option>
+          <option value="1.8">1.8</option>
+          <option value="1.95">1.95 · 标准</option>
+          <option value="2.2">2.2</option>
+          <option value="2.4">2.4 · 宽松</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>字距</span>
+        <select id="settings-letter-spacing" class="text-input">
+          <option value="0">0 · 默认</option>
+          <option value="0.02">0.02 · 略松</option>
+          <option value="0.05">0.05 · 中</option>
+          <option value="0.08">0.08 · 宽</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>正文宽度</span>
+        <select id="settings-page-width" class="text-input">
+          <option value="0">通栏 · 跟随窗口</option>
+          <option value="1000">1000 px</option>
+          <option value="900">900 px</option>
+          <option value="800">800 px</option>
+          <option value="720">720 px</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>正文底色</span>
+        <select id="settings-paper" class="text-input">
+          <option value="paper">原纸白</option>
+          <option value="cream">米黄 · 护眼</option>
+          <option value="green">豆绿 · 护眼</option>
+        </select>
+      </label>
       <p class="muted small">
         本应用只在你点「保存」时写正文：没有自动保存、没有每日备份。切章、关窗、导出时会提醒你保存，
         请自己定期把书库复制到网盘或移动硬盘。
       </p>
+      </div>
       <div class="modal-buttons">
         <button id="btn-settings-cancel" class="btn ghost" type="button">取消</button>
         <button id="btn-settings-save" class="btn primary" type="button">保存设置</button>

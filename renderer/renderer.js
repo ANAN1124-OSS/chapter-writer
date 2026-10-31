@@ -92,6 +92,8 @@
     importing: false,
     sidebarWidth: 250,
     sidebarDragging: false,
+    formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了）
+    settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -209,18 +211,24 @@
     document.title = `${state.dirty ? '* ' : ''}章节写作器${bookName}`;
   }
 
-  function applyEditorStyle() {
+  // 显示排版（字体/字号/行距/字距/正文宽度/护眼底色）只改 CSS 变量，绝不改正文
+  function applyEditorStyle(override) {
     const fonts = {
       serif: '"SimSun", "Songti SC", "Source Han Serif SC", serif',
       sans: '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif',
       kai: '"KaiTi", "STKaiti", "Kaiti SC", serif'
     };
-    const cfg = state.config || {};
-    document.documentElement.style.setProperty(
-      '--editor-font-family',
-      fonts[cfg.editorFont] || fonts.serif
-    );
-    document.documentElement.style.setProperty('--editor-font-size', `${cfg.editorFontSize || 18}px`);
+    const cfg = override || state.config || {};
+    const root = document.documentElement.style;
+    root.setProperty('--editor-font-family', fonts[cfg.editorFont] || fonts.serif);
+    root.setProperty('--editor-font-size', `${cfg.editorFontSize || 18}px`);
+    root.setProperty('--editor-line-height', String(cfg.editorLineHeight || 1.95));
+    const spacing = cfg.editorLetterSpacing == null ? 0.02 : Number(cfg.editorLetterSpacing);
+    root.setProperty('--editor-letter-spacing', `${Number.isFinite(spacing) ? spacing : 0.02}em`);
+    const pageWidth = Number(cfg.editorPageWidth) || 0;
+    root.setProperty('--editor-max-width', pageWidth > 0 ? `${pageWidth}px` : 'none');
+    document.body.classList.toggle('theme-cream', cfg.editorPaper === 'cream');
+    document.body.classList.toggle('theme-green', cfg.editorPaper === 'green');
   }
 
   // ---------- 章节栏 / 写作区 可拖动分隔条 ----------
@@ -1080,29 +1088,277 @@
     $('export-menu').classList.add('hidden');
   }
 
+  // ---------- 排版 ----------
+  // 「一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
+  const DEFAULT_FORMAT_OPTIONS = {
+    indent: true,
+    blankLines: 'single',
+    trimTrailing: true,
+    normalizePunct: true,
+    removeCjkSpaces: false
+  };
+
+  const DISPLAY_PRESETS = {
+    compact: { label: '紧凑', patch: { editorLineHeight: 1.6, editorLetterSpacing: 0, editorPageWidth: 0 } },
+    normal: { label: '标准', patch: { editorLineHeight: 1.95, editorLetterSpacing: 0.02, editorPageWidth: 0 } },
+    loose: { label: '宽松', patch: { editorLineHeight: 2.4, editorLetterSpacing: 0.05, editorPageWidth: 800 } }
+  };
+
+  const displaySettingsIds = [
+    'settings-font',
+    'settings-size',
+    'settings-line-height',
+    'settings-letter-spacing',
+    'settings-page-width',
+    'settings-paper'
+  ];
+
+  function readDisplayForm() {
+    return {
+      editorFont: $('settings-font').value,
+      editorFontSize: Number($('settings-size').value),
+      editorLineHeight: Number($('settings-line-height').value),
+      editorLetterSpacing: Number($('settings-letter-spacing').value),
+      editorPageWidth: Number($('settings-page-width').value),
+      editorPaper: $('settings-paper').value
+    };
+  }
+
+  function readFormatOptions() {
+    return {
+      indent: $('fmt-indent').checked,
+      blankLines: $('fmt-blank').value,
+      trimTrailing: $('fmt-trailing').checked,
+      normalizePunct: $('fmt-punct').checked,
+      removeCjkSpaces: $('fmt-cjkspace').checked
+    };
+  }
+
+  function writeFormatOptions(options) {
+    const opts = { ...DEFAULT_FORMAT_OPTIONS, ...(options && typeof options === 'object' ? options : {}) };
+    $('fmt-indent').checked = opts.indent !== false;
+    $('fmt-trailing').checked = opts.trimTrailing !== false;
+    $('fmt-punct').checked = opts.normalizePunct !== false;
+    $('fmt-cjkspace').checked = Boolean(opts.removeCjkSpaces);
+    $('fmt-blank').value = ['keep', 'single', 'none'].includes(opts.blankLines) ? opts.blankLines : 'single';
+  }
+
+  function toggleFormatMenu() {
+    const menu = $('format-menu');
+    const willShow = menu.classList.contains('hidden');
+    hideExportMenu();
+    if (willShow) $('format-undo-item').disabled = !canUndoFormat();
+    menu.classList.toggle('hidden');
+  }
+
+  function hideFormatMenu() {
+    $('format-menu').classList.add('hidden');
+  }
+
+  let formatPreviewToken = 0;
+  let formatPreviewTimer = null;
+
+  function scheduleFormatPreview(delay = 140) {
+    const token = formatPreviewToken + 1;
+    formatPreviewToken = token;
+    if (formatPreviewTimer) clearTimeout(formatPreviewTimer);
+    formatPreviewTimer = setTimeout(() => {
+      formatPreviewTimer = null;
+      updateFormatPreview(token);
+    }, delay);
+  }
+
+  function renderFormatPreview(res, raw) {
+    if (!String(raw == null ? '' : raw).trim()) {
+      $('fmt-summary').textContent = '本章还没有内容，没什么可整理的。';
+      $('fmt-preview').textContent = '';
+      $('btn-format-apply').disabled = true;
+      return;
+    }
+    const s = res.stats;
+    const parts = [
+      `共 ${s.paragraphs} 段`,
+      `缩进调整 ${s.indentFixed} 段`,
+      `行尾空白 ${s.trailingTrimmed} 处`,
+      `空行整理 ${s.blankCollapsed} 处`,
+      `标点转全角 ${s.punctFixed} 处`
+    ];
+    if (s.cjkSpacesRemoved) parts.push(`中文间空格 ${s.cjkSpacesRemoved} 处`);
+    $('fmt-summary').textContent = res.changed
+      ? parts.join(' · ')
+      : '本章已经是整理后的格式，没有可改的地方。';
+    $('btn-format-apply').disabled = !res.changed;
+    const preview = res.text.length > 700 ? `${res.text.slice(0, 700)}\n…` : res.text;
+    $('fmt-preview').textContent = preview || '（整理后为空）';
+  }
+
+  async function updateFormatPreview(token) {
+    try {
+      const res = await call(api.formatText, editorEl.value, readFormatOptions());
+      if (token !== formatPreviewToken) return; // 已经切到新的预览请求，丢弃旧结果
+      renderFormatPreview(res, editorEl.value);
+    } catch (err) {
+      if (token !== formatPreviewToken) return;
+      $('fmt-summary').textContent = `预览失败：${err.message}`;
+      $('fmt-preview').textContent = '';
+    }
+  }
+
+  function openFormatDialog() {
+    hideFormatMenu();
+    if (!state.bookPath || state.index < 0) {
+      toast('先打开一本书的章节再排版', 'warn');
+      return;
+    }
+    writeFormatOptions(state.config && state.config.formatOptions);
+    $('fmt-summary').textContent = '正在预览…';
+    $('fmt-preview').textContent = '';
+    $('btn-format-apply').disabled = true;
+    $('format-backdrop').classList.remove('hidden');
+    scheduleFormatPreview(0);
+  }
+
+  function closeFormatDialog() {
+    $('format-backdrop').classList.add('hidden');
+    formatPreviewToken += 1; // 让还没回来的预览结果失效
+    if (formatPreviewTimer) {
+      clearTimeout(formatPreviewTimer);
+      formatPreviewTimer = null;
+    }
+  }
+
+  // 把整理结果写进编辑区：用 execCommand 走原生输入，保住 Ctrl+Z 的原生撤销链；
+  // 失败再退回直接赋值。两条路都会触发 input → 标记未保存。
+  function insertFormattedText(text) {
+    editorEl.focus();
+    editorEl.setSelectionRange(0, editorEl.value.length);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, text);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted || editorEl.value !== text) {
+      editorEl.value = text;
+      onEditorInput();
+    }
+    editorEl.setSelectionRange(0, 0);
+    editorEl.scrollTop = 0;
+  }
+
+  function pushFormatUndo(before, after) {
+    const chapter = state.chapters[state.index];
+    if (!chapter) return;
+    state.formatUndo.push({ bookPath: state.bookPath, chapterId: chapter.id, before, after });
+    while (state.formatUndo.length > 10) state.formatUndo.shift();
+  }
+
+  function canUndoFormat() {
+    const top = state.formatUndo[state.formatUndo.length - 1];
+    const chapter = state.chapters[state.index];
+    return Boolean(
+      top &&
+        chapter &&
+        top.bookPath === state.bookPath &&
+        top.chapterId === chapter.id &&
+        editorEl.value === top.after
+    );
+  }
+
+  function undoFormat() {
+    if (!canUndoFormat()) return false;
+    const top = state.formatUndo.pop();
+    insertFormattedText(top.before);
+    toast('已撤销整理（仍在编辑区，未写盘）');
+    return true;
+  }
+
+  async function applyFormatToEditor() {
+    if (!state.bookPath || state.index < 0) return;
+    const before = editorEl.value;
+    if (!String(before == null ? '' : before).trim()) {
+      toast('本章还没有内容', 'warn');
+      return;
+    }
+    const options = readFormatOptions();
+    $('btn-format-apply').disabled = true;
+    try {
+      const res = await call(api.formatText, before, options);
+      // 记住这次勾选的规则，下次打开对话框沿用（只记规则，不碰正文）
+      try {
+        state.config = await call(api.setConfig, { formatOptions: options });
+      } catch { /* 记不住规则不影响整理 */ }
+      closeFormatDialog();
+      if (!res.changed) {
+        toast('本章已经是整理后的格式，没有改动');
+        return;
+      }
+      insertFormattedText(res.text);
+      pushFormatUndo(before, res.text);
+      toast(`已整理本章：${res.stats.paragraphs} 段 · Ctrl+S 保存 · Ctrl+Z 撤销`);
+    } catch (err) {
+      toast(`整理失败：${err.message}`, 'error');
+    } finally {
+      $('btn-format-apply').disabled = false;
+    }
+  }
+
+  async function setDisplayPreset(name) {
+    const preset = DISPLAY_PRESETS[name];
+    if (!preset) return;
+    try {
+      state.config = await call(api.setConfig, preset.patch);
+      applyEditorStyle();
+      toast(`正文显示已切换为「${preset.label}」（正文没动）`);
+    } catch (err) {
+      toast(`切换显示失败：${err.message}`, 'error');
+    }
+  }
+
   // ---------- 设置 ----------
+  function setSelectValue(id, value, fallback) {
+    const el = $(id);
+    const wanted = String(value == null ? fallback : value);
+    el.value = wanted;
+    if (el.value !== wanted) el.value = String(fallback); // 值不在选项里时回到默认
+  }
+
+  function previewSettings() {
+    if (!state.settingsBackup) return;
+    applyEditorStyle({ ...state.settingsBackup, ...readDisplayForm() });
+  }
+
   function openSettings() {
     const cfg = state.config || {};
+    state.settingsBackup = state.config ? { ...state.config } : null;
     $('settings-root').value = cfg.booksRoot || '';
-    $('settings-font').value = cfg.editorFont || 'serif';
-    $('settings-size').value = String(cfg.editorFontSize || 18);
+    setSelectValue('settings-font', cfg.editorFont, 'serif');
+    setSelectValue('settings-size', cfg.editorFontSize, 18);
+    setSelectValue('settings-line-height', cfg.editorLineHeight, 1.95);
+    setSelectValue('settings-letter-spacing', cfg.editorLetterSpacing, 0.02);
+    setSelectValue('settings-page-width', cfg.editorPageWidth, 0);
+    setSelectValue('settings-paper', cfg.editorPaper, 'paper');
     $('settings-backdrop').classList.remove('hidden');
   }
 
-  function closeSettings() {
+  function closeSettings({ restore = true } = {}) {
     $('settings-backdrop').classList.add('hidden');
+    if (restore && state.settingsBackup) {
+      state.config = state.settingsBackup;
+      applyEditorStyle();
+    }
+    state.settingsBackup = null;
   }
 
   async function saveSettings() {
     try {
       const cfg = await call(api.setConfig, {
         booksRoot: $('settings-root').value.trim(),
-        editorFont: $('settings-font').value,
-        editorFontSize: Number($('settings-size').value)
+        ...readDisplayForm()
       });
       state.config = cfg;
       applyEditorStyle();
-      closeSettings();
+      closeSettings({ restore: false });
       toast('设置已保存');
       await refreshShelf();
     } catch (err) {
@@ -1164,6 +1420,45 @@
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
     });
 
+    // 排版：写作页「排版 ▾」
+    $('btn-format').addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleFormatMenu();
+    });
+    $('format-menu').addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === 'apply') {
+        openFormatDialog();
+        return;
+      }
+      hideFormatMenu();
+      if (action === 'undo') {
+        if (!undoFormat()) toast('没有可撤销的整理', 'warn');
+      } else if (action === 'preset-compact') await setDisplayPreset('compact');
+      else if (action === 'preset-normal') await setDisplayPreset('normal');
+      else if (action === 'preset-loose') await setDisplayPreset('loose');
+      else if (action === 'display-settings') openSettings();
+    });
+
+    // 整理对话框：勾选/切换规则时实时刷新预览
+    for (const id of ['fmt-indent', 'fmt-trailing', 'fmt-punct', 'fmt-cjkspace']) {
+      $(id).addEventListener('change', () => scheduleFormatPreview());
+    }
+    $('fmt-blank').addEventListener('change', () => scheduleFormatPreview());
+    $('btn-format-apply').addEventListener('click', applyFormatToEditor);
+    $('btn-format-cancel').addEventListener('click', closeFormatDialog);
+    $('btn-format-reset').addEventListener('click', () => {
+      writeFormatOptions(null);
+      scheduleFormatPreview(0);
+    });
+
+    // 设置里改显示项时实时预览，点「取消」恢复原样
+    for (const id of displaySettingsIds) {
+      $(id).addEventListener('change', previewSettings);
+    }
+
     $('context-menu').addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-action]');
       if (!btn) return;
@@ -1202,10 +1497,18 @@
     document.addEventListener('click', (event) => {
       if (!event.target.closest('#context-menu') && !event.target.closest('.chapter-item')) hideContextMenu();
       if (!event.target.closest('#btn-export') && !event.target.closest('#export-menu')) hideExportMenu();
+      if (!event.target.closest('#btn-format') && !event.target.closest('#format-menu')) hideFormatMenu();
       if (!event.target.closest('#book-menu') && !event.target.closest('.book-card-more')) hideBookMenu();
     });
 
     document.addEventListener('keydown', (event) => {
+      if (!$('format-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeFormatDialog();
+        }
+        return;
+      }
       if (!$('settings-backdrop').classList.contains('hidden')) {
         if (event.key === 'Escape') {
           event.preventDefault();
@@ -1225,6 +1528,13 @@
         return;
       }
       const ctrl = event.ctrlKey && !event.altKey && !event.shiftKey;
+      if (ctrl && String(event.key).toLowerCase() === 'z') {
+        // 「整理本章」留下的快照优先撤销；没有快照就让原生 Ctrl+Z 照常工作
+        if (state.view === 'editor' && state.bookPath && undoFormat()) {
+          event.preventDefault();
+          return;
+        }
+      }
       if (ctrl && String(event.key).toLowerCase() === 's') {
         event.preventDefault();
         if (state.view === 'editor' && state.bookPath) saveCurrent();
@@ -1234,6 +1544,7 @@
       } else if (event.key === 'Escape') {
         hideContextMenu();
         hideExportMenu();
+        hideFormatMenu();
         hideBookMenu();
       }
     });
@@ -1241,6 +1552,7 @@
     window.addEventListener('resize', () => {
       hideContextMenu();
       hideExportMenu();
+      hideFormatMenu();
       hideBookMenu();
       applySidebarWidth(state.sidebarWidth);
     });
@@ -1313,6 +1625,41 @@
       shelfTitles: () => state.books.map((b) => b.title),
       sidebarWidth: () => state.sidebarWidth,
       setSidebarWidth: (width) => applySidebarWidth(width),
+      // 排版
+      openFormatMenu: () => toggleFormatMenu(),
+      formatMenuOpen: () => !$('format-menu').classList.contains('hidden'),
+      openFormatDialog: () => openFormatDialog(),
+      formatDialogOpen: () => !$('format-backdrop').classList.contains('hidden'),
+      formatSummary: () => $('fmt-summary').textContent,
+      formatPreview: () => $('fmt-preview').textContent,
+      readFormatOptions: () => readFormatOptions(),
+      writeFormatOptions: (options) => writeFormatOptions(options),
+      async applyFormat() {
+        return applyFormatToEditor();
+      },
+      canUndoFormat: () => canUndoFormat(),
+      undoFormat: () => undoFormat(),
+      formatUndoDepth: () => state.formatUndo.length,
+      applyDisplayPreset: (name) => setDisplayPreset(name),
+      displayStyle: () => {
+        const styles = getComputedStyle(editorEl);
+        return {
+          lineHeight: styles.lineHeight,
+          letterSpacing: styles.letterSpacing,
+          maxWidth: styles.maxWidth,
+          fontSize: styles.fontSize,
+          paperClass: document.body.className,
+          paperBg: getComputedStyle(document.body).backgroundColor
+        };
+      },
+      openSettings: () => openSettings(),
+      settingsOpen: () => !$('settings-backdrop').classList.contains('hidden'),
+      closeSettings: () => closeSettings(),
+      setSelect(id, value) {
+        const el = $(id);
+        el.value = String(value);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      },
       async handleCloseRequest() {
         await handleCloseRequest();
       }

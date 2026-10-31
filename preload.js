@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   loadChapter: (bookPath, file) => invoke('chapter:load', bookPath, file),
   statChapter: (bookPath, file) => invoke('chapter:stat', bookPath, file),
   saveChapter: (bookPath, chapterId, text) => invoke('chapter:save', bookPath, chapterId, text),
+  formatText: (text, options) => invoke('text:format', text, options),
   createChapter: (bookPath, insertIndex, name) => invoke('chapter:create', bookPath, insertIndex, name),
   renameChapter: (bookPath, chapterId, name) => invoke('chapter:rename', bookPath, chapterId, name),
   deleteChapter: (bookPath, chapterId) => invoke('chapter:delete', bookPath, chapterId),

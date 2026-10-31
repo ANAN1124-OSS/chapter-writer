@@ -32,6 +32,7 @@ const storage = require('./core/storage');
 const repair = require('./core/repair');
 const importer = require('./core/importer');
 const exporter = require('./core/exporter');
+const formatLib = require('./core/format');
 
 let win = null;
 let configStore = null;
@@ -184,6 +185,12 @@ function registerIpc() {
 
   handle('chapter:load', async (bookPath, file) => storage.loadChapterText(bookPath, file));
   handle('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
+
+  // 正文排版整理：纯文本变换，只计算不写盘（写盘仍由作者 Ctrl+S 决定）
+  handle('text:format', async (text, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    return formatLib.formatText(text, options);
+  });
 
   handle('chapter:save', async (bookPath, chapterId, text) => {
     return storage.withBookLock(bookPath, async () => {
@@ -432,6 +439,18 @@ async function runAutomation() {
       } else if (screenshotDialog === 'splitter') {
         await win.webContents.executeJavaScript(
           `window.__cwTest.setSidebarWidth(420);`,
+          true
+        );
+        await sleep(400);
+      } else if (screenshotDialog === 'format') {
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.openFormatDialog();`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'formatmenu') {
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.openFormatMenu();`,
           true
         );
         await sleep(400);

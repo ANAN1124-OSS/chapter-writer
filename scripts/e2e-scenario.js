@@ -402,5 +402,132 @@ module.exports = async function runScenario(ctx) {
   const resetWidth = await exec('window.__cwTest.sidebarWidth()');
   check('双击分隔条恢复默认宽度', resetWidth === 250, { resetWidth });
 
+  // 22. 排版：一键整理本章 —— 改正文但不自动写盘，可撤销，落盘为 CRLF
+  const currentBookDir = path.join(booksRoot, '章节小说 - 作者');
+  const currentChapterFile = (await exec('window.__cwTest.chapterFiles()'))[0];
+  const messyText = '他说,"你好."   \n\n\n第二段  ';
+  await exec(`window.__cwTest.setText(${JSON.stringify(messyText)})`);
+  await sleep(150);
+  check('整理前编辑区是脏样本', (await exec('window.__cwTest.text()')) === messyText);
+
+  await exec("document.getElementById('btn-format').click()");
+  check('写作页「排版 ▾」菜单能打开', (await exec('window.__cwTest.formatMenuOpen()')) === true);
+
+  await exec("document.querySelector('#format-menu button[data-action=\"apply\"]').click()");
+  await waitFor('window.__cwTest.formatDialogOpen() === true');
+  check('「一键整理本章」对话框打开', (await exec('window.__cwTest.formatDialogOpen()')) === true);
+
+  await waitFor("window.__cwTest.formatSummary().includes('共 2 段')");
+  const formatSummary = await exec('window.__cwTest.formatSummary()');
+  check('预览给出改动统计', formatSummary.includes('标点转全角 2 处'), formatSummary);
+  check(
+    '预览显示整理后的正文（缩进 + 标点已转）',
+    (await exec('window.__cwTest.formatPreview()')).startsWith('　　他说，"你好。"'),
+    await exec('window.__cwTest.formatPreview()')
+  );
+
+  await exec("document.getElementById('btn-format-apply').click()");
+  await waitFor('window.__cwTest.formatDialogOpen() === false');
+  await sleep(200);
+  const formattedText = await exec('window.__cwTest.text()');
+  check(
+    '套用后编辑区是整理后的正文',
+    formattedText === '　　他说，"你好。"\n\n　　第二段',
+    formattedText
+  );
+  check('套用后仍是未保存状态（没有偷偷写盘）', (await exec('window.__cwTest.dirty()')) === true);
+  check(
+    '套用后磁盘上还是整理前的内容',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '\n原文第一段\n',
+    await exec('window.__cwTest.chapterTextAt(0)')
+  );
+
+  // 撤销：Ctrl+Z / 菜单「撤销上次整理」
+  check('整理后可以撤销', (await exec('window.__cwTest.canUndoFormat()')) === true);
+  await exec('window.__cwTest.undoFormat()');
+  check('撤销整理恢复整理前的正文', (await exec('window.__cwTest.text()')) === messyText);
+  check('撤销后快照栈清空', (await exec('window.__cwTest.formatUndoDepth()')) === 0);
+
+  // 再整理一次并保存：磁盘落盘为 CRLF，正文整理结果一致
+  await exec(`window.__cwTest.writeFormatOptions(${JSON.stringify({
+    indent: true,
+    blankLines: 'single',
+    trimTrailing: true,
+    normalizePunct: true,
+    removeCjkSpaces: false
+  })})`);
+  await exec('window.__cwTest.applyFormat()');
+  check('再次套用后正文正确', (await exec('window.__cwTest.text()')) === formattedText);
+
+  // 真实键盘路径：Ctrl+Z 撤销整理（document 上的 keydown 拦截）
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }))"
+  );
+  await sleep(200);
+  check('Ctrl+Z 也能撤销整理', (await exec('window.__cwTest.text()')) === messyText);
+  check('Ctrl+Z 撤销后快照栈清空', (await exec('window.__cwTest.formatUndoDepth()')) === 0);
+
+  await exec('window.__cwTest.applyFormat()');
+  check('撤销后再整理回来', (await exec('window.__cwTest.text()')) === formattedText);
+
+  const formatSaveResult = await exec('window.__cwTest.save()');
+  check('整理后保存成功', Boolean(formatSaveResult && formatSaveResult.ok === true), formatSaveResult);
+  const rawOnDisk = await fs.readFile(path.join(currentBookDir, currentChapterFile), 'utf8');
+  check(
+    '落盘正文是 CRLF + 全角缩进（记事本友好）',
+    rawOnDisk === '　　他说，"你好。"\r\n\r\n　　第二段',
+    rawOnDisk
+  );
+  check(
+    '保存后回读与整理结果一致',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === formattedText
+  );
+
+  // 幂等：已经是整理后的正文，再整理一次不应重复加缩进
+  await exec('window.__cwTest.applyFormat()');
+  check('重复整理不会重复叠加缩进', (await exec('window.__cwTest.text()')) === formattedText);
+  check('无改动的整理不往撤销栈里塞东西', (await exec('window.__cwTest.formatUndoDepth()')) === 1);
+
+  // 23. 显示排版：预设 / 护眼底色 / 设置实时预览与取消恢复（正文不动）
+  const styleBefore = await exec('window.__cwTest.displayStyle()');
+  await exec("window.__cwTest.applyDisplayPreset('loose')");
+  await sleep(250);
+  const styleLoose = await exec('window.__cwTest.displayStyle()');
+  check(
+    '预设「宽松」改行距生效',
+    Math.abs(parseFloat(styleLoose.lineHeight) - parseFloat(styleLoose.fontSize) * 2.4) <= 1.5,
+    { lineHeight: styleLoose.lineHeight, fontSize: styleLoose.fontSize }
+  );
+  check('预设「宽松」限制正文宽度 800px', styleLoose.maxWidth === '800px', styleLoose.maxWidth);
+  check('显示预设不碰正文', (await exec('window.__cwTest.text()')) === formattedText);
+  const looseConfig = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check(
+    '显示预设写入配置（下次启动保持）',
+    looseConfig.editorLineHeight === 2.4 &&
+      looseConfig.editorLetterSpacing === 0.05 &&
+      looseConfig.editorPageWidth === 800,
+    looseConfig
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  check('从写作页能打开设置', (await exec('window.__cwTest.settingsOpen()')) === true);
+  await exec("window.__cwTest.setSelect('settings-paper', 'green')");
+  const styleGreen = await exec('window.__cwTest.displayStyle()');
+  check('设置里改底色会实时预览', styleGreen.paperClass.includes('theme-green'), styleGreen.paperClass);
+  await exec('window.__cwTest.closeSettings()');
+  const styleRestored = await exec('window.__cwTest.displayStyle()');
+  check('设置取消后恢复原底色', !styleRestored.paperClass.includes('theme-green'), styleRestored.paperClass);
+
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setSelect('settings-paper', 'green')");
+  await exec("document.getElementById('btn-settings-save').click()");
+  await waitFor(
+    "window.api.getConfig().then((r) => (r.ok && r.data.editorPaper === 'green'))",
+    10000
+  );
+  const savedPaper = await exec('window.api.getConfig().then((r) => (r.ok ? r.data.editorPaper : null))');
+  check('设置保存后护眼底色写入配置', savedPaper === 'green', savedPaper);
+  check('设置保存后正文仍未变', (await exec('window.__cwTest.text()')) === formattedText);
+
   return { ok: true, checks: checks.length, details: checks };
 };
