@@ -470,6 +470,14 @@ function getStatsStore() {
   return statsStore;
 }
 
+// 统计摘要统一出口：今天 + 近 30 天 + 连续写作天数（保存后与 stats:get 用同一套口径）。
+function statsSummaryPayload(stats, cfg, now = new Date()) {
+  return {
+    ...statsLib.summary(stats, { goal: cfg.dailyGoal, now }),
+    streak: statsLib.streak(stats, { now })
+  };
+}
+
 // 记住这次导出保存到的目录（下次导出默认还开在这里）；记不住也绝不影响导出结果。
 async function rememberExportDir(dir) {
   if (!dir) return;
@@ -673,10 +681,30 @@ function registerIpc() {
     return config;
   });
 
-  // 每日字数统计摘要：今天多少字 + 近 30 天（含今天）。统计文件在 userData，不在书库。
+  // 每日字数统计摘要：今天多少字 + 近 30 天（含今天）+ 当月码字日历 + 连续写作天数。
+  // 统计文件在 userData，不在书库；月视图只读，切换月份走 stats:calendar。
   handle('stats:get', async () => {
     const cfg = await getConfig();
-    return getStatsStore().summary({ goal: cfg.dailyGoal, days: statsLib.DEFAULT_RECENT_DAYS });
+    const stats = await getStatsStore().get();
+    const now = new Date();
+    return {
+      ...statsSummaryPayload(stats, cfg, now),
+      calendar: statsLib.monthView(stats, { now, goal: cfg.dailyGoal })
+    };
+  });
+  handle('stats:calendar', async (request) => {
+    const cfg = await getConfig();
+    const stats = await getStatsStore().get();
+    const now = new Date();
+    return {
+      calendar: statsLib.monthView(stats, {
+        year: request && request.year,
+        month: request && request.month,
+        now,
+        goal: cfg.dailyGoal
+      }),
+      streak: statsLib.streak(stats, { now })
+    };
   });
 
   // 灵感箱（碎片速记）：书架根目录 _碎片 里的普通 txt。
@@ -930,7 +958,7 @@ function registerIpc() {
           bookId: meta.id,
           delta: statsDelta
         });
-        stats = statsLib.summary(recorded.stats, { goal: cfg.dailyGoal });
+        stats = statsSummaryPayload(recorded.stats, cfg);
       } catch (err) {
         statsError = err.message;
       }
@@ -1783,6 +1811,7 @@ async function runAutomation() {
         screenshotDialog === 'settings' ||
         screenshotDialog === 'settings-snapshot' ||
         screenshotDialog === 'settings-stats' ||
+        screenshotDialog === 'settings-calendar' ||
         screenshotDialog === 'settings-sensitive' ||
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
@@ -1803,6 +1832,13 @@ async function runAutomation() {
           await sleep(600);
           await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-stats-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-calendar') {
+          // 开发截图用：滚到「码字日历 / 连续写作天数 / 月度汇总」
+          await sleep(700);
+          await automationWin.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-calendar-field'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-sensitive') {

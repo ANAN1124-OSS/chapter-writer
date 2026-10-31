@@ -19,6 +19,8 @@ const KEEP_DAYS = 400;
 const MAX_DAYS = 500;
 const MAX_DAY_CHARS = 100000000;
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+// 码字日历固定周一起始（和国内日历 / 口袋写作习惯一致）。
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -117,6 +119,147 @@ function dayTotal(rawStats, day) {
   let total = 0;
   for (const value of Object.values(entry.books)) total += value;
   return total;
+}
+
+// 内部用：已经 sanitize 过的统计，直接取某天合计，避免 monthView 里逐天重复清洗。
+function totalOfEntry(entry) {
+  if (!entry || typeof entry !== 'object' || !entry.books) return 0;
+  let total = 0;
+  for (const value of Object.values(entry.books)) total += value;
+  return total;
+}
+
+// 年月归一：非法 / 越界一律退回 now 所在的本地年月（渲染层传坏值也不会让日历空掉）。
+function normalizeMonth(year, month, now = new Date()) {
+  const anchor = parseDayKey(localDayKey(now));
+  const y = Number(year);
+  const m = Number(month);
+  if (Number.isInteger(y) && y >= 1970 && y <= 9999 && Number.isInteger(m) && m >= 1 && m <= 12) {
+    return { year: y, month: m };
+  }
+  return { year: anchor.year, month: anchor.month };
+}
+
+function daysInMonth(year, month) {
+  const { year: y, month: m } = normalizeMonth(year, month);
+  return new Date(y, m, 0, 12, 0, 0, 0).getDate();
+}
+
+// 一周从周一开始：0 = 周一 … 6 = 周日。
+function mondayWeekday(year, month, dayOfMonth = 1) {
+  return (new Date(year, month - 1, dayOfMonth, 12, 0, 0, 0).getDay() + 6) % 7;
+}
+
+// 码字日历色阶：0 = 没写；设了目标时「达标」= 4，未达标最高 3；没设目标按当月最高一天分 1–4。
+function calendarLevel(chars, { goal = 0, maxChars = 0 } = {}) {
+  const value = Math.max(0, Math.round(Number(chars) || 0));
+  if (value <= 0) return 0;
+  if (goal > 0) {
+    if (value >= goal) return 4;
+    return Math.max(1, Math.min(3, Math.ceil((value / goal) * 3)));
+  }
+  const max = Math.max(1, Math.round(Number(maxChars) || 0));
+  return Math.max(1, Math.min(4, Math.ceil((value / max) * 4)));
+}
+
+// 某个月的码字日历视图：每天的字数 / 是否达标 / 色阶 + 月度汇总。
+// 只读；日期一律按本机本地日期，未来日期标 future（界面淡显，不参与「今天」）。
+function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOAL } = {}) {
+  const stats = sanitizeStats(rawStats);
+  const anchor = localDayKey(now);
+  const normalized = normalizeMonth(year, month, now);
+  const targetYear = normalized.year;
+  const targetMonth = normalized.month;
+  const dailyGoal = normalizeGoal(goal);
+  const anchorParts = parseDayKey(anchor);
+  const count = daysInMonth(targetYear, targetMonth);
+  const pad = (n) => String(n).padStart(2, '0');
+  const days = [];
+  let total = 0;
+  let writtenDays = 0;
+  let goalDays = 0;
+  let maxChars = 0;
+  let bestDay = null;
+
+  for (let dayOfMonth = 1; dayOfMonth <= count; dayOfMonth += 1) {
+    const day = `${targetYear}-${pad(targetMonth)}-${pad(dayOfMonth)}`;
+    const chars = totalOfEntry(stats.days[day]);
+    const written = chars > 0;
+    if (written) {
+      total += chars;
+      writtenDays += 1;
+      if (dailyGoal > 0 && chars >= dailyGoal) goalDays += 1;
+      if (chars > maxChars) {
+        maxChars = chars;
+        bestDay = { day, chars };
+      }
+    }
+    days.push({
+      day,
+      dayOfMonth,
+      chars,
+      written,
+      goalMet: dailyGoal > 0 && chars >= dailyGoal,
+      level: 0, // 下面按整月最高值 / 目标统一算，避免逐天口径不一致
+      today: day === anchor,
+      future: day > anchor
+    });
+  }
+  for (const item of days) {
+    item.level = calendarLevel(item.chars, { goal: dailyGoal, maxChars });
+  }
+
+  return {
+    year: targetYear,
+    month: targetMonth,
+    label: `${targetYear}年${targetMonth}月`,
+    today: anchor,
+    isCurrentMonth: targetYear === anchorParts.year && targetMonth === anchorParts.month,
+    firstWeekday: mondayWeekday(targetYear, targetMonth, 1),
+    weekdayLabels: WEEKDAY_LABELS.slice(),
+    goal: dailyGoal,
+    total,
+    writtenDays,
+    goalDays,
+    average: writtenDays > 0 ? Math.round(total / writtenDays) : 0,
+    bestDay,
+    days
+  };
+}
+
+// 连续写作天数：current = 从今天（今天还没写就从昨天）往前数的连续写字天数，
+// best = 有记录以来的最长连续天数。只算「当天有正字数」的日期，未来日期忽略。
+function streak(rawStats, { now = new Date() } = {}) {
+  const stats = sanitizeStats(rawStats);
+  const anchor = localDayKey(now);
+  const written = new Set();
+  for (const [key, entry] of Object.entries(stats.days)) {
+    if (key > anchor) continue;
+    if (totalOfEntry(entry) > 0) written.add(key);
+  }
+  const sorted = Array.from(written).sort();
+  let current = 0;
+  let cursor = written.has(anchor) ? anchor : shiftDayKey(anchor, -1);
+  // 统计文件最多 500 天，这里再夹一个硬上限，坏数据也不会死循环。
+  for (let guard = 0; guard <= MAX_DAYS + 1 && written.has(cursor); guard += 1) {
+    current += 1;
+    cursor = shiftDayKey(cursor, -1);
+  }
+  let best = 0;
+  let run = 0;
+  let previous = null;
+  for (const key of sorted) {
+    run = previous && shiftDayKey(previous, 1) === key ? run + 1 : 1;
+    if (run > best) best = run;
+    previous = key;
+  }
+  return {
+    current,
+    best,
+    todayWritten: written.has(anchor),
+    lastWritten: sorted.length ? sorted[sorted.length - 1] : null,
+    writtenDays: written.size
+  };
 }
 
 // 把一次保存的正字数增量记进某本书的某一天；delta <= 0 不计数（删字/没变都不该扣今天的进度）。
@@ -266,15 +409,22 @@ module.exports = {
   MAX_GOAL,
   DEFAULT_RECENT_DAYS,
   KEEP_DAYS,
+  WEEKDAY_LABELS,
   localDayKey,
   parseDayKey,
   isValidDayKey,
   shiftDayKey,
   normalizeGoal,
+  normalizeMonth,
+  daysInMonth,
+  mondayWeekday,
+  calendarLevel,
   sanitizeStats,
   dayTotal,
   recordChars,
   recentDays,
   summary,
+  monthView,
+  streak,
   createStatsStore
 };

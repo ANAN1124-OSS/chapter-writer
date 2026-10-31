@@ -1011,6 +1011,102 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 }
 .stats-bar.today > i { background: var(--accent); }
 .stats-bar:hover > i { background: var(--accent); }
+
+/* 码字日历（v0.8-1）：纯 CSS，不引库；周一开头，颜色深浅 = 当天写得多不多 */
+.calendar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 7px;
+}
+.calendar-label {
+  min-width: 92px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.calendar-streak {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.calendar-streak.off { color: var(--ink-faint); }
+.calendar-weekdays,
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.calendar-weekdays {
+  margin-bottom: 2px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  text-align: center;
+  user-select: none;
+}
+.calendar-grid { user-select: none; }
+.cal-day {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  min-height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 11.5px;
+}
+.cal-day::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.cal-day > span { position: relative; z-index: 1; }
+.cal-day.empty { border-color: transparent; background: transparent; }
+.cal-day.future {
+  color: var(--ink-faint);
+  background: repeating-linear-gradient(135deg, transparent 0 4px, var(--paper-deep) 4px 5px);
+  opacity: .72;
+}
+.cal-day.written { color: var(--ink); font-weight: 600; }
+.cal-day.lv1::before { opacity: .10; }
+.cal-day.lv2::before { opacity: .22; }
+.cal-day.lv3::before { opacity: .36; }
+.cal-day.lv4::before { opacity: .52; }
+.cal-day.today {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.cal-day.goal-met::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.calendar-summary { margin-top: 7px; }
+.calendar-legend { margin-top: 3px; }
+.cal-legend-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 1px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.shelf-stats-streak { color: var(--accent); }
+
 #settings-daily-goal { max-width: 160px; }
 
 .text-input {

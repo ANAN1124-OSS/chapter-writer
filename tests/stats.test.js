@@ -260,3 +260,133 @@ test('每日统计：文件里已有的脏数据读取时清洗，不抛错', as
   assert.equal(disk.days['2026-99-99'], undefined);
   assert.equal(disk.days['2026-10-31'].books.ok, 13);
 });
+
+// ---------- 码字日历 / 连续写作天数 / 月度汇总（v0.8-1，提案 N1） ----------
+
+test('码字日历：月视图按周一起始，汇总每日字数 / 达标 / 最高一天', () => {
+  const stats = statsWith({
+    '2026-11-01': { books: { a: 60, b: 40 } },
+    '2026-11-02': { books: { a: 50 } },
+    '2026-11-05': { books: { a: 200 } },
+    '2026-10-31': { books: { a: 999 } },
+    '2026-12-01': { books: { a: 888 } }
+  });
+  const before = JSON.stringify(stats);
+  const view = statsLib.monthView(stats, {
+    year: 2026,
+    month: 11,
+    now: new Date(2026, 10, 3, 9, 0),
+    goal: 100
+  });
+  assert.equal(view.label, '2026年11月');
+  assert.equal(view.year, 2026);
+  assert.equal(view.month, 11);
+  assert.equal(view.days.length, 30);
+  assert.equal(view.firstWeekday, 6, '2026-11-01 是周日，周一起始偏移 6');
+  assert.deepEqual(view.weekdayLabels, ['一', '二', '三', '四', '五', '六', '日']);
+  assert.equal(view.today, '2026-11-03');
+  assert.equal(view.isCurrentMonth, true);
+  assert.equal(view.total, 350);
+  assert.equal(view.writtenDays, 3);
+  assert.equal(view.goalDays, 2);
+  assert.equal(view.average, 117);
+  assert.deepEqual(view.bestDay, { day: '2026-11-05', chars: 200 });
+
+  const day1 = view.days[0];
+  assert.deepEqual(
+    { day: day1.day, chars: day1.chars, written: day1.written, goalMet: day1.goalMet, level: day1.level, today: day1.today, future: day1.future },
+    { day: '2026-11-01', chars: 100, written: true, goalMet: true, level: 4, today: false, future: false }
+  );
+  const day2 = view.days[1];
+  assert.equal(day2.goalMet, false);
+  assert.equal(day2.level, 2, '50 / 目标 100 落在色阶 2');
+  assert.equal(view.days[2].level, 0);
+  assert.equal(view.days[2].today, true);
+  assert.equal(view.days[3].future, true, '今天之后的日期标 future');
+  assert.equal(view.days[4].level, 4, '超过目标也是满格');
+  assert.equal(JSON.stringify(stats), before, '月视图只读，不改原统计');
+});
+
+test('码字日历：非法年月回落当前月；闰年 / 平年天数与未来月标记正确', () => {
+  const now = new Date(2026, 10, 3, 9, 0);
+  const fallback = statsLib.monthView(statsWith({}), { year: 'x', month: 0, now });
+  assert.equal(fallback.year, 2026);
+  assert.equal(fallback.month, 11);
+  assert.equal(fallback.isCurrentMonth, true);
+
+  const feb2024 = statsLib.monthView(statsWith({}), { year: 2024, month: 2, now });
+  assert.equal(feb2024.days.length, 29, '2024 年 2 月有 29 天');
+  assert.equal(feb2024.firstWeekday, 3, '2024-02-01 是周四，周一起始偏移 3');
+  const feb2026 = statsLib.monthView(statsWith({}), { year: 2026, month: 2, now });
+  assert.equal(feb2026.days.length, 28);
+  assert.equal(feb2026.firstWeekday, 6, '2026-02-01 是周日');
+  assert.equal(feb2026.isCurrentMonth, false);
+
+  const future = statsLib.monthView(statsWith({}), { year: 2026, month: 12, now });
+  assert.ok(future.days.every((day) => day.future === true), '未来月的每一天都标 future');
+  const past = statsLib.monthView(statsWith({ '2026-10-01': { books: { a: 7 } } }), { year: 2026, month: 10, now });
+  assert.equal(past.days[0].future, false, '过去月不标 future');
+  assert.equal(past.total, 7);
+});
+
+test('码字日历：没设目标时色阶按当月最高一天分 1–4 级', () => {
+  assert.equal(statsLib.calendarLevel(0, { goal: 0, maxChars: 100 }), 0);
+  assert.equal(statsLib.calendarLevel(1, { goal: 0, maxChars: 200 }), 1);
+  assert.equal(statsLib.calendarLevel(100, { goal: 0, maxChars: 200 }), 2);
+  assert.equal(statsLib.calendarLevel(150, { goal: 0, maxChars: 200 }), 3);
+  assert.equal(statsLib.calendarLevel(200, { goal: 0, maxChars: 200 }), 4);
+  assert.equal(statsLib.calendarLevel(80, { goal: 100 }), 3);
+  assert.equal(statsLib.calendarLevel(100, { goal: 100 }), 4);
+});
+
+test('连续写作天数：今天写了从今天往前数；今天没写从昨天往前数（当天结束前不算断）', () => {
+  const stats = statsWith({
+    '2026-10-28': { books: { a: 10 } },
+    '2026-10-29': { books: { a: 20 } },
+    '2026-10-30': { books: { a: 30 } },
+    '2026-10-31': { books: { a: 40 } },
+    '2026-11-01': { books: { a: 50 } }
+  });
+  const onLastDay = statsLib.streak(stats, { now: new Date(2026, 10, 1, 23, 0) });
+  assert.deepEqual(onLastDay, {
+    current: 5,
+    best: 5,
+    todayWritten: true,
+    lastWritten: '2026-11-01',
+    writtenDays: 5
+  });
+
+  const nextDay = statsLib.streak(stats, { now: new Date(2026, 10, 2, 9, 0) });
+  assert.equal(nextDay.current, 5, '新的一天还没写时连续天数保留到当天结束');
+  assert.equal(nextDay.todayWritten, false);
+  assert.equal(nextDay.lastWritten, '2026-11-01');
+
+  const missedDay = statsLib.streak(stats, { now: new Date(2026, 10, 3, 9, 0) });
+  assert.equal(missedDay.current, 0, '昨天没写，连续中断');
+});
+
+test('连续写作天数：最长连续按历史算，断档 / 未来日期 / 空统计都安全', () => {
+  const stats = statsWith({
+    '2026-10-01': { books: { a: 1 } },
+    '2026-10-03': { books: { a: 1 } },
+    '2026-10-04': { books: { a: 1 } },
+    '2026-10-05': { books: { a: 1 } },
+    '2026-10-20': { books: { a: 1 } },
+    '2026-11-06': { books: { a: 1 } }
+  });
+  const now = new Date(2026, 9, 5, 12, 0);
+  const result = statsLib.streak(stats, { now });
+  assert.equal(result.current, 3, '10-03 ~ 10-05 连续三天，今天 10-05 已写');
+  assert.equal(result.best, 3);
+  assert.equal(result.writtenDays, 4, '未来的 10-20 / 11-06 不计入');
+  assert.equal(result.lastWritten, '2026-10-05', '最后写作日不取未来日期');
+
+  const empty = statsLib.streak(statsWith({}), { now });
+  assert.deepEqual(empty, {
+    current: 0,
+    best: 0,
+    todayWritten: false,
+    lastWritten: null,
+    writtenDays: 0
+  });
+});

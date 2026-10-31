@@ -5,6 +5,7 @@ const path = require('node:path');
 const chaptersLib = require('../core/chapters');
 const exporter = require('../core/exporter');
 const statsLib = require('../core/stats');
+const statsSeedLib = require('./e2e-stats-seed');
 const fragmentsLib = require('../core/fragments');
 const { readZip, assertWellFormedXml } = require('./export-check');
 
@@ -3390,6 +3391,205 @@ module.exports = async function runScenario(ctx) {
       await fs.rename(statsFailBackup, statsPath).catch(() => {});
     }
   }
+
+  // 44h. 码字日历 + 连续写作天数 + 月度汇总（v0.8-1，提案 N1）
+  // 跨天数据来自 scripts/e2e-stats-seed.js：启动前已写进临时 userData/stats.json，
+  // 种子月 = 两个月前（3 天：120 / 80 / 200 字），昨天 150 字；今天的字数由前面 44 组保存产生。
+  const calendarSeed = statsSeedLib.buildSeed();
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await waitFor("window.__cwTest.shelfStreakText().includes('连续')");
+  const calendarShelfStreak = await exec('window.__cwTest.shelfStreakText()');
+  const statsDiskNow = await readStatsDisk();
+  const expectedStreak = statsLib.streak(statsDiskNow, { now: new Date() });
+  check(
+    '码字日历：书架顶部显示连续写作天数',
+    calendarShelfStreak.includes('连续') &&
+      calendarShelfStreak.includes(String(expectedStreak.current)) &&
+      expectedStreak.best === calendarSeed.bestStreak,
+    { shelf: calendarShelfStreak, expectedStreak }
+  );
+  const statsFileStatBefore = await fs.stat(statsPath);
+  await exec('window.__cwTest.openSettings()');
+  const calendarStats = await exec('window.__cwTest.statsSummary()');
+  const calendarNow = await exec('window.__cwTest.statsCalendar()');
+  const streakNow = await exec('window.__cwTest.statsStreak()');
+  const todayParts = statsLib.parseDayKey(calendarSeed.todayKey);
+  const currentPrefix = `${todayParts.year}-${String(todayParts.month).padStart(2, '0')}-`;
+  const sumOfDays = (prefix) =>
+    Object.entries(statsDiskNow.days || {})
+      .filter(([day]) => day.startsWith(prefix))
+      .reduce(
+        (sum, [, entry]) =>
+          sum + Object.values((entry && entry.books) || {}).reduce((a, n) => a + Math.max(0, Number(n) || 0), 0),
+        0
+      );
+  const countWrittenDays = (prefix) =>
+    Object.entries(statsDiskNow.days || {}).filter(
+      ([day, entry]) =>
+        day.startsWith(prefix) &&
+        Object.values((entry && entry.books) || {}).some((n) => Math.max(0, Number(n) || 0) > 0)
+    ).length;
+  const expectedMonthTotal = sumOfDays(currentPrefix);
+  const expectedMonthWrittenDays = countWrittenDays(currentPrefix);
+  const calendarTodayCell = calendarNow && calendarNow.days.find((item) => item.day === calendarSeed.todayKey);
+  check(
+    '码字日历：默认显示本月，今天格子就是今天保存的字数',
+    calendarNow &&
+      calendarNow.year === todayParts.year &&
+      calendarNow.month === todayParts.month &&
+      calendarNow.isCurrentMonth === true &&
+      calendarNow.today === calendarSeed.todayKey &&
+      calendarNow.days.length === statsLib.daysInMonth(todayParts.year, todayParts.month) &&
+      calendarTodayCell &&
+      calendarTodayCell.chars === calendarStats.todayChars &&
+      calendarTodayCell.today === true &&
+      calendarTodayCell.future === false,
+    calendarNow && { year: calendarNow.year, month: calendarNow.month, todayCell: calendarTodayCell }
+  );
+  check(
+    '码字日历：本月合计 / 写字天数与 stats.json 一致',
+    calendarNow.total === expectedMonthTotal && calendarNow.writtenDays === expectedMonthWrittenDays,
+    { view: { total: calendarNow.total, writtenDays: calendarNow.writtenDays }, expectedMonthTotal, expectedMonthWrittenDays }
+  );
+  check(
+    '码字日历：连续写作天数来自 stats.json（昨天 + 今天 = 2 天，最长 3 天）',
+    streakNow &&
+      streakNow.current === expectedStreak.current &&
+      streakNow.best === expectedStreak.best &&
+      expectedStreak.current === 2 &&
+      expectedStreak.best === 3,
+    { streakNow, expectedStreak }
+  );
+  check(
+    '码字日历：设置里显示月份标题、当月格子和「今天 / 本月」按钮状态',
+    (await exec('window.__cwTest.calendarVisible()')) === true &&
+      (await exec('window.__cwTest.calendarLabel()')) === calendarNow.label &&
+      (await exec('window.__cwTest.calendarCellCount()')) === calendarNow.days.length &&
+      (await exec('window.__cwTest.calendarNextDisabled()')) === true &&
+      (await exec('window.__cwTest.calendarTodayDisabled()')) === true &&
+      (await exec('window.__cwTest.calendarPrevDisabled()')) === false &&
+      (await exec('window.__cwTest.calendarSummaryText()')).includes('本月') &&
+      (await exec('window.__cwTest.calendarSummaryText()')).includes('写了') &&
+      (await exec('window.__cwTest.calendarStreakText()')).includes('最长') &&
+      (await exec('window.__cwTest.calendarStreakText()')).includes('连续'),
+    await exec('window.__cwTest.calendarSummaryText()')
+  );
+
+  // 44h-1. 设目标 100：翻到种子月验证「每日达标 / 月度达标天数 / 色阶」
+  await exec("window.__cwTest.setInput('settings-daily-goal', 100)");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.dailyGoal === 100)');
+  await exec('window.__cwTest.openSettings()');
+  await exec('window.__cwTest.calendarShift(-1)');
+  await exec('window.__cwTest.calendarShift(-1)');
+  const calendarSeedView = await exec('window.__cwTest.statsCalendar()');
+  const calendarSeedLabel = await exec('window.__cwTest.calendarLabel()');
+  const calendarSeedSummary = await exec('window.__cwTest.calendarSummaryText()');
+  const calendarSeedStreak = await exec('window.__cwTest.calendarStreakText()');
+  const seedCells = [];
+  for (const item of calendarSeed.seedDays) {
+    seedCells.push(await exec(`window.__cwTest.calendarDayInfo(${JSON.stringify(item.day)})`));
+  }
+  check(
+    '码字日历：翻到种子月，月度汇总 / 最高一天正确',
+    calendarSeedView &&
+      calendarSeedView.year === calendarSeed.seedYear &&
+      calendarSeedView.month === calendarSeed.seedMonth &&
+      calendarSeedView.label === calendarSeed.seedMonthLabel &&
+      calendarSeedView.goal === 100 &&
+      calendarSeedView.total === calendarSeed.monthTotal &&
+      calendarSeedView.writtenDays === calendarSeed.monthWrittenDays &&
+      calendarSeedView.goalDays === 2 &&
+      calendarSeedView.average === calendarSeed.monthAverage &&
+      calendarSeedView.bestDay &&
+      calendarSeedView.bestDay.day === calendarSeed.monthBestDay &&
+      calendarSeedView.bestDay.chars === calendarSeed.monthBestChars &&
+      calendarSeedView.isCurrentMonth === false,
+    calendarSeedView && {
+      year: calendarSeedView.year,
+      month: calendarSeedView.month,
+      total: calendarSeedView.total,
+      goalDays: calendarSeedView.goalDays
+    }
+  );
+  check(
+    '码字日历：种子月每日格子字数 / 达标 / 色阶正确',
+    seedCells.every(
+      (cell, index) =>
+        cell &&
+        cell.chars === calendarSeed.seedDays[index].chars &&
+        cell.goalMet === calendarSeed.seedDays[index].chars >= 100 &&
+        cell.today === false &&
+        cell.future === false
+    ) &&
+      seedCells[0].level === 4 &&
+      seedCells[1].level === 3 &&
+      seedCells[2].level === 4,
+    seedCells
+  );
+  check(
+    '码字日历：UI 标题 / 月度汇总 / 连续天数跟着翻月更新',
+    calendarSeedLabel === calendarSeed.seedMonthLabel &&
+      calendarSeedSummary.includes(`${calendarSeed.seedMonth}月`) &&
+      calendarSeedSummary.includes(`${calendarSeed.monthTotal} 字`) &&
+      calendarSeedSummary.includes(`写了 ${calendarSeed.monthWrittenDays} 天`) &&
+      calendarSeedSummary.includes(`日均 ${calendarSeed.monthAverage} 字`) &&
+      calendarSeedSummary.includes('达标 2 天') &&
+      calendarSeedSummary.includes('最高') &&
+      calendarSeedStreak.includes('已连续写作 2 天') &&
+      calendarSeedStreak.includes('最长 3 天') &&
+      (await exec('window.__cwTest.calendarNextDisabled()')) === false &&
+      (await exec('window.__cwTest.calendarTodayDisabled()')) === false,
+    { label: calendarSeedLabel, summary: calendarSeedSummary, streak: calendarSeedStreak }
+  );
+
+  // 44h-2. 翻回本月 / 不允许翻到未来 / 「本月」按钮；全程只读取 stats.json
+  await exec('window.__cwTest.calendarShift(1)');
+  await exec('window.__cwTest.calendarShift(1)');
+  const calendarBackLabel = await exec('window.__cwTest.calendarLabel()');
+  const calendarFutureBlocked = await exec('window.__cwTest.calendarShift(1)');
+  await exec('window.__cwTest.calendarShift(-1)');
+  await exec('window.__cwTest.calendarGoToday()');
+  check(
+    '码字日历：翻回本月、不允许翻到未来、「本月」按钮可用',
+    calendarBackLabel === calendarNow.label &&
+      (await exec('window.__cwTest.calendarNextDisabled()')) === true &&
+      calendarFutureBlocked === false &&
+      (await exec('window.__cwTest.calendarLabel()')) === calendarNow.label &&
+      (await exec('window.__cwTest.calendarTodayDisabled()')) === true,
+    { calendarBackLabel, calendarFutureBlocked, label: await exec('window.__cwTest.calendarLabel()') }
+  );
+  const statsFileStatAfter = await fs.stat(statsPath);
+  const statsDiskFinal = await readStatsDisk();
+  const configDiskFinal = await readConfigDisk();
+  check(
+    '码字日历：翻月 / 看日历只读，stats.json 大小与修改时间不变',
+    statsFileStatAfter.size === statsFileStatBefore.size && statsFileStatAfter.mtimeMs === statsFileStatBefore.mtimeMs,
+    { before: { size: statsFileStatBefore.size, mtimeMs: statsFileStatBefore.mtimeMs }, after: { size: statsFileStatAfter.size, mtimeMs: statsFileStatAfter.mtimeMs } }
+  );
+  check(
+    '码字日历：日历 / 连续天数只现算，不往 stats.json 写缓存字段',
+    Object.keys(statsDiskFinal).sort().join('|') === 'days|version' &&
+      Object.keys(statsDiskFinal.days).every((day) => Object.keys(statsDiskFinal.days[day]).join('|') === 'books')
+  );
+  check(
+    '码字日历：不新增配置字段（目标仍是既有 dailyGoal）',
+    !('calendar' in configDiskFinal) && !('statsCalendar' in configDiskFinal) && !('streak' in configDiskFinal)
+  );
+
+  // 44h-3. 收尾：目标改回 0；写作页按书设置里不显示全局日历
+  await exec("window.__cwTest.setInput('settings-daily-goal', '0')");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.dailyGoal === 0)');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '码字日历：写作页按书设置里不显示（全局统计）',
+    (await exec('window.__cwTest.calendarVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
 
   // 45. 导出 EPUB（v0.7-1）：整本书 → EPUB 3；分卷做目录级、一章一个 XHTML、纯文字封面
   await exec("window.__cwTest.newBook('EPUB导出测试书')");

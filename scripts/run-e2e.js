@@ -12,6 +12,9 @@ const userData = path.join(base, 'userdata');
 const books = path.join(base, 'books');
 fs.mkdirSync(userData, { recursive: true });
 fs.mkdirSync(books, { recursive: true });
+// 码字日历 / 连续天数需要跨天数据：只往临时 userData 的 stats.json 写种子（不碰书库与真实配置）。
+const { buildSeed } = require('./e2e-stats-seed');
+fs.writeFileSync(path.join(userData, 'stats.json'), JSON.stringify(buildSeed().stats), 'utf8');
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;

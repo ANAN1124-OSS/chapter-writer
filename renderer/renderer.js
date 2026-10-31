@@ -149,7 +149,9 @@
       shown: CONTENT_PAGE_SIZE, // 已经展示几条（「显示更多」每次 +8）
       indexStatus: null // 索引状态 / 建索引进度（只用于提示，不落盘）
     },
-    stats: null, // 每日字数摘要：{ day, todayChars, goal, goalPercent, goalMet, recentTotal, days[] }
+    stats: null, // 每日字数摘要：{ day, todayChars, goal, goalPercent, goalMet, recentTotal, days[], streak }
+    calendar: null, // 设置里显示的码字日历月视图（只读；翻月时由 stats:calendar 换）
+    streak: null, // 连续写作天数：{ current, best, todayWritten, lastWritten, writtenDays }
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
     jumpOutOfRange: false, // 输入的是章号但超出本书章数
@@ -2049,7 +2051,10 @@
   // 日期 / 增量都在主进程算，渲染层只负责显示；统计文件在 userData，不碰书库。
   async function refreshStats() {
     try {
-      state.stats = await call(api.getStats);
+      const payload = await call(api.getStats);
+      state.stats = payload;
+      state.streak = payload && payload.streak ? payload.streak : null;
+      state.calendar = payload && payload.calendar ? payload.calendar : null;
     } catch {
       /* 统计读不到不影响写作，保留上一次显示 */
     }
@@ -2082,6 +2087,15 @@
         $('shelf-stats-goal').hidden = goal <= 0;
         $('shelf-goal-track').classList.toggle('hidden', goal <= 0);
         $('shelf-goal-fill').style.width = goal > 0 ? `${percent}%` : '0%';
+        const streakEl = $('shelf-stats-streak');
+        const currentStreak = Math.max(0, Math.round(Number(state.streak && state.streak.current) || 0));
+        const bestStreak = Math.max(0, Math.round(Number(state.streak && state.streak.best) || 0));
+        if (streakEl) {
+          streakEl.textContent = currentStreak > 0 ? `连续 ${currentStreak} 天` : '';
+          streakEl.hidden = currentStreak <= 0;
+          streakEl.title =
+            currentStreak > 0 ? `已连续写作 ${currentStreak} 天 · 最长连续 ${bestStreak} 天` : '';
+        }
         shelf.title = title;
       }
     }
@@ -2097,6 +2111,7 @@
       }
     }
     renderStatsChart();
+    renderStatsCalendar();
   }
 
   // 设置里的近 30 天柱状图：纯 CSS 高度，不引第三方库。今天那根高亮。
@@ -2131,6 +2146,164 @@
     if (goalState) {
       const percent = Math.max(0, Math.min(100, Math.floor(Number(stats && stats.goalPercent) || 0)));
       goalState.textContent = goal > 0 ? `今天完成 ${percent}%${stats && stats.goalMet ? ' · 已达标' : ''}` : '未设目标';
+    }
+  }
+
+  // ---------- 码字日历 / 连续写作天数 / 月度汇总（v0.8-1，提案 N1） ----------
+  // 月视图由主进程从 stats.json 现算（只读，不另存文件）；渲染层只负责显示和翻月。
+  // 连续天数与「今天是哪个月」都以主进程 / 本机本地日期为准，不在这里重算。
+  function currentYearMonth() {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() + 1 };
+  }
+
+  function statsCalendarCursor() {
+    const view = state.calendar;
+    if (view && Number.isInteger(view.year) && Number.isInteger(view.month)) {
+      return { year: view.year, month: view.month };
+    }
+    return currentYearMonth();
+  }
+
+  function compareYearMonth(a, b) {
+    if (a.year !== b.year) return a.year - b.year;
+    return a.month - b.month;
+  }
+
+  function shiftYearMonth(cursor, delta) {
+    const date = new Date(cursor.year, cursor.month - 1 + Math.trunc(delta), 1, 12, 0, 0, 0);
+    return { year: date.getFullYear(), month: date.getMonth() + 1 };
+  }
+
+  function calendarStreakLabel(streak) {
+    const current = Math.max(0, Math.round(Number(streak && streak.current) || 0));
+    const best = Math.max(0, Math.round(Number(streak && streak.best) || 0));
+    if (best <= 0) return '还没有写作记录';
+    if (current > 0) return `已连续写作 ${current} 天 · 最长 ${best} 天`;
+    return `连续写作中断 · 最长 ${best} 天`;
+  }
+
+  function calendarSummaryText(view) {
+    if (!view) return '';
+    if (!view.writtenDays) {
+      return view.isCurrentMonth ? '本月还没有保存记录（保存一次后开始记录）' : '这个月没有保存记录';
+    }
+    const goalText = view.goal > 0 ? ` · 达标 ${view.goalDays} 天` : '';
+    const bestText = view.bestDay
+      ? ` · 最高 ${view.bestDay.day.slice(5)}（${formatChars(view.bestDay.chars)}）`
+      : '';
+    const prefix = view.isCurrentMonth ? '本月' : `${view.month}月`;
+    return `${prefix} ${formatChars(view.total)} · 写了 ${view.writtenDays} 天 · 日均 ${formatChars(view.average)}${goalText}${bestText}`;
+  }
+
+  async function loadStatsCalendar(year, month) {
+    try {
+      const data = await call(api.getStatsCalendar, { year, month });
+      if (data && data.calendar) state.calendar = data.calendar;
+      if (data && data.streak) state.streak = data.streak;
+      renderStatsCalendar();
+      return state.calendar;
+    } catch (err) {
+      const summaryEl = $('calendar-summary');
+      if (summaryEl) summaryEl.textContent = `读取码字日历失败：${err.message}`;
+      return null;
+    }
+  }
+
+  // 只允许往前 / 回到本月，不翻到未来（未来月份没有码字记录，翻过去只会看到空格子）。
+  async function shiftStatsCalendar(delta) {
+    const step = Math.trunc(Number(delta));
+    if (!Number.isFinite(step) || step === 0) return false;
+    const next = shiftYearMonth(statsCalendarCursor(), step);
+    const now = currentYearMonth();
+    if (compareYearMonth(next, now) > 0) return false;
+    if (next.year < 1970) return false;
+    return loadStatsCalendar(next.year, next.month);
+  }
+
+  async function goToCurrentCalendarMonth() {
+    const now = currentYearMonth();
+    return loadStatsCalendar(now.year, now.month);
+  }
+
+  function appendCalendarBlank(grid) {
+    const blank = document.createElement('div');
+    blank.className = 'cal-day empty';
+    grid.appendChild(blank);
+  }
+
+  function renderStatsCalendar() {
+    const grid = $('calendar-grid');
+    if (!grid) return;
+    const view = state.calendar;
+    const weekdaysEl = $('calendar-weekdays');
+    const labelEl = $('calendar-label');
+    const summaryEl = $('calendar-summary');
+    const streakEl = $('calendar-streak');
+    const prevBtn = $('calendar-prev');
+    const nextBtn = $('calendar-next');
+    const todayBtn = $('calendar-today');
+
+    if (weekdaysEl && weekdaysEl.childElementCount === 0) {
+      const labels = (view && Array.isArray(view.weekdayLabels) && view.weekdayLabels.length === 7)
+        ? view.weekdayLabels
+        : ['一', '二', '三', '四', '五', '六', '日'];
+      for (const text of labels) {
+        const cell = document.createElement('span');
+        cell.textContent = text;
+        weekdaysEl.appendChild(cell);
+      }
+    }
+
+    if (!view) {
+      if (labelEl) labelEl.textContent = '';
+      grid.innerHTML = '';
+      if (summaryEl) summaryEl.textContent = '还没有统计数据（保存一次后开始记录）';
+      if (streakEl) streakEl.textContent = '';
+      if (prevBtn) prevBtn.disabled = true;
+      if (nextBtn) nextBtn.disabled = true;
+      if (todayBtn) todayBtn.disabled = true;
+      return;
+    }
+
+    if (labelEl) labelEl.textContent = view.label;
+    const current = currentYearMonth();
+    const isCurrent = view.year === current.year && view.month === current.month;
+    if (prevBtn) prevBtn.disabled = view.year <= 1970 && view.month <= 1;
+    if (nextBtn) nextBtn.disabled = isCurrent;
+    if (todayBtn) todayBtn.disabled = isCurrent;
+
+    grid.innerHTML = '';
+    for (let i = 0; i < view.firstWeekday; i += 1) appendCalendarBlank(grid);
+    for (const item of view.days) {
+      const cell = document.createElement('div');
+      cell.className = 'cal-day';
+      if (item.written) cell.classList.add('written', `lv${item.level}`);
+      if (item.goalMet) cell.classList.add('goal-met');
+      if (item.today) cell.classList.add('today');
+      if (item.future) cell.classList.add('future');
+      cell.dataset.day = item.day;
+      cell.dataset.chars = String(item.chars);
+      cell.dataset.level = String(item.level);
+      cell.dataset.goalMet = item.goalMet ? '1' : '0';
+      const num = document.createElement('span');
+      num.textContent = String(item.dayOfMonth);
+      cell.appendChild(num);
+      cell.title =
+        `${item.day} · ${item.chars > 0 ? formatChars(item.chars) : '没写'}` +
+        (item.goalMet ? ' · 已达标' : '') +
+        (item.today ? ' · 今天' : '') +
+        (item.future ? ' · 还没到' : '');
+      grid.appendChild(cell);
+    }
+    const filled = view.firstWeekday + view.days.length;
+    const tail = (7 - (filled % 7)) % 7;
+    for (let i = 0; i < tail; i += 1) appendCalendarBlank(grid);
+
+    if (summaryEl) summaryEl.textContent = calendarSummaryText(view);
+    if (streakEl) {
+      streakEl.textContent = calendarStreakLabel(state.streak);
+      streakEl.classList.toggle('off', !(state.streak && state.streak.current > 0));
     }
   }
 
@@ -2253,6 +2426,7 @@
       // 不再多跑一次 IPC（统计失败时 data.stats 为 null，界面保留旧数字）。
       if (data.stats) {
         state.stats = data.stats;
+        if (data.stats.streak) state.streak = data.stats.streak;
         renderStatsUi();
       }
       // 保存后同步本章字数缓存：章节列表的字数 / 「比上章短」提示跟着更新
@@ -5967,6 +6141,7 @@
       'settings-stats-group',
       'settings-daily-goal-field',
       'settings-stats-chart-field',
+      'settings-calendar-field',
       'settings-stats-hint'
     ]) {
       const el = $(id);
@@ -6091,6 +6266,16 @@
     $('btn-settings-cancel').addEventListener('click', closeSettings);
     $('btn-settings-save').addEventListener('click', saveSettings);
     $('btn-reset-book-display').addEventListener('click', resetBookDisplay);
+    // 码字日历：翻月 / 回到本月（只读；点击不会写 stats.json）
+    $('calendar-prev').addEventListener('click', () => {
+      void shiftStatsCalendar(-1);
+    });
+    $('calendar-next').addEventListener('click', () => {
+      void shiftStatsCalendar(1);
+    });
+    $('calendar-today').addEventListener('click', () => {
+      void goToCurrentCalendarMonth();
+    });
     $('btn-pick-folder').addEventListener('click', async () => {
       try {
         const folder = await call(api.pickFolder);
@@ -7677,6 +7862,32 @@
       statsChartBarHeights: () =>
         Array.from(document.querySelectorAll('#settings-stats-chart .stats-bar > i')).map((el) => el.style.height),
       statsChartSummary: () => $('settings-stats-summary').textContent,
+      // 码字日历 / 连续天数（v0.8-1）
+      statsCalendar: () => (state.calendar ? JSON.parse(JSON.stringify(state.calendar)) : null),
+      statsStreak: () => (state.streak ? JSON.parse(JSON.stringify(state.streak)) : null),
+      calendarShift: (delta) => shiftStatsCalendar(delta),
+      calendarGoToday: () => goToCurrentCalendarMonth(),
+      calendarVisible: () => !$('settings-calendar-field').classList.contains('hidden'),
+      calendarLabel: () => $('calendar-label').textContent,
+      calendarSummaryText: () => $('calendar-summary').textContent,
+      calendarStreakText: () => $('calendar-streak').textContent,
+      calendarCellCount: () => document.querySelectorAll('#calendar-grid .cal-day[data-day]').length,
+      calendarDayInfo: (day) => {
+        const el = document.querySelector(`#calendar-grid .cal-day[data-day="${day}"]`);
+        if (!el) return null;
+        return {
+          day: el.dataset.day,
+          chars: Number(el.dataset.chars),
+          level: Number(el.dataset.level),
+          goalMet: el.dataset.goalMet === '1',
+          today: el.classList.contains('today'),
+          future: el.classList.contains('future')
+        };
+      },
+      calendarNextDisabled: () => $('calendar-next').disabled,
+      calendarPrevDisabled: () => $('calendar-prev').disabled,
+      calendarTodayDisabled: () => $('calendar-today').disabled,
+      shelfStreakText: () => $('shelf-stats-streak').textContent,
       setInput(id, value) {
         const el = $(id);
         el.value = String(value);

@@ -32,6 +32,7 @@
         <div id="shelf-stats" class="shelf-stats hidden">
           <span id="shelf-stats-today" class="shelf-stats-today"></span>
           <span id="shelf-stats-goal" class="shelf-stats-goal"></span>
+          <span id="shelf-stats-streak" class="shelf-stats-streak" hidden></span>
           <span class="goal-track" id="shelf-goal-track"><i id="shelf-goal-fill"></i></span>
         </div>
         <div id="shelf-continue" class="shelf-continue hidden">
@@ -603,9 +604,25 @@
         <div id="settings-stats-summary" class="muted small"></div>
         <div id="settings-stats-chart" class="stats-chart"></div>
       </div>
+      <div class="field" id="settings-calendar-field">
+        <span>码字日历（周一开头；只统计按保存时写下的字数）</span>
+        <div class="calendar-head">
+          <button id="calendar-prev" class="btn ghost tiny" type="button" title="上一个月" aria-label="上一个月">‹</button>
+          <span id="calendar-label" class="calendar-label"></span>
+          <button id="calendar-next" class="btn ghost tiny" type="button" title="下一个月" aria-label="下一个月">›</button>
+          <button id="calendar-today" class="btn ghost tiny" type="button" title="回到本月">本月</button>
+          <span id="calendar-streak" class="calendar-streak"></span>
+        </div>
+        <div id="calendar-weekdays" class="calendar-weekdays"></div>
+        <div id="calendar-grid" class="calendar-grid"></div>
+        <div id="calendar-summary" class="muted small"></div>
+        <div class="calendar-legend muted small">
+          颜色越深写得越多；<span class="cal-legend-dot"></span> = 当天达到每日目标；灰色斜线 = 还没到的日期
+        </div>
+      </div>
       <p class="muted small" id="settings-stats-hint">
         统计只存在应用配置目录的 <code>stats.json</code>，不写进书库、不改章节 txt；只统计保存动作带来的新增字数，
-        删字不会倒扣当天进度。旧配置没有目标字段时按「不设目标」处理。
+        删字不会倒扣当天进度。旧配置没有目标字段时按「不设目标」处理。码字日历 / 连续天数都从这份统计现算，不另存文件。
       </p>
       <div class="field-group">数据安全</div>
       <div class="field" id="settings-snapshot-field">
