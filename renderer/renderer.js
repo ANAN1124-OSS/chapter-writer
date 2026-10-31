@@ -975,6 +975,10 @@
       api.closeReady(false);
       return;
     }
+    // 关窗前先把排版/设置弹层收掉：否则「保存 / 不保存 / 取消」的询问会被它们压住
+    hideFormatMenu();
+    closeFormatDialog();
+    if (!$('settings-backdrop').classList.contains('hidden')) closeSettings();
     if (!state.dirty || !state.bookPath) {
       api.closeReady(true);
       return;
@@ -1229,7 +1233,12 @@
 
   // 把整理结果写进编辑区：用 execCommand 走原生输入，保住 Ctrl+Z 的原生撤销链；
   // 失败再退回直接赋值。两条路都会触发 input → 标记未保存。
-  function insertFormattedText(text) {
+  // hint = { text: 整理前的正文, pos: 整理前光标位置 }，用来把光标映射回原来的位置。
+  function insertFormattedText(text, hint) {
+    const pos = hint && Number.isFinite(hint.pos) ? hint.pos : 0;
+    const caret = hint && typeof hint.text === 'string'
+      ? mapCaretPosition(hint.text, text, pos)
+      : Math.min(pos, text.length);
     editorEl.focus();
     editorEl.setSelectionRange(0, editorEl.value.length);
     let inserted = false;
@@ -1242,8 +1251,34 @@
       editorEl.value = text;
       onEditorInput();
     }
-    editorEl.setSelectionRange(0, 0);
-    editorEl.scrollTop = 0;
+    editorEl.setSelectionRange(caret, caret);
+    scrollCaretIntoView(caret);
+  }
+
+  // 整理只动空白/标点，正文有效字符的顺序不变：按「第 N 个非空白字符」把光标映射回去，
+  // 避免整理/撤销后光标被拉回章首（长章里接着打字会插到全章最前面）。
+  function mapCaretPosition(sourceText, targetText, sourcePos) {
+    const contentBefore = String(sourceText).slice(0, Math.max(0, sourcePos));
+    const wanted = contentBefore.replace(/\s/g, '').length;
+    if (!wanted) return 0;
+    let count = 0;
+    for (let i = 0; i < targetText.length; i += 1) {
+      if (!/\s/.test(targetText[i])) {
+        count += 1;
+        if (count >= wanted) return i + 1;
+      }
+    }
+    return targetText.length;
+  }
+
+  function scrollCaretIntoView(pos) {
+    const lineIndex = (editorEl.value.slice(0, pos).match(/\n/g) || []).length;
+    const lineHeight = parseFloat(getComputedStyle(editorEl).lineHeight) || 32;
+    const top = lineIndex * lineHeight;
+    const viewBottom = editorEl.scrollTop + editorEl.clientHeight - lineHeight * 2;
+    if (top < editorEl.scrollTop || top > viewBottom) {
+      editorEl.scrollTop = Math.max(0, top - editorEl.clientHeight / 3);
+    }
   }
 
   function pushFormatUndo(before, after) {
@@ -1268,7 +1303,8 @@
   function undoFormat() {
     if (!canUndoFormat()) return false;
     const top = state.formatUndo.pop();
-    insertFormattedText(top.before);
+    const caret = editorEl.selectionStart || 0;
+    insertFormattedText(top.before, { text: top.after, pos: caret });
     toast('已撤销整理（仍在编辑区，未写盘）');
     return true;
   }
@@ -1276,6 +1312,7 @@
   async function applyFormatToEditor() {
     if (!state.bookPath || state.index < 0) return;
     const before = editorEl.value;
+    const beforeCaret = editorEl.selectionStart || 0;
     if (!String(before == null ? '' : before).trim()) {
       toast('本章还没有内容', 'warn');
       return;
@@ -1293,7 +1330,7 @@
         toast('本章已经是整理后的格式，没有改动');
         return;
       }
-      insertFormattedText(res.text);
+      insertFormattedText(res.text, { text: before, pos: beforeCaret });
       pushFormatUndo(before, res.text);
       toast(`已整理本章：${res.stats.paragraphs} 段 · Ctrl+S 保存 · Ctrl+Z 撤销`);
     } catch (err) {
@@ -1502,6 +1539,18 @@
     });
 
     document.addEventListener('keydown', (event) => {
+      // 通用询问框最优先（它可能是在排版/设置弹层开着时弹出的关窗询问）
+      if (state.modal) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeModal({ action: state.modal.opts.cancelValue });
+        } else if (event.key === 'Enter' && state.modal.opts.input) {
+          event.preventDefault();
+          const okButton = $('modal-buttons').querySelector('button[data-value="ok"]');
+          if (okButton) okButton.click();
+        }
+        return;
+      }
       if (!$('format-backdrop').classList.contains('hidden')) {
         if (event.key === 'Escape') {
           event.preventDefault();
@@ -1513,17 +1562,6 @@
         if (event.key === 'Escape') {
           event.preventDefault();
           closeSettings();
-        }
-        return;
-      }
-      if (state.modal) {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          closeModal({ action: state.modal.opts.cancelValue });
-        } else if (event.key === 'Enter' && state.modal.opts.input) {
-          event.preventDefault();
-          const okButton = $('modal-buttons').querySelector('button[data-value="ok"]');
-          if (okButton) okButton.click();
         }
         return;
       }
@@ -1625,6 +1663,12 @@
       shelfTitles: () => state.books.map((b) => b.title),
       sidebarWidth: () => state.sidebarWidth,
       setSidebarWidth: (width) => applySidebarWidth(width),
+      caret: () => editorEl.selectionStart,
+      setCaret(pos) {
+        editorEl.focus();
+        const at = Math.max(0, Number(pos) || 0);
+        editorEl.setSelectionRange(at, at);
+      },
       // 排版
       openFormatMenu: () => toggleFormatMenu(),
       formatMenuOpen: () => !$('format-menu').classList.contains('hidden'),

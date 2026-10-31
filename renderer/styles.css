@@ -440,6 +440,9 @@ body.resizing .editor {
   justify-content: center;
   background: rgba(43, 40, 34, .36);
 }
+/* 通用询问框（保存 / 不保存 / 取消）必须压在排版、设置等弹层之上：
+   关窗时它是在别的弹层开着的情况下弹出来的，z-index 相同会被 DOM 顺序盖住。 */
+#modal-backdrop { z-index: 300; }
 .modal {
   width: min(560px, 88vw);
   max-height: 84vh;
