@@ -1742,6 +1742,7 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 .proofread-rule.rule-repeat-word { color: var(--accent); }
 .proofread-rule.rule-punct-run { color: var(--warn); }
 .proofread-rule.rule-blank-lines { color: var(--ink-faint); }
+.proofread-rule.rule-custom-word { color: var(--danger); }
 .proofread-chapter { font-weight: 600; }
 .proofread-pos { font-size: 12px; color: var(--ink-soft); }
 .proofread-message { margin-top: 3px; font-size: 12.5px; color: var(--ink-soft); }
@@ -1775,8 +1776,10 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   border-radius: 8px;
   background: var(--paper-deep);
 }
-.sensitive-wordlist #sensitive-wordlist-text { flex: 1; min-width: 0; }
-.sensitive-wordlist .warn { color: var(--warn); }
+.sensitive-wordlist #sensitive-wordlist-text,
+.proofread-wordlist #proofread-wordlist-text { flex: 1; min-width: 0; }
+.sensitive-wordlist .warn,
+.proofread-wordlist .warn { color: var(--warn); }
 .sensitive-word { color: var(--danger); font-weight: 600; }
 
 /* ---------- 灵感箱（碎片速记） ---------- */

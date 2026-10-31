@@ -43,6 +43,7 @@ const statsLib = require('./core/stats');
 const epubLib = require('./core/epub');
 const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
+const glossaryLib = require('./core/glossary');
 const ttsLib = require('./core/tts');
 const logsLib = require('./core/logs');
 const searchIndexLib = require('./core/search-index');
@@ -842,11 +843,38 @@ function registerIpc() {
     return formatLib.formatText(text, options);
   });
 
-  // 校对（提案 5.1）：只报告、不改动。当前章正文由渲染层传上来（和查找一样，不读盘）；
+  // 校对（提案 5.1 / N6）：只报告、不改动。当前章正文由渲染层传上来（和查找一样，不读盘）；
   // 整本版走 book:proofread，逐章只读磁盘。index 是归一 CRLF 后的字符位置，可直接选中。
+  // 校对词表（可选，作者自己的错别字 / 禁用词）存在 config 里，主进程只读；渲染层不传路径。
   handle('text:proofread', async (text, options) => {
     if (typeof text !== 'string') throw new Error('正文必须是文本');
-    return proofreadLib.proofreadText(text, options);
+    const cfg = await getConfig();
+    const list = await glossaryLib.readGlossaryFile(cfg.proofreadWordsPath);
+    const wordList = glossaryLib.publicGlossaryInfo(list);
+    const result = proofreadLib.proofreadText(text, options, list.ok ? list.entries : []);
+    return { ...result, wordList };
+  });
+
+  // 校对词表状态（只读）：只给渲染层数量与错误提示，绝不带词表正文
+  handle('proofread:words-info', async () => {
+    const cfg = await getConfig();
+    return glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(cfg.proofreadWordsPath));
+  });
+
+  // 选校对词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
+  handle('proofread:pick-words', async () => {
+    const { canceled, filePaths } = await showOpenDialog({
+      title: '选择校对词表（每行一个词，可写「错词 → 建议」）',
+      buttonLabel: '使用这个词表',
+      properties: ['openFile'],
+      filters: [
+        { name: '文本文件', extensions: ['txt'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    });
+    if (canceled || !filePaths || !filePaths.length) return { canceled: true };
+    const picked = glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(filePaths[0]));
+    return { canceled: false, ...picked };
   });
 
   // 敏感词预检（提案 5.2）：词表完全由作者管理，应用不内置任何词表。
@@ -1085,6 +1113,11 @@ function registerIpc() {
     const meta = await storage.readBookMeta(bookPath);
     const overrideIndex = exporter.chapterIndexOf(meta, override);
     const limits = proofreadLib.sanitizeOptions(options);
+    // 校对词表只读一次，整本每章共用（没设置 / 读不了 = 只跑内置五条规则，面板会提示）
+    const cfg = await getConfig();
+    const list = await glossaryLib.readGlossaryFile(cfg.proofreadWordsPath);
+    const wordList = glossaryLib.publicGlossaryInfo(list);
+    const customEntries = list.ok ? list.entries : [];
     const BOOK_ISSUE_LIMIT = 1500;
     const byRule = {};
     for (const rule of proofreadLib.RULE_ORDER) byRule[rule] = 0;
@@ -1109,7 +1142,7 @@ function registerIpc() {
           throw err;
         }
       }
-      const result = proofreadLib.proofreadText(text, limits);
+      const result = proofreadLib.proofreadText(text, limits, customEntries);
       total += result.total;
       for (const rule of proofreadLib.RULE_ORDER) byRule[rule] += result.byRule[rule] || 0;
       if (result.total) {
@@ -1147,6 +1180,8 @@ function registerIpc() {
       chapterHitCount: chapters.length,
       skippedChapters,
       truncated: truncated || total > issues.length,
+      wordList,
+      customWordCount: customEntries.length,
       options: limits
     };
   });
@@ -1847,6 +1882,7 @@ async function runAutomation() {
         screenshotDialog === 'settings-calendar' ||
         screenshotDialog === 'settings-template' ||
         screenshotDialog === 'settings-sensitive' ||
+        screenshotDialog === 'settings-proofread' ||
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
       ) {
@@ -1888,6 +1924,13 @@ async function runAutomation() {
           await sleep(600);
           await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-sensitive-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-proofread') {
+          // 开发截图用：滚到「校对词表」设置（只读状态，不保存）
+          await sleep(700);
+          await automationWin.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-proofread-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-logs') {

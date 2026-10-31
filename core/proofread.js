@@ -7,22 +7,32 @@
 //   ③ 疑似重复用词：默认 300 字窗口内同一个双字词出现 ≥3 次（重叠命中只算一次）
 //   ④ 连续标点：「？！？」这类 3 个以上；连续的「……」/「——」按一个单位算，不误报
 //   ⑤ 多余空行：2 个及以上连续空行（含只有全角空格的行）
+//   ⑥ 自定义词表：作者自己的错别字 / 禁用词（可选「错词 → 建议」）；没有词表就不产出这一条
 //
 // 定位约定：index / length 都是「把 CRLF 归一成 \n、去掉 BOM」之后的字符位置，
 // 与编辑区 textarea 的 value 一致，因此可以直接 setSelectionRange。
 const formatLib = require('./format');
 const findLib = require('./find');
 const chaptersLib = require('./chapters');
+const glossaryLib = require('./glossary');
 
 // 报告顺序（同位置时按这个顺序排；结果列表也按规则分组显示）
-const RULE_ORDER = ['halfwidth-punct', 'long-paragraph', 'repeat-word', 'punct-run', 'blank-lines'];
+const RULE_ORDER = [
+  'halfwidth-punct',
+  'long-paragraph',
+  'repeat-word',
+  'punct-run',
+  'blank-lines',
+  'custom-word'
+];
 
 const RULE_LABELS = Object.freeze({
   'halfwidth-punct': '半角标点',
   'long-paragraph': '超长段落',
   'repeat-word': '重复用词',
   'punct-run': '连续标点',
-  'blank-lines': '多余空行'
+  'blank-lines': '多余空行',
+  'custom-word': '自定义词表'
 });
 
 // 阈值都能改，但有上下限：避免误填 1 字 / 0 字窗口导致满屏误报
@@ -167,7 +177,9 @@ function repeatWordIssues(line, options) {
   return kept;
 }
 
-function proofreadText(text, rawOptions) {
+// rawGlossary 可选：作者自己的校对词表（[{ term, suggestion }]，建议可为空）。
+// 不传 / 传空数组时只有前五条内置规则，行为与以前完全一样。
+function proofreadText(text, rawOptions, rawGlossary) {
   const options = sanitizeOptions(rawOptions);
   const source = normalizeText(text);
   const collector = createCollector(options.maxIssues);
@@ -295,6 +307,22 @@ function proofreadText(text, rawOptions) {
     lineIndex = next;
   }
 
+  // ⑥ 自定义校对词表（可选的作者词表；没有词表时这一条不产出任何结果）
+  const customEntries = glossaryLib.sanitizeEntries(rawGlossary);
+  const custom = glossaryLib.findHits(source, customEntries);
+  for (const hit of custom.hits) {
+    addIssue(
+      'custom-word',
+      hit.index,
+      hit.length,
+      hit.term,
+      hit.suggestion
+        ? `词表里的「${hit.term}」建议改成「${hit.suggestion}」`
+        : `命中校对词表里的「${hit.term}」`,
+      { word: hit.term, suggestion: hit.suggestion }
+    );
+  }
+
   // 按位置排（同位置按规则顺序），再补 1 基的行 / 列
   const collected = collector.finish();
   const sorted = collected.issues
@@ -313,9 +341,12 @@ function proofreadText(text, rawOptions) {
     issues,
     total: collected.total,
     byRule: collected.byRule,
-    truncated: collected.total > issues.length,
+    // 词表命中多到异常（原始命中上限）也算明细不全，界面会提示「只列出一部分」
+    truncated: collected.total > issues.length || custom.truncated,
     paragraphs: paragraphs.length,
     chars: chaptersLib.countChars(source),
+    // 这次实际参与匹配的校对词条数（0 = 没设置词表 / 词表不可用）
+    customWordCount: custom.entryCount,
     options
   };
 }

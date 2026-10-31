@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('api', {
   proofreadText: (text, options) => invoke('text:proofread', text, options),
   proofreadBook: (bookPath, options, override) =>
     invoke('book:proofread', bookPath, options, override),
+  // 校对词表（v0.8-6）：作者自己的错别字 / 禁用词；主进程只读，渲染层只拿数量与状态
+  proofreadWordsInfo: () => invoke('proofread:words-info'),
+  pickProofreadWords: () => invoke('proofread:pick-words'),
   // 敏感词预检（只报告、不改动）：词表由作者指定，主进程只读词表；渲染层拿不到词表内容
   sensitiveWordsInfo: () => invoke('sensitive:words-info'),
   pickSensitiveWords: () => invoke('sensitive:pick-words'),

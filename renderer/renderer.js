@@ -188,9 +188,12 @@
     jumpToken: 0, // 丢弃过期的异步匹配结果
     jumpTimer: null, // 输入防抖
     formatBookRunning: false, // 「一键整理本书」进行中（防重复触发）
-    proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, ... }
+    proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, wordList, ... }
     proofreadScope: 'current', // 校对范围：current = 当前章；book = 整本
     proofreadBusy: false, // 校对进行中（防重复触发）
+    proofreadWordList: null, // 校对词表状态：{ ok, path, name, count, code, message, stats }
+    proofreadWordsDraft: '', // 设置里刚选的校对词表路径（点「保存设置」才落配置）
+    proofreadWordsInfo: null, // 设置弹层里显示的校对词表状态（读取当前草稿对应的词表）
     sensitive: null, // 敏感词预检结果：{ ok, scope, total, matches, byWord, chapters, ... }
     sensitiveScope: 'current', // 预检范围：current = 当前章；book = 整本
     sensitiveBusy: false, // 预检进行中（防重复触发）
@@ -5385,16 +5388,66 @@
   // 规则 / 阈值都在主进程 core/proofread.js（单测覆盖）；这里只负责面板、结果列表和「点一条跳过去」。
   // 和查找一样：当前章用编辑区里的内容（未保存也算，只参与检查）；整本由主进程逐章只读磁盘。
   const PROOFREAD_ROW_LIMIT = 300;
-  const PROOFREAD_RULE_ORDER = ['halfwidth-punct', 'long-paragraph', 'repeat-word', 'punct-run', 'blank-lines'];
+  const PROOFREAD_RULE_ORDER = [
+    'halfwidth-punct',
+    'long-paragraph',
+    'repeat-word',
+    'punct-run',
+    'blank-lines',
+    'custom-word'
+  ];
   const PROOFREAD_RULE_LABELS = {
     'halfwidth-punct': '半角标点',
     'long-paragraph': '超长段落',
     'repeat-word': '重复用词',
     'punct-run': '连续标点',
-    'blank-lines': '多余空行'
+    'blank-lines': '多余空行',
+    'custom-word': '自定义词表'
   };
 
-  function openProofreadPanel() {
+  // 校对词表状态文案（面板 / 设置共用）：未设置、文件没了、编码坏了都直说。
+  // 词表是**可选**的：没有词表照样跑内置五条规则。
+  function proofreadWordListText(info) {
+    if (!info) return '正在读取校对词表…';
+    if (!info.ok) {
+      if (info.code === 'GLOSSARY_NOT_CONFIGURED') {
+        return '还没有指定校对词表（应用不内置词表；没有词表时只跑内置的五条规则）';
+      }
+      return info.message || '校对词表读取失败';
+    }
+    let text = `校对词表：${info.name}（${info.count} 个词`;
+    if (info.stats && info.stats.suggestions) text += `，${info.stats.suggestions} 个带建议`;
+    text += '）';
+    const skipped = [];
+    if (info.stats && info.stats.duplicates) skipped.push(`${info.stats.duplicates} 个重复`);
+    if (info.stats && info.stats.tooLong) skipped.push(`${info.stats.tooLong} 行超长`);
+    if (info.stats && info.stats.invalid) skipped.push(`${info.stats.invalid} 行没有词`);
+    if (info.stats && info.stats.comments) skipped.push(`${info.stats.comments} 行注释`);
+    if (info.stats && info.stats.truncated) skipped.push('超过 5000 个只取前 5000 个');
+    if (skipped.length) text += `（已忽略 ${skipped.join('、')}）`;
+    return text;
+  }
+
+  function renderProofreadWordList() {
+    const el = $('proofread-wordlist-text');
+    if (!el) return;
+    const info = state.proofreadWordList;
+    el.textContent = proofreadWordListText(info);
+    el.classList.toggle('warn', Boolean(info && info.ok === false));
+  }
+
+  // 只读：取当前配置里的校对词表状态（不把词表正文带到渲染层）
+  async function refreshProofreadWordList() {
+    try {
+      state.proofreadWordList = await call(api.proofreadWordsInfo);
+    } catch (err) {
+      state.proofreadWordList = { ok: false, code: 'ERROR', message: `读取校对词表失败：${err.message}` };
+    }
+    renderProofreadWordList();
+    return state.proofreadWordList;
+  }
+
+  async function openProofreadPanel() {
     if (!state.bookPath) {
       toast('先打开一本书再校对', 'warn');
       return false;
@@ -5404,8 +5457,9 @@
     if (!$('find-backdrop').classList.contains('hidden')) closeFindPanel();
     $('proofread-scope').value = state.proofreadScope === 'book' ? 'book' : 'current';
     $('proofread-backdrop').classList.remove('hidden');
-    // 打开就先检查一遍当前章，不用再点一次；整本要作者自己点「开始校对」
-    runProofread();
+    // 先读一次词表状态（只读），再自动检查当前章；词表有问题只显示提示，不影响内置规则
+    await refreshProofreadWordList();
+    await runProofread();
     return true;
   }
 
@@ -5473,7 +5527,7 @@
     }
     summary.textContent = payload.total
       ? `本章共 ${payload.total} 处可疑：${rules}${truncatedNote}`
-      : '本章没有发现可疑的地方（只检查空白、标点、段落长度和重复用词，不判断文字好坏）';
+      : '本章没有发现可疑的地方（只检查空白、标点、段落长度、重复用词和你的校对词表，不判断文字好坏）';
   }
 
   function renderProofreadResults() {
@@ -5637,9 +5691,11 @@
         };
       }
       state.proofread = payload;
+      if (payload.wordList) state.proofreadWordList = payload.wordList;
+      renderProofreadWordList();
       renderProofreadSummary();
       renderProofreadResults();
-      return { ok: true, total: payload.total, scope: payload.scope };
+      return { ok: true, total: payload.total, scope: payload.scope, customWordCount: payload.customWordCount };
     } catch (err) {
       state.proofread = null;
       $('proofread-summary').textContent = `校对失败：${err.message}`;
@@ -5647,6 +5703,39 @@
       return { ok: false, message: err.message };
     } finally {
       setProofreadBusy(false);
+    }
+  }
+
+  // 选校对词表：persist=false 只放进设置草稿（点「保存设置」才落配置）；
+  // persist=true 用于校对面板里直接选，选完立刻写配置并重跑一次校对。
+  async function pickProofreadWords({ persist = false } = {}) {
+    try {
+      const picked = await call(api.pickProofreadWords);
+      if (!picked || picked.canceled) return { canceled: true };
+      if (!picked.ok) {
+        toast(`这个词表不能用：${picked.message}`, 'error');
+        return picked;
+      }
+      if (persist) {
+        const cfg = await call(api.setConfig, { proofreadWordsPath: picked.path });
+        state.globalConfig = cfg;
+        state.config = effectiveConfig();
+        state.proofreadWordsDraft = cfg.proofreadWordsPath || '';
+      } else {
+        state.proofreadWordsDraft = picked.path;
+      }
+      state.proofreadWordsInfo = picked;
+      state.proofreadWordList = picked;
+      renderProofreadWordList();
+      renderProofreadSettings();
+      toast(`已选择校对词表：${picked.name}（${picked.count} 个词）`);
+      if (persist && !$('proofread-backdrop').classList.contains('hidden')) {
+        await runProofread();
+      }
+      return picked;
+    } catch (err) {
+      toast(`选择校对词表失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
     }
   }
 
@@ -6867,6 +6956,10 @@
     state.sensitiveWordsDraft = typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath : '';
     state.sensitiveWordsInfo = null;
     renderSensitiveSettings();
+    // 校对词表（可选）：同样只记路径，词表只读；具体状态在 openSettings 里异步读一次
+    state.proofreadWordsDraft = typeof cfg.proofreadWordsPath === 'string' ? cfg.proofreadWordsPath : '';
+    state.proofreadWordsInfo = null;
+    renderProofreadSettings();
     renderStatsChart();
   }
 
@@ -6924,6 +7017,43 @@
     }
     renderSensitiveSettings();
     return state.sensitiveWordsInfo;
+  }
+
+  // 设置弹层里的校对词表状态（未设置 / N 个词 / 文件不存在 / 编码异常都直说）
+  function renderProofreadSettings() {
+    const pathEl = $('settings-proofread-path');
+    if (pathEl) pathEl.value = state.proofreadWordsDraft || '';
+    const status = $('settings-proofread-status');
+    if (!status) return;
+    if (!state.proofreadWordsDraft) {
+      status.textContent = '未设置：校对时只跑内置的五条规则（词表是可选的）';
+      status.className = 'muted small';
+      return;
+    }
+    const info = state.proofreadWordsInfo;
+    if (!info) {
+      status.textContent = '正在读取词表…';
+      status.className = 'muted small';
+      return;
+    }
+    status.textContent = proofreadWordListText(info);
+    status.className = info.ok ? 'muted small' : 'muted small warn';
+  }
+
+  // 打开设置时按已保存的路径读一次校对词表状态（只读，不复制词表）
+  async function refreshProofreadSettingsInfo() {
+    if (!state.proofreadWordsDraft) {
+      state.proofreadWordsInfo = null;
+      renderProofreadSettings();
+      return null;
+    }
+    try {
+      state.proofreadWordsInfo = await call(api.proofreadWordsInfo);
+    } catch (err) {
+      state.proofreadWordsInfo = { ok: false, message: `读取校对词表失败：${err.message}` };
+    }
+    renderProofreadSettings();
+    return state.proofreadWordsInfo;
   }
 
   // 设置弹层「诊断日志」：只显示日志目录里有几份、多大；正文永远不进日志
@@ -7087,6 +7217,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 校对词表也是全局设置（所有书共用一份），写作页的按书设置里不显示
+    for (const id of ['settings-proofread-group', 'settings-proofread-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     // 章节模板也是全局设置（新书 / 所有书共用一套），写作页的按书设置里不显示
     for (const id of ['settings-template-group', 'settings-template-field']) {
       const el = $(id);
@@ -7129,6 +7264,7 @@
     $('settings-backdrop').classList.remove('hidden');
     // 全局设置里顺手读一次词表状态（只读；写作页的按书设置里不显示这一组）
     if (state.settingsScope === 'global') await refreshSensitiveSettingsInfo();
+    if (state.settingsScope === 'global') await refreshProofreadSettingsInfo();
     // 诊断日志也只在全局设置里显示：顺手读一次日志目录（只读，不写任何文件）
     if (state.settingsScope === 'global') await refreshLogInfo();
     // 检查更新：只显示当前版本和上次检查结果（不自动联网；点按钮才检查）
@@ -7192,7 +7328,8 @@
         ...readSnapshotForm(),
         ...readStatsForm(),
         chapterTemplate: $('settings-chapter-template').value,
-        sensitiveWordsPath: (state.sensitiveWordsDraft || '').trim()
+        sensitiveWordsPath: (state.sensitiveWordsDraft || '').trim(),
+        proofreadWordsPath: (state.proofreadWordsDraft || '').trim()
       });
       state.globalConfig = cfg;
       state.config = effectiveConfig();
@@ -7203,6 +7340,7 @@
       await refreshShelf();
       // 词表路径可能刚改过：刷新一下状态，下次打开预检面板直接可用
       await refreshSensitiveWordList();
+      await refreshProofreadWordList();
     } catch (err) {
       toast(`保存设置失败：${err.message}`, 'error');
     }
@@ -7252,6 +7390,17 @@
       renderSensitiveSettings();
       toast('已清除敏感词表（点「保存设置」后生效）');
     });
+
+    // 校对词表（v0.8-6）：同样只记路径；面板里选完立刻写配置并重新校对
+    $('btn-pick-proofread').addEventListener('click', () => pickProofreadWords({ persist: false }));
+    $('btn-clear-proofread').addEventListener('click', () => {
+      state.proofreadWordsDraft = '';
+      state.proofreadWordsInfo = null;
+      renderProofreadSettings();
+      toast('已清除校对词表（点「保存设置」后生效）');
+    });
+    const proofreadPickBtn = $('btn-proofread-pick');
+    if (proofreadPickBtn) proofreadPickBtn.addEventListener('click', () => pickProofreadWords({ persist: true }));
 
     // 诊断日志：只让主进程打开日志文件夹（渲染层没有 fs 权限）；日志内容从不进界面
     const openLogsBtn = $('btn-open-logs');
@@ -8368,6 +8517,7 @@
         return runProofread();
       },
       proofreadSummary: () => $('proofread-summary').textContent,
+      proofreadWordListText: () => $('proofread-wordlist-text').textContent,
       proofreadRowCount: () => $('proofread-results').querySelectorAll('.proofread-result').length,
       proofreadRuleTexts: () =>
         Array.from($('proofread-results').querySelectorAll('.proofread-rule')).map((el) => el.textContent),
@@ -8380,6 +8530,10 @@
               total: state.proofread.total,
               byRule: { ...state.proofread.byRule },
               truncated: state.proofread.truncated,
+              customWordCount: state.proofread.customWordCount,
+              wordList: state.proofread.wordList
+                ? { count: state.proofread.wordList.count, ok: state.proofread.wordList.ok }
+                : null,
               chapterCount: state.proofread.chapterCount,
               chapterHitCount: state.proofread.chapterHitCount,
               issues: state.proofread.issues.map((issue) => ({
@@ -8389,6 +8543,7 @@
                 line: issue.line,
                 column: issue.column,
                 message: issue.message,
+                suggestion: issue.suggestion,
                 chapterId: issue.chapterId,
                 chapterIndex: issue.chapterIndex
               }))
@@ -8467,6 +8622,21 @@
       sensitiveSettingsPath: () => $('settings-sensitive-path').value,
       sensitiveSettingsStatus: () => $('settings-sensitive-status').textContent,
       sensitiveSettingsVisible: () => !$('settings-sensitive-field').classList.contains('hidden'),
+      // 测试用：直接把校对词表路径写进配置（正常流程走系统对话框选文件）
+      async setProofreadWordsPath(wordPath) {
+        const cfg = await call(api.setConfig, {
+          proofreadWordsPath: String(wordPath == null ? '' : wordPath)
+        });
+        state.globalConfig = cfg;
+        state.config = effectiveConfig();
+        state.proofreadWordsDraft = cfg.proofreadWordsPath || '';
+        state.proofreadWordsInfo = await refreshProofreadWordList();
+        renderProofreadSettings();
+        return cfg.proofreadWordsPath;
+      },
+      proofreadSettingsPath: () => $('settings-proofread-path').value,
+      proofreadSettingsStatus: () => $('settings-proofread-status').textContent,
+      proofreadSettingsVisible: () => !$('settings-proofread-field').classList.contains('hidden'),
       // 朗读（提案 5.3；只读正文。E2E 换假语音引擎，不依赖系统装没装语音，也不会真的出声）
       ttsInstallFakeSpeech: () => installFakeSpeech(),
       ttsFakeFinish: () => fakeFinishSpeech(),

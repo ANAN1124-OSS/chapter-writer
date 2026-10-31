@@ -474,6 +474,47 @@ test('敏感词表配置：写盘 / 读回，清除后落盘为空', async () =>
   assert.equal((await createConfigStore(dir).get()).sensitiveWordsPath, '');
 });
 
+test('校对词表配置：默认未设置，旧配置缺字段照常启动，脏值清洗成空', async () => {
+  const dir = await mkTmp();
+  assert.equal((await createConfigStore(dir).get()).proofreadWordsPath, '');
+  // 模拟旧配置：完全没有 proofreadWordsPath（只有 v0.8 之前的字段）
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 1200, sensitiveWordsPath: 'D:\\敏感词.txt' }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.proofreadWordsPath, '');
+  assert.equal(cfg.sensitiveWordsPath, 'D:\\敏感词.txt', '另一份词表不受影响');
+  assert.equal(cfg.dailyGoal, 1200, '其它字段不受影响');
+
+  assert.equal(sanitize({ proofreadWordsPath: 123 }).proofreadWordsPath, '');
+  assert.equal(sanitize({ proofreadWordsPath: null }).proofreadWordsPath, '');
+  assert.equal(sanitize({ proofreadWordsPath: '   ' }).proofreadWordsPath, '');
+  assert.equal(
+    sanitize({ proofreadWordsPath: '  D:\\词表\\校对词表.txt  ' }).proofreadWordsPath,
+    'D:\\词表\\校对词表.txt'
+  );
+  assert.equal(sanitize({ proofreadWordsPath: 'x'.repeat(1001) }).proofreadWordsPath, '');
+});
+
+test('校对词表配置：写盘 / 读回，清除后落盘为空，且不影响敏感词表', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ sensitiveWordsPath: 'D:\\词表\\敏感词.txt' });
+  await store.set({ proofreadWordsPath: 'D:\\词表\\校对词表.txt' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.sensitiveWordsPath, 'D:\\词表\\敏感词.txt');
+  assert.equal(reopened.proofreadWordsPath, 'D:\\词表\\校对词表.txt');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.proofreadWordsPath, 'D:\\词表\\校对词表.txt');
+
+  await store.set({ proofreadWordsPath: '' });
+  const cleared = await createConfigStore(dir).get();
+  assert.equal(cleared.proofreadWordsPath, '');
+  assert.equal(cleared.sensitiveWordsPath, 'D:\\词表\\敏感词.txt');
+});
+
 test('写作时长配置：默认关、旧配置缺字段照常启动、只认真正的 true', async () => {
   const dir = await mkTmp();
   assert.equal((await createConfigStore(dir).get()).writeDurationEnabled, false, '默认关');

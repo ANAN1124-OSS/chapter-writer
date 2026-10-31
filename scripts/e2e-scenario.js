@@ -5065,6 +5065,278 @@ module.exports = async function runScenario(ctx) {
   );
   await exec('window.__cwTest.closeProofreadPanel()');
 
+  // 46i. 校对词表（v0.8-6，提案 N6）：作者自己的错别字 / 禁用词，可选「错词 → 建议」。
+  // 只报告、不改动、不写盘；词表独立一份，和敏感词表互不覆盖；没有词表时照常跑内置五条规则。
+  const pfWordsDir = path.join(userData, '校对词表');
+  await fs.mkdir(pfWordsDir, { recursive: true });
+  const pfWordsPath = path.join(pfWordsDir, '我的校对词表.txt');
+  await fs.writeFile(
+    pfWordsPath,
+    '做为 => 作为\r\n在再 -> 再看\r\n禁词\r\n# 分组注释\r\n做为 => 当作\r\n\r\n',
+    'utf8'
+  );
+  const pfWordsBytesBefore = await fs.readFile(pfWordsPath);
+  const pfWordsStatBefore = await fs.stat(pfWordsPath);
+
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const pfSetWordsPath = await exec(
+    `window.__cwTest.setProofreadWordsPath(${JSON.stringify(pfWordsPath)})`
+  );
+  const pfWordsCfg = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check(
+    '校对词表：路径落进 config.json（和敏感词表是两个独立字段）',
+    pfSetWordsPath === pfWordsPath &&
+      pfWordsCfg.proofreadWordsPath === pfWordsPath &&
+      pfWordsCfg.sensitiveWordsPath === '' &&
+      Object.keys(pfWordsCfg).filter((key) => /proofread/i.test(key)).join(',') === 'proofreadWordsPath',
+    { set: pfSetWordsPath, disk: pfWordsCfg.proofreadWordsPath }
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  await waitFor("window.__cwTest.proofreadSettingsStatus().includes('3 个词')");
+  const pfWordsSettingsStatus = await exec('window.__cwTest.proofreadSettingsStatus()');
+  check(
+    '校对词表：设置里显示路径 / 词数 / 带建议数与忽略的行',
+    (await exec('window.__cwTest.proofreadSettingsVisible()')) === true &&
+      (await exec('window.__cwTest.proofreadSettingsPath()')) === pfWordsPath &&
+      pfWordsSettingsStatus.includes('3 个词') &&
+      pfWordsSettingsStatus.includes('2 个带建议') &&
+      pfWordsSettingsStatus.includes('1 个重复') &&
+      pfWordsSettingsStatus.includes('1 行注释'),
+    pfWordsSettingsStatus
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === false');
+
+  // 46i-1. 造一本两章的书：第 1 章 4 处词表命中（做为 ×2、禁词 ×2），第 2 章 1 处
+  await exec("window.__cwTest.newBook('校对词表测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const pfwBookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '开端')");
+  const pfwCh1 = '他做为旁观者站在门口。\n他决定做为见证人。\n这里有两个禁词和禁词。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(pfwCh1)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.newChapter('续章')");
+  await waitFor("window.__cwTest.currentTitle().includes('续章')");
+  const pfwCh2 = '做为另一个例子。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(pfwCh2)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor("window.__cwTest.currentTitle().includes('开端')");
+
+  const pfwMetaBefore = await storage.readBookMeta(pfwBookPath);
+  const pfwChaptersBefore = JSON.stringify(pfwMetaBefore.chapters);
+  const pfwStatBefore = [];
+  for (const chapter of pfwMetaBefore.chapters) {
+    const stat = await fs.stat(path.join(pfwBookPath, chapter.file));
+    pfwStatBefore.push({ file: chapter.file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  // 46i-2. 当前章：4 处命中都是「自定义词表」，带建议 / 行号列号 / 上下文；点一条只改选区
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 4 处可疑')");
+  const pfwCurrent = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对词表：当前章 4 处命中按「自定义词表」统计，带建议、词条数与规则标签',
+    pfwCurrent &&
+      pfwCurrent.scope === 'current' &&
+      pfwCurrent.total === 4 &&
+      pfwCurrent.byRule['custom-word'] === 4 &&
+      pfwCurrent.customWordCount === 3 &&
+      pfwCurrent.wordList &&
+      pfwCurrent.wordList.ok === true &&
+      pfwCurrent.wordList.count === 3 &&
+      pfwCurrent.issues[0].index === 1 &&
+      pfwCurrent.issues[0].suggestion === '作为' &&
+      pfwCurrent.issues[0].line === 1 &&
+      pfwCurrent.issues[0].column === 2 &&
+      (await exec('window.__cwTest.proofreadRuleTexts()')).join(',') ===
+        '自定义词表,自定义词表,自定义词表,自定义词表' &&
+      (await exec('window.__cwTest.proofreadRowTexts()')).some((text) =>
+        text.includes('词表里的「做为」建议改成「作为」')
+      ),
+    pfwCurrent
+  );
+  check(
+    '校对词表：面板顶部显示词表状态（文件名 / 3 个词 / 2 个带建议）',
+    (await exec('window.__cwTest.proofreadWordListText()')).includes('我的校对词表.txt') &&
+      (await exec('window.__cwTest.proofreadWordListText()')).includes('3 个词') &&
+      (await exec('window.__cwTest.proofreadWordListText()')).includes('2 个带建议'),
+    await exec('window.__cwTest.proofreadWordListText()')
+  );
+  await exec('window.__cwTest.clickProofreadRow(0)');
+  await waitFor('window.__cwTest.proofreadPanelOpen() === false');
+  const pfwSelection = await exec('window.__cwTest.selection()');
+  check(
+    '校对词表：点结果会选中对应的错词并关闭面板（正文 / 磁盘不变）',
+    pfwSelection.start === 1 &&
+      pfwSelection.end === 3 &&
+      (await exec('window.__cwTest.selectionText()')) === '做为' &&
+      (await exec('window.__cwTest.text()')) === pfwCh1 &&
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await storage.loadChapterText(pfwBookPath, pfwMetaBefore.chapters[0].file)).text === pfwCh1,
+    pfwSelection
+  );
+
+  // 46i-3. 整本：跨章 5 处（列 2 章）；点第 2 章的结果会切章并选中
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 4 处可疑')");
+  await exec("window.__cwTest.setProofreadScope('book')");
+  const pfwBookRun = await exec('window.__cwTest.proofreadRun()');
+  const pfwBook = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对词表：整本模式跨章统计 5 处、涉及 2 章，结果带章名',
+    pfwBookRun &&
+      pfwBookRun.ok === true &&
+      pfwBook.scope === 'book' &&
+      pfwBook.total === 5 &&
+      pfwBook.chapterCount === 2 &&
+      pfwBook.chapterHitCount === 2 &&
+      pfwBook.byRule['custom-word'] === 5 &&
+      (await exec('window.__cwTest.proofreadSummary()')).includes('全书 2 章共 5 处可疑，涉及 2 章') &&
+      (await exec('window.__cwTest.proofreadRowTexts()')).some((text) => text.includes('第2章：续章')),
+    pfwBook
+  );
+  const pfwSecondChapterRow = pfwBook.issues.findIndex((issue) => issue.chapterIndex === 1);
+  await exec(`window.__cwTest.clickProofreadRow(${pfwSecondChapterRow})`);
+  await waitFor("window.__cwTest.currentTitle().includes('续章')");
+  check(
+    '校对词表：点第 2 章的命中会切章并选中那个词',
+    (await exec('window.__cwTest.selectionText()')) === '做为' &&
+      (await exec('window.__cwTest.text()')) === pfwCh2 &&
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await storage.loadChapterText(pfwBookPath, pfwMetaBefore.chapters[1].file)).text === pfwCh2
+  );
+
+  // 46i-4. 当前章未保存的内容也参与（只参与检查，不写盘）
+  await exec("window.__cwTest.setProofreadScope('current')");
+  await exec(`window.__cwTest.setText(${JSON.stringify('未保存的做为。')})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 1 处可疑')");
+  const pfwUnsaved = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对词表：未保存内容参与匹配，但磁盘仍是原正文、书目 / 章节缓存不变',
+    pfwUnsaved.total === 1 &&
+      pfwUnsaved.byRule['custom-word'] === 1 &&
+      (await storage.loadChapterText(pfwBookPath, pfwMetaBefore.chapters[1].file)).text === pfwCh2 &&
+      JSON.stringify((await storage.readBookMeta(pfwBookPath)).chapters) === pfwChaptersBefore
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor("window.__cwTest.currentTitle().includes('开端')");
+
+  // 46i-5. 词表出问题要说清楚，而且不能挡住内置五条规则
+  const pfWordsMoved = `${pfWordsPath}.moved`;
+  await fs.rename(pfWordsPath, pfWordsMoved);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadWordListText().includes('词表文件不存在')");
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章没有发现可疑的地方')");
+  const pfwMissing = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对词表：词表文件不存在时给出明确提示，照常跑内置规则',
+    (await exec('window.__cwTest.proofreadWordListText()')).includes('不存在') &&
+      pfwMissing.total === 0 &&
+      pfwMissing.wordList.ok === false &&
+      (await exec('window.__cwTest.proofreadRowCount()')) === 0
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+  await fs.rename(pfWordsMoved, pfWordsPath);
+
+  const pfWordsBadPath = path.join(pfWordsDir, '伪装校对词表.txt');
+  await fs.writeFile(pfWordsBadPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01]));
+  await exec(`window.__cwTest.setProofreadWordsPath(${JSON.stringify(pfWordsBadPath)})`);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadWordListText().includes('不像是纯文本')");
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章没有发现可疑的地方')");
+  check(
+    '校对词表：编码 / 内容异常时提示明确，面板不崩、结果为空',
+    (await exec('window.__cwTest.proofreadWordListText()')).includes('UTF-8') &&
+      (await exec('window.__cwTest.proofreadPayload()')).total === 0
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+
+  const pfWordsEmptyPath = path.join(pfWordsDir, '空校对词表.txt');
+  await fs.writeFile(pfWordsEmptyPath, '\r\n # 只有注释\r\n   \r\n', 'utf8');
+  await exec(`window.__cwTest.setProofreadWordsPath(${JSON.stringify(pfWordsEmptyPath)})`);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadWordListText().includes('没有有效的词')");
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章没有发现可疑的地方')");
+  check(
+    '校对词表：空词表（只有空行 / 注释）明确提示，不产生命中',
+    (await exec('window.__cwTest.proofreadRowCount()')) === 0 &&
+      (await exec('window.__cwTest.proofreadPayload()')).total === 0
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+  await exec(`window.__cwTest.setProofreadWordsPath(${JSON.stringify(pfWordsPath)})`);
+
+  // 46i-6. 全程只读：章节 txt 大小 / mtime、书目 chapters、_trash、词表字节都没变
+  let pfwFilesUntouched = true;
+  for (const item of pfwStatBefore) {
+    const stat = await fs.stat(path.join(pfwBookPath, item.file));
+    if (stat.size !== item.size || stat.mtimeMs !== item.mtimeMs) pfwFilesUntouched = false;
+  }
+  const pfwMetaAfter = await storage.readBookMeta(pfwBookPath);
+  const pfWordsBytesAfter = await fs.readFile(pfWordsPath);
+  const pfWordsStatAfter = await fs.stat(pfWordsPath);
+  check(
+    '校对词表：只读——章节 txt / 书目 / 词表一个字节没改，也没有生成 _trash',
+    pfwFilesUntouched &&
+      JSON.stringify(pfwMetaAfter.chapters) === pfwChaptersBefore &&
+      pfWordsBytesAfter.equals(pfWordsBytesBefore) &&
+      pfWordsStatAfter.mtimeMs === pfWordsStatBefore.mtimeMs &&
+      !(await fileExists(path.join(pfwBookPath, '_trash'))),
+    { untouched: pfwFilesUntouched }
+  );
+
+  // 46i-7. 词表是全局设置：写作页的按书设置里不显示
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '校对词表：写作页的按书设置里不显示（全局设置）',
+    (await exec('window.__cwTest.proofreadSettingsVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === false');
+
+  // 46i-8. 旧数据兼容：v0.4.1 形状的旧书照常校对，书目不被补字段
+  const pfWordsLegacyBefore = await fs.readFile(pfLegacyMetaPath, 'utf8');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(pfLegacyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 1 处可疑')");
+  const pfwLegacy = await exec('window.__cwTest.proofreadPayload()');
+  const pfWordsLegacyAfter = await fs.readFile(pfLegacyMetaPath, 'utf8');
+  check(
+    '校对词表：v0.4.1 旧书照常校对（词表只加自己的命中），书目不被补字段',
+    pfwLegacy.total === 1 &&
+      pfwLegacy.byRule['custom-word'] === 0 &&
+      pfwLegacy.customWordCount === 3 &&
+      pfWordsLegacyAfter === pfWordsLegacyBefore &&
+      pfWordsLegacyAfter.includes('"schemaVersion"') === false,
+    { version: JSON.parse(pfWordsLegacyAfter).schemaVersion }
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+
+  // 46i-9. 收尾：清掉校对词表路径，配置只剩这一个可选字段的变化
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.setProofreadWordsPath("")');
+  const pfWordsCfgCleared = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check(
+    '校对词表：清除后配置落盘为空串，敏感词表字段不受影响',
+    pfWordsCfgCleared.proofreadWordsPath === '' &&
+      pfWordsCfgCleared.sensitiveWordsPath === '' &&
+      Object.keys(pfWordsCfgCleared).filter((key) => /proofread/i.test(key)).join(',') ===
+        'proofreadWordsPath'
+  );
+
   // 47. 灵感箱（v0.7-3，提案 3.4）：碎片是书架 _碎片 里的普通 txt；插入只改编辑区、不写盘
   const fragDir = path.join(booksRoot, '_碎片');
   const fragStamp = fragmentsLib.formatDateStamp();

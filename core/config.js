@@ -68,7 +68,10 @@ const DEFAULTS = Object.freeze({
   chapterTemplate: '',
   // 敏感词预检用的词表（作者自己的 txt，每行一个词）。应用不内置任何词表；
   // 这里只记绝对路径，词表文件本身只读、不复制、不改写。没设置 = ''。
-  sensitiveWordsPath: ''
+  sensitiveWordsPath: '',
+  // 校对面板用的词表（v0.8 P0 N6）：作者自己的错别字 / 禁用词 txt，每行一个词，
+  // 也可以写「错词 → 建议」。和敏感词表分开两份，互不覆盖；没设置 = ''。
+  proofreadWordsPath: ''
 });
 
 function clampInt(value, min, max, fallback) {
@@ -204,6 +207,11 @@ function sanitize(raw) {
   const sensitiveWordsPath =
     typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath.trim() : '';
   cfg.sensitiveWordsPath = sensitiveWordsPath.length > 1000 ? '' : sensitiveWordsPath;
+  // 校对词表路径：同样的基本清洗（非字符串 / 超长 → 未设置）；文件没了只在校对面板提示，
+  // 不会因为词表被移走就让应用起不来。旧配置没有这个键 = 未设置。
+  const proofreadWordsPath =
+    typeof cfg.proofreadWordsPath === 'string' ? cfg.proofreadWordsPath.trim() : '';
+  cfg.proofreadWordsPath = proofreadWordsPath.length > 1000 ? '' : proofreadWordsPath;
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

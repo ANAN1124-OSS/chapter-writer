@@ -282,9 +282,13 @@
       <h2 class="modal-title">校对</h2>
       <p class="modal-message">
         只把可疑的地方列出来，<strong>不改正文、不写盘</strong>：半角标点残留、超长段落、
-        同一个双字词在短距离内反复出现、连续标点、多余空行。点任意一条会跳到正文对应位置，
-        要不要改、怎么改都由你自己决定。
+        同一个双字词在短距离内反复出现、连续标点、多余空行，以及<strong>你自己的校对词表</strong>
+        （错别字 / 禁用词，可选）。点任意一条会跳到正文对应位置，要不要改、怎么改都由你自己决定。
       </p>
+      <div class="sensitive-wordlist proofread-wordlist">
+        <span id="proofread-wordlist-text" class="muted small">正在读取校对词表…</span>
+        <button id="btn-proofread-pick" class="btn ghost tiny" type="button">选择词表…</button>
+      </div>
       <div class="proofread-row">
         <label class="field inline">
           <span>范围</span>
@@ -302,8 +306,11 @@
       <div class="proofread-results" id="proofread-results"></div>
       <p class="muted small">
         当前阈值：超长段落 500 字、重复用词 300 字内出现 3 次、连续标点 3 个及以上
-        （连排的「……」和「——」按一个标点算）。当前章未保存的内容也参与检查，但不会写盘；
-        整本检查只读磁盘，不改任何 txt 和 <code>书目.json</code>。
+        （连排的「……」和「——」按一个标点算）。校对词表是可选的：每行一个词，也可以写
+        <code>错词 → 建议</code>（箭头 <code>=&gt;</code> / <code>-&gt;</code> / <code>→</code> 都认），
+        <code>#</code> 开头是注释；只做字面匹配、区分大小写，同一处重叠时只报最长的那个。
+        当前章未保存的内容也参与检查，但不会写盘；整本检查只读磁盘，不改任何 txt 和
+        <code>书目.json</code>。
       </p>
       <div class="modal-buttons">
         <button id="btn-proofread-close" class="btn ghost" type="button">关闭</button>
@@ -771,6 +778,17 @@
           <button id="btn-clear-sensitive" class="btn ghost" type="button">清除</button>
         </div>
         <span id="settings-sensitive-status" class="muted small"></span>
+      </label>
+      <div class="field-group" id="settings-proofread-group">校对词表</div>
+      <label class="field" id="settings-proofread-field">
+        <span>自定义错别字 / 禁用词（可选；每行一个词，可写「错词 → 建议」。应用不内置任何词表，只报告、不改正文）</span>
+        <div class="field-row">
+          <input id="settings-proofread-path" class="text-input" type="text" readonly
+                 placeholder="未选择（校对时只跑内置的五条规则）" />
+          <button id="btn-pick-proofread" class="btn ghost" type="button">选择…</button>
+          <button id="btn-clear-proofread" class="btn ghost" type="button">清除</button>
+        </div>
+        <span id="settings-proofread-status" class="muted small"></span>
       </label>
       <div class="field-group" id="settings-logs-group">诊断日志</div>
       <div class="field" id="settings-logs-field">

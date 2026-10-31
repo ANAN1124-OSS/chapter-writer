@@ -299,3 +299,94 @@ test('校对：上下文片段带前后文，mark 部分是命中的原文', () 
   assert.ok(issue.snippet.before.endsWith('文字'));
   assert.ok(issue.snippet.after.startsWith('这里出了问题'));
 });
+
+test('校对：自定义词表——命中位置 / 建议 / 行号列号 / 按规则统计', () => {
+  const text = '他做为旁观者。\n他决定做为见证人。\n这里有两个禁词和禁词。';
+  const entries = [
+    { term: '做为', suggestion: '作为' },
+    { term: '禁词', suggestion: '' },
+    { term: '做为', suggestion: '当作' }
+  ];
+  const result = proofread.proofreadText(text, {}, entries);
+  assert.equal(result.customWordCount, 2, '重复的词只算一个（保留第一次的建议）');
+  assert.equal(result.byRule['custom-word'], 4);
+  const custom = only(result, 'custom-word');
+  assert.deepEqual(
+    custom.map((issue) => [issue.match, issue.suggestion, issue.index, issue.line, issue.column]),
+    [
+      ['做为', '作为', 1, 1, 2],
+      ['做为', '作为', 11, 2, 4],
+      ['禁词', '', 23, 3, 6],
+      ['禁词', '', 26, 3, 9]
+    ]
+  );
+  assert.equal(custom[0].ruleLabel, '自定义词表');
+  assert.equal(custom[0].message, '词表里的「做为」建议改成「作为」');
+  assert.equal(custom[2].message, '命中校对词表里的「禁词」');
+  assert.equal(custom[0].length, 2);
+  assert.ok(custom[0].snippet.match === '做为');
+  // 只报告：原文没有被改
+  assert.equal(text, '他做为旁观者。\n他决定做为见证人。\n这里有两个禁词和禁词。');
+});
+
+test('校对：没有校对词表时只有内置五条规则，行为与以前一致', () => {
+  const text = '他说,好。突然，突然，突然。';
+  const withNothing = proofread.proofreadText(text);
+  const withEmpty = proofread.proofreadText(text, {}, []);
+  assert.deepEqual(withNothing, withEmpty);
+  assert.equal(withNothing.customWordCount, 0);
+  assert.equal(withNothing.byRule['custom-word'], 0);
+  assert.equal(proofread.RULE_ORDER[proofread.RULE_ORDER.length - 1], 'custom-word');
+  assert.equal(proofread.RULE_LABELS['custom-word'], '自定义词表');
+  // 脏词条被忽略，不会把函数弄崩
+  const dirty = proofread.proofreadText(text, {}, [null, 42, { term: '' }, '好']);
+  assert.equal(dirty.customWordCount, 1);
+  assert.equal(dirty.byRule['custom-word'], 1);
+});
+
+test('校对：同一处既有内置规则又有词表命中时按位置排序（同位置内置规则在前）', () => {
+  const text = '他说,好。';
+  const result = proofread.proofreadText(text, {}, [{ term: ',', suggestion: '，' }]);
+  const atComma = result.issues.filter((issue) => issue.index === 2);
+  assert.deepEqual(
+    atComma.map((issue) => issue.rule),
+    ['halfwidth-punct', 'custom-word']
+  );
+  assert.equal(result.total, 2);
+});
+
+test('校对：词表命中重叠时只报最长的那个，不受词表顺序影响', () => {
+  const text = '这里有色情小说和色情图片。';
+  const entries = [
+    { term: '色情', suggestion: '' },
+    { term: '色情小说', suggestion: '成人小说' }
+  ];
+  const result = proofread.proofreadText(text, {}, entries);
+  assert.deepEqual(
+    only(result, 'custom-word').map((issue) => [issue.match, issue.index, issue.suggestion]),
+    [
+      ['色情小说', 3, '成人小说'],
+      ['色情', 8, '']
+    ]
+  );
+});
+
+test('校对：词表命中同样受 maxIssues 限制，总数照实统计', () => {
+  // 用英文字母构造：只命中词表，不会顺手触发「重复用词」等中文规则
+  const text = 'a'.repeat(50);
+  const result = proofread.proofreadText(text, { maxIssues: 20 }, [{ term: 'a', suggestion: '' }]);
+  assert.equal(result.total, 50);
+  assert.equal(result.byRule['custom-word'], 50);
+  assert.equal(result.issues.length, 20);
+  assert.equal(result.truncated, true);
+});
+
+test('校对：带词表时结果仍可回归，且不修改调用方数组', () => {
+  const entries = [{ term: '做为', suggestion: '作为' }];
+  const copy = JSON.parse(JSON.stringify(entries));
+  const text = '他做为见证人。';
+  const a = proofread.proofreadText(text, {}, entries);
+  const b = proofread.proofreadText(text, {}, entries);
+  assert.deepEqual(a, b);
+  assert.deepEqual(entries, copy);
+});
