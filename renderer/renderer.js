@@ -12,6 +12,8 @@
   // 在 editor-logic.js 里、Node 单测覆盖；这里只负责显示和事件。
   const editorLogic = window.CWEditorLogic;
   const LONG_PARAGRAPH_THRESHOLD = editorLogic.LONG_PARAGRAPH_DEFAULT;
+  // 专注模式的纯逻辑（打字机滚动的换算），在 focus-logic.js 里、Node 单测覆盖
+  const focusLogic = window.CWFocusLogic;
 
   // ---------- 小工具 ----------
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -176,6 +178,14 @@
       barBaseScrollTop: 0, // 左侧黄线的基准滚动位置（滚动时只改 top，不重新量行框）
       resizeObserver: null
     },
+    focus: {
+      on: false, // 专注模式是否开着（只在写作页有效；只记内存，不写配置）
+      typewriter: false, // 打字机模式：光标行保持在正文区上方约 1/3 处
+      savedScrollTop: 0, // 进入专注模式前的滚动位置（退出时按光标相对位置还原）
+      savedCaret: 0, // 进入专注模式前的光标位置
+      savedCaretOffset: null, // 进入时「光标行顶端 - 滚动位置」，退出时用它把视线放回原处
+      timer: null // 打字机对齐的防抖定时器
+    },
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
@@ -287,6 +297,8 @@
   // ---------- 视图切换 ----------
   function showView(view) {
     if (view !== 'editor') closeTtsBar();
+    // 离开写作页就退出专注模式（不还原滚动位置：书已经关了）
+    if (view !== 'editor' && state.focus.on) setFocusMode(false, { restore: false });
     state.view = view;
     $('shelf-view').classList.toggle('hidden', view !== 'shelf');
     $('editor-view').classList.toggle('hidden', view !== 'editor');
@@ -296,6 +308,7 @@
     if (view === 'editor') scheduleMarksRender(0);
     else hideEditorMarks();
     renderSelectionStats();
+    updateFocusBar();
   }
 
   function updateWindowTitle() {
@@ -1173,9 +1186,12 @@
   function renderEditorHeader() {
     if (!state.chapters.length || state.index < 0) {
       $('chapter-title').textContent = '';
+      updateFocusBar();
       return;
     }
     $('chapter-title').textContent = chapterTitle(state.index, state.chapters[state.index].name);
+    // 专注模式下顶栏是隐藏的，章名显示在极简退出条上
+    updateFocusBar();
   }
 
   // ---------- 状态栏 ----------
@@ -1566,6 +1582,8 @@
       editorEl.addEventListener(type, () => {
         renderSelectionStats();
         syncMarksScroll();
+        // 键盘 / 鼠标移动光标后，打字机模式跟着把光标行放回 1/3 处
+        if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(20);
       });
     }
     document.addEventListener('selectionchange', () => renderSelectionStats());
@@ -1575,6 +1593,179 @@
     }
     $('status-long-para').addEventListener('click', () => jumpToNextLongParagraph());
     renderMarksMenu();
+  }
+
+  // ---------- 专注模式（提案 3.5）----------
+  // 隐藏左栏与顶栏，只留正文与一条极简退出条：F11 / 顶栏「专注」进出，Esc 退出。
+  // 可选「打字机模式」：光标所在行保持在正文区上方约 1/3 处，只调 textarea.scrollTop。
+  // 全部只改显示（DOM class / 滚动位置），不碰正文、不写盘、不写配置。
+  function focusActive() {
+    return Boolean(state.focus.on && state.view === 'editor' && state.bookPath);
+  }
+
+  function updateFocusBar() {
+    const bar = $('focus-bar');
+    if (bar) bar.classList.toggle('hidden', !focusActive());
+    const title = $('focus-chapter');
+    if (title) title.textContent = focusActive() ? $('chapter-title').textContent || '' : '';
+    const typewriter = $('btn-focus-typewriter');
+    if (typewriter) {
+      typewriter.textContent = `${state.focus.typewriter ? '✓ ' : ''}打字机`;
+      typewriter.dataset.on = state.focus.typewriter ? '1' : '0';
+      typewriter.title = state.focus.typewriter
+        ? '打字机模式已开：光标所在行保持在正文上方约 1/3 处（只调滚动，不改正文、不写盘）'
+        : '打字机模式：光标所在行保持在正文上方约 1/3 处（只调滚动，不改正文、不写盘）';
+    }
+  }
+
+  // 打字机模式的光标测量层：和正文同样的字体 / 行高 / 宽度，绝对定位在屏幕外。
+  // 往里面放「光标前的正文 + 一个零宽标记」，量标记的 offsetTop 就知道光标行在哪。
+  function ensureFocusMirror() {
+    let mirror = $('focus-mirror');
+    if (mirror) return mirror;
+    mirror = document.createElement('div');
+    mirror.id = 'focus-mirror';
+    mirror.className = 'focus-mirror';
+    mirror.setAttribute('aria-hidden', 'true');
+    const main = document.querySelector('.editor-main');
+    (main || document.body).appendChild(mirror);
+    return mirror;
+  }
+
+  // 光标所在行的顶端（相对正文内容顶部、含 padding，px）；量不出来返回 null（就这次不对齐）
+  function measureCaretTop(position) {
+    const text = editorEl.value;
+    if (text.length > focusLogic.MAX_TYPEWRITER_CHARS) return null;
+    const styles = getComputedStyle(editorEl);
+    const px = (value) => {
+      const n = parseFloat(value);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const width = Math.max(0, editorEl.clientWidth - px(styles.paddingLeft) - px(styles.paddingRight));
+    if (width <= 0) return null;
+    const mirror = ensureFocusMirror();
+    mirror.style.width = `${width}px`;
+    mirror.style.fontFamily = styles.fontFamily;
+    mirror.style.fontSize = styles.fontSize;
+    mirror.style.fontWeight = styles.fontWeight;
+    mirror.style.fontStyle = styles.fontStyle;
+    mirror.style.lineHeight = styles.lineHeight;
+    mirror.style.letterSpacing = styles.letterSpacing;
+    const pos = Math.max(0, Math.min(Math.floor(Number(position) || 0), text.length));
+    mirror.textContent = text.slice(0, pos);
+    const marker = document.createElement('span');
+    marker.className = 'focus-mirror-caret';
+    marker.textContent = '\u200b'; // 零宽空格：不占宽度、不影响换行，只用来定位
+    mirror.appendChild(marker);
+    const offsetTop = marker.offsetTop - mirror.offsetTop;
+    mirror.textContent = '';
+    if (!Number.isFinite(offsetTop)) return null;
+    return Math.round((px(styles.paddingTop) + offsetTop) * 100) / 100;
+  }
+
+  // 打字机模式：把光标行放到正文区上方约 1/3 处（死区内不动，免得每打一个字都抖）
+  function alignTypewriter() {
+    if (!focusActive() || !state.focus.typewriter) return false;
+    const caretTop = measureCaretTop(editorEl.selectionStart || 0);
+    if (caretTop == null) return false;
+    const plan = focusLogic.planTypewriterScroll({
+      caretTop,
+      currentScrollTop: editorEl.scrollTop,
+      viewportHeight: editorEl.clientHeight,
+      maxScrollTop: editorEl.scrollHeight - editorEl.clientHeight,
+      ratio: focusLogic.TYPEWRITER_RATIO_DEFAULT
+    });
+    if (!plan.adjust) return false;
+    editorEl.scrollTop = plan.scrollTop;
+    syncMarksScroll();
+    return true;
+  }
+
+  function scheduleTypewriterAlign(delay = 30) {
+    if (state.focus.timer) clearTimeout(state.focus.timer);
+    state.focus.timer = setTimeout(() => {
+      state.focus.timer = null;
+      alignTypewriter();
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  // 退出专注模式后把「你刚才看的那一段」放回原处：
+  // 专注模式下正文变宽、换行会变，死记 scrollTop 会偏；所以按「光标行顶端 - 滚动位置」
+  // 这个相对位置还原来，宽度变了也能把光标那一行放回原来的屏幕高度。
+  function restoreFocusScroll() {
+    if (state.view !== 'editor' || !state.bookPath) return false;
+    const savedScrollTop = Math.max(0, Number(state.focus.savedScrollTop) || 0);
+    const caret = Math.max(0, Number(state.focus.savedCaret) || 0);
+    let top = savedScrollTop;
+    if (state.focus.savedCaretOffset != null) {
+      const caretTop = measureCaretTop(caret);
+      if (caretTop != null) top = caretTop - state.focus.savedCaretOffset;
+    }
+    editorEl.scrollTop = focusLogic.clampScrollTop(top, editorEl.scrollHeight - editorEl.clientHeight);
+    try {
+      editorEl.focus();
+      editorEl.setSelectionRange(caret, caret);
+    } catch { /* 光标对不上不影响正文 */ }
+    syncMarksScroll();
+    return true;
+  }
+
+  function setFocusMode(on, options = {}) {
+    const want = Boolean(on);
+    if (want === state.focus.on) {
+      updateFocusBar();
+      return state.focus.on;
+    }
+    if (want && !(state.view === 'editor' && state.bookPath)) return false;
+    const view = $('editor-view');
+    const restore = options.restore !== false;
+    if (want) {
+      // 记下进入前的滚动位置与「光标在视口里的位置」，退出时还回去
+      state.focus.savedScrollTop = Math.max(0, Number(editorEl.scrollTop) || 0);
+      state.focus.savedCaret = Math.max(0, Number(editorEl.selectionStart) || 0);
+      const caretTop = measureCaretTop(state.focus.savedCaret);
+      state.focus.savedCaretOffset =
+        caretTop == null ? null : Math.round((caretTop - state.focus.savedScrollTop) * 100) / 100;
+      hideContextMenu();
+      hideFormatMenu();
+      hideExportMenu();
+      hideBookMenu();
+      hideVolumeMenu();
+      state.focus.on = true;
+      if (view) view.classList.add('focus-mode');
+      document.body.classList.add('focus-mode');
+      updateFocusBar();
+      scheduleMarksRender(0);
+      // 打字机模式：进来就先把光标行放到 1/3 处
+      if (state.focus.typewriter) scheduleTypewriterAlign(0);
+      try {
+        editorEl.focus();
+        editorEl.setSelectionRange(state.focus.savedCaret, state.focus.savedCaret);
+      } catch { /* 光标对不上不影响正文 */ }
+    } else {
+      state.focus.on = false;
+      if (state.focus.timer) {
+        clearTimeout(state.focus.timer);
+        state.focus.timer = null;
+      }
+      if (view) view.classList.remove('focus-mode');
+      document.body.classList.remove('focus-mode');
+      updateFocusBar();
+      if (restore) restoreFocusScroll();
+      scheduleMarksRender(0);
+    }
+    return state.focus.on;
+  }
+
+  function toggleFocusMode() {
+    return setFocusMode(!state.focus.on);
+  }
+
+  function setFocusTypewriter(on) {
+    state.focus.typewriter = Boolean(on);
+    updateFocusBar();
+    if (state.focus.typewriter) alignTypewriter();
+    return state.focus.typewriter;
   }
 
   // ---------- 每日字数统计（提案 3.2） ----------
@@ -1716,6 +1907,8 @@
     renderSelectionStats();
     // 输入法拼字中先不重画标记层（I 键过程中的中间态会闪），拼完 compositionend 再画
     if (!state.marks.composing) scheduleMarksRender();
+    // 打字机模式：打完字把光标行放回上方约 1/3 处（只调滚动，不改字）
+    if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(30);
   }
 
   async function loadChapterAt(index) {
@@ -1732,6 +1925,12 @@
       state.saveError = null;
       editorEl.value = data.text;
       editorEl.scrollTop = 0;
+      // 专注模式下切了章：退出的还原点改到新章开头，不要把上一章的光标 / 滚动套过来
+      if (state.focus.on) {
+        state.focus.savedScrollTop = 0;
+        state.focus.savedCaret = 0;
+        state.focus.savedCaretOffset = 0;
+      }
       // 切章后正在念的已经不是眼前这一章了，立刻停
       stopTtsForChapterChange();
       renderChapterList();
@@ -1739,6 +1938,7 @@
       updateStatus();
       renderSelectionStats();
       scheduleMarksRender(0);
+      if (state.focus.typewriter) scheduleTypewriterAlign(0);
       // 等主进程写完「上次打开章节」再返回，避免后续操作和它并发覆盖书目
       try {
         await api.setLastOpenChapter(state.bookPath, chapter.id);
@@ -5629,6 +5829,10 @@
     $('btn-insert').addEventListener('click', () => createChapterAt(state.index + 1));
     $('btn-save').addEventListener('click', () => saveCurrent());
     $('btn-find').addEventListener('click', openFindPanel);
+    // 专注模式（提案 3.5）：顶栏「专注」进出 + 极简退出条上的「打字机 / 退出专注」
+    $('btn-focus').addEventListener('click', () => toggleFocusMode());
+    $('btn-focus-exit').addEventListener('click', () => setFocusMode(false));
+    $('btn-focus-typewriter').addEventListener('click', () => setFocusTypewriter(!state.focus.typewriter));
     $('btn-find-run').addEventListener('click', runFind);
     $('btn-find-replace-one').addEventListener('click', runReplaceOne);
     $('btn-find-replace').addEventListener('click', runReplaceAll);
@@ -5944,6 +6148,20 @@
         closeTtsBar();
         return;
       }
+      // 专注模式（提案 3.5）：F11 来回切换（只在写作页；不写配置、不写盘）
+      if (event.key === 'F11') {
+        if (state.view === 'editor' && state.bookPath) {
+          event.preventDefault();
+          toggleFocusMode();
+        }
+        return;
+      }
+      // 专注模式下 Esc 退出（弹层 / 朗读条的 Esc 已经在上面处理，不抢它们的）
+      if (state.focus.on && event.key === 'Escape') {
+        event.preventDefault();
+        setFocusMode(false);
+        return;
+      }
       // 段落导航（提案 4.1）：Alt+↑/↓ 在自然段开头之间跳，只移动光标、不改字
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
         if (state.view === 'editor' && state.bookPath) {
@@ -6004,6 +6222,7 @@
       hideBookMenu();
       applySidebarWidth(state.sidebarWidth);
       scheduleMarksRender(40);
+      if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(60);
     });
   }
 
@@ -6581,6 +6800,72 @@
       chapterCharsTexts: () =>
         Array.from(document.querySelectorAll('#chapter-list .chapter-chars')).map((el) => el.textContent),
       jumpParagraph: (direction) => jumpParagraph(direction),
+      // 专注模式（提案 3.5）：F11 / Esc 走真实键盘路径，这里给界面状态和测量工具
+      focusState: () => {
+        const sidebar = $('sidebar');
+        const resizer = $('sidebar-resizer');
+        const header = document.querySelector('.editor-header');
+        const statusbar = document.querySelector('.statusbar');
+        return {
+          on: state.focus.on,
+          typewriter: state.focus.typewriter,
+          active: focusActive(),
+          savedScrollTop: state.focus.savedScrollTop,
+          savedCaret: state.focus.savedCaret,
+          savedCaretOffset: state.focus.savedCaretOffset,
+          barVisible: !$('focus-bar').classList.contains('hidden'),
+          viewHasClass: $('editor-view').classList.contains('focus-mode'),
+          bodyHasClass: document.body.classList.contains('focus-mode'),
+          sidebarDisplay: sidebar ? getComputedStyle(sidebar).display : '',
+          sidebarWidth: sidebar ? sidebar.offsetWidth : 0,
+          resizerDisplay: resizer ? getComputedStyle(resizer).display : '',
+          headerDisplay: header ? getComputedStyle(header).display : '',
+          headerHeight: header ? header.offsetHeight : 0,
+          statusbarDisplay: statusbar ? getComputedStyle(statusbar).display : '',
+          editorWidth: editorEl.offsetWidth,
+          editorClientHeight: editorEl.clientHeight,
+          editorScrollTop: editorEl.scrollTop,
+          focusTitle: $('focus-chapter').textContent,
+          chapterTitle: $('chapter-title').textContent,
+          typewriterLabel: $('btn-focus-typewriter').textContent,
+          typewriterDataOn: $('btn-focus-typewriter').dataset.on,
+          exitLabel: $('btn-focus-exit').textContent.replace(/\s+/g, ' ').trim(),
+          title: document.title
+        };
+      },
+      focusToggle: (on) => setFocusMode(on == null ? !state.focus.on : Boolean(on)),
+      focusTypewriter: (on) => setFocusTypewriter(on),
+      focusAlign: () => alignTypewriter(),
+      focusMeasure: (pos) => measureCaretTop(pos),
+      focusMetrics() {
+        const styles = getComputedStyle(editorEl);
+        const px = (value) => {
+          const n = parseFloat(value);
+          return Number.isFinite(n) ? n : 0;
+        };
+        return {
+          paddingTop: px(styles.paddingTop),
+          lineHeight: px(styles.lineHeight),
+          clientHeight: editorEl.clientHeight,
+          scrollHeight: editorEl.scrollHeight,
+          scrollTop: editorEl.scrollTop,
+          maxScrollTop: editorEl.scrollHeight - editorEl.clientHeight,
+          caret: editorEl.selectionStart || 0,
+          caretTop: measureCaretTop(editorEl.selectionStart || 0),
+          mirrorExists: Boolean($('focus-mirror'))
+        };
+      },
+      focusSetCaret(position) {
+        editorEl.focus();
+        const at = Math.max(0, Math.min(Number(position) || 0, editorEl.value.length));
+        editorEl.setSelectionRange(at, at);
+        renderSelectionStats();
+        return at;
+      },
+      focusDispatchKey(key) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+        return true;
+      },
       // 灵感箱（碎片速记）
       openFragmentDialog: () => openFragmentDialog(),
       closeFragmentDialog: () => closeFragmentDialog(),

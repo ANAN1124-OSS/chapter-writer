@@ -69,6 +69,7 @@
           <div class="chapter-title" id="chapter-title"></div>
           <div class="editor-actions">
             <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
+            <button id="btn-focus" class="btn ghost" type="button" title="专注模式：隐藏左栏与顶栏，只留正文（F11 进出，Esc 退出；不写配置）">专注</button>
             <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
             <button id="btn-tts" class="btn ghost" type="button" title="朗读本章：用 Windows 自带语音读正文，只读不改、不写盘（Esc 停止）">朗读</button>
             <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
@@ -105,6 +106,12 @@
             <button id="btn-save" class="btn primary" type="button" disabled>保存</button>
           </div>
         </header>
+        <!-- 专注模式（提案 3.5）：隐藏左栏与顶栏，只留正文；这一条是极简退出条（Esc / F11 也能退出） -->
+        <div id="focus-bar" class="focus-bar hidden" role="toolbar" aria-label="专注模式">
+          <span id="focus-chapter" class="focus-chapter"></span>
+          <button id="btn-focus-typewriter" class="focus-btn" type="button" data-on="0">打字机</button>
+          <button id="btn-focus-exit" class="focus-btn" type="button" title="退出专注模式（Esc / F11）">退出专注 <span class="focus-kbd">Esc</span></button>
+        </div>
         <textarea id="editor" class="editor" spellcheck="false"
                   placeholder="开始写作…（只有按 Ctrl+S 或点「保存」才会写盘）"></textarea>
         <!-- 只读标记层：不可见字符 / 超长段落只画在这里，正文一个字节都不改（和编辑区同排版，跟着滚动） -->
@@ -670,6 +677,7 @@
   </div>
 
   <script src="editor-logic.js"></script>
+  <script src="focus-logic.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

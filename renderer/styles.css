@@ -706,6 +706,79 @@ body.theme-night .editor-marks .mark-trail > i { color: #e08a84; }
 }
 body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 
+/* ---------- 专注模式（提案 3.5）----------
+ * 隐藏左栏、分隔条与顶栏，正文占满；只留右上角一条极简退出条（F11 / 按钮进出，Esc 退出）。
+ * 纯显示层：不改正文、不写盘、不写配置；打字机模式只调 textarea.scrollTop。 */
+#editor-view.focus-mode .sidebar,
+#editor-view.focus-mode .sidebar-resizer,
+#editor-view.focus-mode .editor-header { display: none; }
+/* 顶部留一点空间给极简退出条，免得第一行字被它压住 */
+#editor-view.focus-mode .editor { padding-top: 58px; }
+
+.focus-bar {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 40px);
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-soft);
+  box-shadow: 0 4px 14px rgba(60, 48, 30, .08);
+  opacity: .42;
+  transition: opacity .15s ease;
+}
+.focus-bar:hover,
+.focus-bar:focus-within { opacity: 1; }
+.focus-chapter {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.focus-btn {
+  padding: 3px 9px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.focus-btn:hover { background: var(--paper-deep); }
+.focus-btn[data-on="1"] { color: var(--accent); border-color: var(--accent-soft); }
+.focus-kbd {
+  padding: 0 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+/* 打字机模式的光标测量层：和正文同样的字体 / 行高 / 宽度，绝对定位放在屏幕外，
+   只用来量「光标所在行」的像素位置（正文一个字节都不改，它也不参与显示 / 选择）。 */
+.focus-mirror {
+  position: absolute;
+  top: 0;
+  left: -10000px;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-sizing: content-box;
+}
+
 .statusbar {
   height: 34px;
   flex: 0 0 34px;

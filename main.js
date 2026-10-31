@@ -1284,6 +1284,18 @@ async function runAutomation() {
           await win.webContents.executeJavaScript('window.__cwTest.selectRange(0, 42);', true);
         }
         await sleep(500);
+      } else if (screenshotDialog === 'focus') {
+        // 开发截图用：专注模式 + 打字机模式（隐藏左栏 / 顶栏，只改显示，不写盘、不写配置）
+        await win.webContents.executeJavaScript(
+          'window.__cwTest.focusToggle(true); window.__cwTest.focusTypewriter(true);',
+          true
+        );
+        await sleep(500);
+        await win.webContents.executeJavaScript(
+          'const len = window.__cwTest.text().length; window.__cwTest.focusSetCaret(Math.floor(len * 0.6)); window.__cwTest.focusAlign();',
+          true
+        );
+        await sleep(500);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',
