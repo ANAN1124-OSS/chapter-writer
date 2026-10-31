@@ -3868,12 +3868,16 @@
   // 默认「全书」和以前完全一样；也可以只导某一卷 / 第 X–Y 章。
   // 章数、字数、默认文件名都由主进程算（book:export-plan 只读），避免界面和导出两套规则。
   // v0.8 P0 N8：TXT / EPUB 共用这个范围对话框，exportFormat 记住这次是哪种格式。
+  // v0.8 P0 N9：DOCX 也走同一个对话框。
   const EXPORT_UNVOLUMED = '__none__';
   const EXPORT_MESSAGES = {
     txt: '选择导出范围。格式和以前一样（标题行 + 空行 + 正文，UTF-8 带 BOM，CRLF）；当前章没保存的内容也会一起导出，但不会写盘。',
     epub:
-      '选择导出范围。导出成 EPUB 3 电子书（分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行）；当前章没保存的内容也会一起导出，但不会写盘。'
+      '选择导出范围。导出成 EPUB 3 电子书（分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行）；当前章没保存的内容也会一起导出，但不会写盘。',
+    docx:
+      '选择导出范围。导出成 Word 文档（.docx：标题页 + 卷 / 章标题、段首缩进 2 字、1.5 倍行距）；当前章没保存的内容也会一起导出，但不会写盘。'
   };
+  const EXPORT_TITLES = { txt: '导出 TXT', epub: '导出 EPUB', docx: '导出 DOCX' };
   let exportPlanTimer = null;
   let exportPlanToken = 0;
   let lastExportPlan = null;
@@ -3973,8 +3977,13 @@
     lastExportPlan = res;
     const bits = [`将导出 ${res.chapterCount} 章`, `${res.chars} 字`];
     if (res.includedUnsaved) bits.push('含当前章未保存内容');
-    // EPUB 与 TXT 的范围规则一样，只是默认文件名后缀不同（主进程统一算好）
-    const fileName = exportFormat === 'epub' ? res.epubFileName : res.fileName;
+    // EPUB / DOCX 与 TXT 的范围规则一样，只是默认文件名后缀不同（主进程统一算好）
+    const fileName =
+      exportFormat === 'epub'
+        ? res.epubFileName
+        : exportFormat === 'docx'
+          ? res.docxFileName
+          : res.fileName;
     summaryEl.textContent = `${bits.join(' · ')}；默认文件名：${fileName}`;
     summaryEl.classList.remove('warn');
     confirmBtn.disabled = false;
@@ -3988,7 +3997,7 @@
     }, delay);
   }
 
-  // format = 'txt'（默认）| 'epub'：两个入口共用同一套范围选择，标题 / 说明跟着换。
+  // format = 'txt'（默认）| 'epub' | 'docx'：三个入口共用同一套范围选择，标题 / 说明跟着换。
   function openExportDialog(format = 'txt') {
     hideExportMenu();
     if (!state.bookPath) return;
@@ -3996,9 +4005,9 @@
       toast('这本书里还没有章节，没有可导出的内容', 'warn');
       return;
     }
-    exportFormat = format === 'epub' ? 'epub' : 'txt';
+    exportFormat = format === 'epub' || format === 'docx' ? format : 'txt';
     const total = state.chapters.length;
-    $('export-title').textContent = exportFormat === 'epub' ? '导出 EPUB' : '导出 TXT';
+    $('export-title').textContent = EXPORT_TITLES[exportFormat] || EXPORT_TITLES.txt;
     $('export-message').textContent = EXPORT_MESSAGES[exportFormat];
     fillExportVolumeOptions();
     const allRadio = document.querySelector('input[name="export-scope"][value="all"]');
@@ -4062,6 +4071,7 @@
     const format = exportFormat;
     closeExportDialog();
     if (format === 'epub') await exportEpubFlow(range);
+    else if (format === 'docx') await exportDocxFlow(range);
     else await exportBookFlow(range);
   }
 
@@ -4134,6 +4144,25 @@
       toast(`已导出 EPUB：${data.filePath}（${parts.join(' · ')}）${conversionTag(data.conversion)}`);
     } catch (err) {
       toast(`导出 EPUB 失败：${err.message}`, 'error');
+    }
+  }
+
+  // 导出 DOCX：整本或选中的卷 / 章节一份 Word 文档（标题页 + 卷 / 章标题 + 段首缩进）。
+  // 和 TXT / EPUB 导出一样带上当前章未保存的内容（只参与这次导出，不写盘）；range 不传 = 全书。
+  async function exportDocxFlow(range) {
+    if (!state.bookPath) return;
+    try {
+      const data = await call(api.exportDocx, state.bookPath, currentChapterOverride(), range);
+      if (data.canceled) return;
+      const parts = [];
+      if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
+      parts.push(`${data.chapterCount} 章`);
+      if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
+      parts.push(`${Number(data.chars) || 0} 字`);
+      if (data.includedUnsaved) parts.push('含当前章未保存内容');
+      toast(`已导出 DOCX：${data.filePath}（${parts.join(' · ')}）${conversionTag(data.conversion)}`);
+    } catch (err) {
+      toast(`导出 DOCX 失败：${err.message}`, 'error');
     }
   }
 
@@ -7750,6 +7779,7 @@
       if (btn.dataset.action === 'copy') await copyBookFlow();
       else if (btn.dataset.action === 'txt') openExportDialog('txt');
       else if (btn.dataset.action === 'epub') openExportDialog('epub');
+      else if (btn.dataset.action === 'docx') openExportDialog('docx');
       else if (btn.dataset.action === 'sensitive') await openSensitivePanel();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
       else if (btn.dataset.action === 'history') await openHistoryForCurrentBook();

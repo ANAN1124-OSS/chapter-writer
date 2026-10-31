@@ -497,13 +497,14 @@
       : convertWith(value, T2S_CHARS, T2S_PHRASE_INDEX);
   }
 
-  // 书目的显示字段（书名 / 章名 / 卷名）也要跟着导出的正文一起转，目录和正文才一致。
+  // 书目的显示字段（书名 / 作者 / 章名 / 卷名）也要跟着导出的正文一起转，目录和正文才一致。
   // 只复制、不修改调用方对象；id / file / volumeId 等结构字段一个都不动。
   function convertMeta(meta, mode) {
     const m = normalizeMode(mode);
     if (!m || !meta || typeof meta !== 'object') return meta;
     const copy = { ...meta };
     if (typeof meta.title === 'string') copy.title = convertText(meta.title, m);
+    if (typeof meta.author === 'string') copy.author = convertText(meta.author, m);
     if (Array.isArray(meta.chapters)) {
       copy.chapters = meta.chapters.map((chapter) => {
         if (!chapter || typeof chapter !== 'object') return chapter;

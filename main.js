@@ -41,6 +41,7 @@ const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
 const statsLib = require('./core/stats');
 const epubLib = require('./core/epub');
+const docxLib = require('./core/docx');
 const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
 const glossaryLib = require('./core/glossary');
@@ -1351,6 +1352,7 @@ function registerIpc() {
       empty: plan.empty,
       fileName: exporter.exportFileName(meta, range),
       epubFileName: epubLib.epubFileName(meta, range),
+      docxFileName: docxLib.docxFileName(meta, range),
       includedUnsaved: overrideIndex >= 0 && plan.indexes.includes(overrideIndex)
     };
   });
@@ -1448,6 +1450,62 @@ function registerIpc() {
       ? texts.map((text) => s2tLib.convertText(text, conversion))
       : texts;
     const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts, range });
+    await atomicWriteFile(filePath, built.buffer);
+    await rememberExportDir(path.dirname(filePath));
+    return {
+      canceled: false,
+      filePath,
+      chapterCount: built.chapterCount,
+      volumeCount: built.volumeCount,
+      chars,
+      includedUnsaved,
+      bytes: built.bytes,
+      conversion,
+      rangeLabel: plan.label
+    };
+  });
+
+  // 导出 DOCX（v0.8 P0 N9）：整本或按卷 / 按章节范围 → 一份 Word 能直接打开的书稿。
+  // 和 EPUB 导出同一套规则：范围解析复用 exporter.resolveExportRange，只读选中的章，
+  // 章号 / 章名仍按全书顺序；当前章未保存内容参与、只读、原子写盘、简繁转换只作用于副本。
+  handleBook('book:export-docx', async (bookPath, override, range) => {
+    const meta = await storage.readBookMeta(bookPath);
+    const plan = exporter.resolveExportRange(meta, range);
+    if (!plan.count) {
+      throw new storage.StorageError(
+        'EMPTY_EXPORT_RANGE',
+        plan.mode === 'all' ? '这本书里还没有章节' : '所选范围里没有章节'
+      );
+    }
+    const { texts, chars, includedUnsaved } = await collectExportTexts(
+      bookPath,
+      meta,
+      override,
+      plan.indexes
+    );
+    const cfg = await getConfig();
+    // 目录记忆和 TXT / EPUB 导出共用：上次导到哪，这次默认还开在哪
+    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
+      try {
+        return fsSync.statSync(dir).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+    const defaultName = docxLib.docxFileName(meta, range);
+    const { canceled, filePath } = await showSaveDialog({
+      title: '导出 DOCX',
+      defaultPath: path.join(defaultDir, defaultName),
+      filters: [{ name: 'Word 文档', extensions: ['docx'] }]
+    });
+    if (canceled || !filePath) return { canceled: true };
+    // 简繁转换：书名 / 卷名 / 章名 / 正文都换成导出用的副本（书目与章节 txt 一概不动）
+    const conversion = s2tLib.normalizeMode(cfg.exportConversion);
+    const exportMeta = s2tLib.convertMeta(meta, conversion);
+    const exportTexts = conversion
+      ? texts.map((text) => s2tLib.convertText(text, conversion))
+      : texts;
+    const built = docxLib.buildDocx({ meta: exportMeta, texts: exportTexts, range });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
     return {
@@ -2029,6 +2087,26 @@ async function runAutomation() {
         // （只读，不导出、不写盘）
         await automationWin.webContents.executeJavaScript(
           `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="epub"]').click();`,
+          true
+        );
+        await sleep(700);
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+            const radio = document.querySelector('input[name="export-scope"][value="volume"]');
+            if (radio) radio.click();
+            const select = document.getElementById('export-volume');
+            if (select && select.options.length > 1) {
+              select.selectedIndex = 1;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          })()`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'export-docx') {
+        // 开发截图用：打开「导出 DOCX」范围对话框并选中「按卷导出」（只读，不导出、不写盘）
+        await automationWin.webContents.executeJavaScript(
+          `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="docx"]').click();`,
           true
         );
         await sleep(700);

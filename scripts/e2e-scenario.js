@@ -5981,6 +5981,278 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.exportDialogOpen()')) === false
   );
 
+  // 46l. 导出 DOCX（v0.8-9，提案 N9）：整本 / 按卷 / 按章节范围导出成 Word 文档；
+  // 和 TXT / EPUB 共用范围对话框与范围规则，章号仍按全书，只读不改书库。
+  const docxDir = path.join(path.dirname(booksRoot), 'docx-exports');
+  await fs.mkdir(docxDir, { recursive: true });
+  const docxParts = [
+    '[Content_Types].xml',
+    '_rels/.rels',
+    'word/document.xml',
+    'word/styles.xml',
+    'word/_rels/document.xml.rels',
+    'docProps/core.xml',
+    'docProps/app.xml'
+  ];
+  const docxAllOf = async (filePath) => {
+    // DOCX 也是一个 zip：沿用 46k 的 readEpub 解包助手（只看条目和文本）
+    const pkg = await readEpub(filePath);
+    return { ...pkg, document: pkg.text('word/document.xml'), styles: pkg.text('word/styles.xml') };
+  };
+
+  // 46l-1. 入口：导出菜单新增「导出 DOCX…」，打开同一个范围对话框，标题 / 格式 / 默认文件名都是 DOCX
+  const docxMenuExists = await exec(
+    "Boolean(document.querySelector('#export-menu button[data-action=\"docx\"]'))"
+  );
+  await openExportDialogFromMenu('docx');
+  const docxAllSummary = await waitForSummary('EPUB范围导出测试书.docx');
+  check(
+    'DOCX 导出：菜单有「导出 DOCX…」，打开同一个范围对话框（标题 / 格式 / .docx 文件名）',
+    docxMenuExists === true &&
+      (await exec('window.__cwTest.exportTitle()')) === '导出 DOCX' &&
+      (await exec('window.__cwTest.exportFormat()')) === 'docx' &&
+      docxAllSummary.includes('将导出 5 章') &&
+      docxAllSummary.includes('EPUB范围导出测试书.docx'),
+    docxAllSummary
+  );
+
+  // 46l-2. 全书 DOCX：最小 OOXML 包部件齐全，5 章 + 2 个卷标题，默认文件名 / 类型正确
+  const docxFullPath = path.join(docxDir, 'full.docx');
+  withSavePath(docxFullPath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(docxFullPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const docxFull = await docxAllOf(docxFullPath);
+  check(
+    'DOCX 导出：保存对话框默认文件名 = 书名.docx，类型带 docx',
+    Boolean(lastSaveOptions) &&
+      path.basename(lastSaveOptions.defaultPath) === 'EPUB范围导出测试书.docx' &&
+      lastSaveOptions.filters.some(
+        (filter) => Array.isArray(filter.extensions) && filter.extensions.includes('docx')
+      ),
+    lastSaveOptions && lastSaveOptions.defaultPath
+  );
+  check(
+    'DOCX 导出：全书包里有最小 OOXML 七个部件，顺序稳定',
+    JSON.stringify(docxFull.names) === JSON.stringify(docxParts),
+    docxFull.names
+  );
+  check(
+    'DOCX 导出：全书文档含 5 章标题 + 2 个卷标题 + 正文，章号按全书',
+    ['楔子', '第2章：上卷一', '第3章：上卷二', '第4章：下卷三', '第5章：下卷四'].every((title) =>
+      docxFull.document.includes(`>${title}</w:t>`)
+    ) &&
+      ['上卷', '下卷'].every((name) => docxFull.document.includes(`>${name}</w:t>`)) &&
+      docxFull.document.includes('>楔子正文。</w:t>') &&
+      docxFull.document.includes('>下卷第二章正文。</w:t>') &&
+      docxFull.document.includes('>共 5 章 · 2 卷</w:t>') &&
+      (docxFull.document.match(/<w:pStyle w:val="Heading2"\/>/g) || []).length === 5,
+    docxFull.document.slice(0, 200)
+  );
+  check(
+    'DOCX 导出：样式表带段首缩进 2 字 / 1.5 倍行距 / 宋体，标题页之后分页',
+    docxFull.styles.includes('<w:ind w:firstLineChars="200" w:firstLine="480"/>') &&
+      docxFull.styles.includes('w:line="360" w:lineRule="auto"') &&
+      docxFull.styles.includes('w:eastAsia="宋体"') &&
+      docxFull.document.includes('<w:br w:type="page"/>')
+  );
+
+  // 46l-3. 按卷导出「上卷」：只写第 2–3 章和一个卷标题
+  await openExportDialogFromMenu('docx');
+  await exec("document.querySelector('input[name=\"export-scope\"][value=\"volume\"]').click()");
+  await exec(
+    `(() => { const select = document.getElementById('export-volume'); select.value = ${JSON.stringify(epubRangeVolumeIds[0])}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`
+  );
+  const docxVolumeSummary = await waitForSummary('EPUB范围导出测试书-上卷.docx');
+  check(
+    'DOCX 导出：按卷摘要 2 章、文件名带卷名',
+    docxVolumeSummary.includes('将导出 2 章') &&
+      docxVolumeSummary.includes('EPUB范围导出测试书-上卷.docx'),
+    docxVolumeSummary
+  );
+  const docxVolumePath = path.join(docxDir, 'volume.docx');
+  withSavePath(docxVolumePath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(docxVolumePath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const docxVolume = await docxAllOf(docxVolumePath);
+  check(
+    'DOCX 导出：按卷只写该卷的章和一个卷标题，范围外的章 / 卷一个字都没有',
+    docxVolume.document.includes('>第2章：上卷一</w:t>') &&
+      docxVolume.document.includes('>第3章：上卷二</w:t>') &&
+      docxVolume.document.includes('>上卷</w:t>') &&
+      docxVolume.document.includes('>上卷 · 共 2 章 · 1 卷</w:t>') &&
+      !docxVolume.document.includes('楔子') &&
+      !docxVolume.document.includes('下卷'),
+    docxVolume.document.slice(0, 160)
+  );
+
+  // 46l-4. 章节范围 3–4（跨卷）：两个卷标题都在，范围外一章不进文档
+  await openExportDialogFromMenu('docx');
+  await chooseExportRange(3, 4);
+  const docxRangeSummary = await waitForSummary('EPUB范围导出测试书-第3-4章.docx');
+  check(
+    'DOCX 导出：章节范围摘要 2 章、文件名带第3-4章',
+    docxRangeSummary.includes('将导出 2 章') &&
+      docxRangeSummary.includes('EPUB范围导出测试书-第3-4章.docx'),
+    docxRangeSummary
+  );
+  const docxRangePath = path.join(docxDir, 'range.docx');
+  withSavePath(docxRangePath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(docxRangePath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const docxRange = await docxAllOf(docxRangePath);
+  check(
+    'DOCX 导出：第 3–4 章跨卷只写这两章 + 两个卷标题，卷 / 章顺序正确',
+    docxRange.document.includes('>上卷</w:t>') &&
+      docxRange.document.includes('>第3章：上卷二</w:t>') &&
+      docxRange.document.includes('>下卷</w:t>') &&
+      docxRange.document.includes('>第4章：下卷三</w:t>') &&
+      docxRange.document.includes('>第3-4章 · 共 2 章 · 2 卷</w:t>') &&
+      !docxRange.document.includes('楔子') &&
+      !docxRange.document.includes('第5章') &&
+      docxRange.document.indexOf('>上卷</w:t>') < docxRange.document.indexOf('>第3章：上卷二</w:t>') &&
+      docxRange.document.indexOf('>第3章：上卷二</w:t>') < docxRange.document.indexOf('>下卷</w:t>'),
+    docxRange.document.slice(0, 160)
+  );
+
+  // 46l-5. 空卷：明确提示没有章节、导出按钮不可点（不写空文件）
+  await openExportDialogFromMenu('docx');
+  await exec("document.querySelector('input[name=\"export-scope\"][value=\"volume\"]').click()");
+  await exec(
+    `(() => { const select = document.getElementById('export-volume'); select.value = ${JSON.stringify(epubRangeVolumeIds[2])}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`
+  );
+  const docxEmptySummary = await waitForSummary('所选范围里没有章节');
+  check(
+    'DOCX 导出：空卷提示「所选范围里没有章节」、导出按钮不可点',
+    docxEmptySummary.includes('所选范围里没有章节') &&
+      (await exec('window.__cwTest.exportConfirmDisabled()')) === true,
+    docxEmptySummary
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  check('DOCX 导出：Esc 关闭范围对话框', (await exec('window.__cwTest.exportDialogOpen()')) === false);
+
+  // 46l-6. 当前章未保存内容：只参与这次导出，磁盘仍是旧正文
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  const docxUnsavedText = '未保存的上卷 DOCX 新内容。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(docxUnsavedText)})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  await openExportDialogFromMenu('docx');
+  await chooseExportRange(2, 2);
+  const docxUnsavedSummary = await waitForSummary('EPUB范围导出测试书-第2章.docx');
+  check(
+    'DOCX 导出：摘要提示含当前章未保存内容',
+    docxUnsavedSummary.includes('含当前章未保存内容') &&
+      docxUnsavedSummary.includes('EPUB范围导出测试书-第2章.docx'),
+    docxUnsavedSummary
+  );
+  const docxUnsavedPath = path.join(docxDir, 'unsaved.docx');
+  withSavePath(docxUnsavedPath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(docxUnsavedPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const docxUnsaved = await docxAllOf(docxUnsavedPath);
+  check(
+    'DOCX 导出：未保存正文进了文档、旧正文没进去、磁盘仍是旧正文',
+    docxUnsaved.document.includes(docxUnsavedText) &&
+      !docxUnsaved.document.includes('上卷第一章正文。') &&
+      (await storage.loadChapterText(epubRangeBookPath, epubRangeMeta.chapters[1].file)).text ===
+        '上卷第一章正文。' &&
+      (await exec('window.__cwTest.dirty()')) === true
+  );
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+
+  // 46l-7. 全程只读：章节 txt 大小 + mtime、书目 chapters、书内文件、config 字段都没被导出改写
+  let docxFilesUntouched = true;
+  for (const item of epubRangeStatBefore) {
+    const stat = await fs.stat(path.join(epubRangeBookPath, item.file));
+    if (stat.size !== item.size || stat.mtimeMs !== item.mtimeMs) docxFilesUntouched = false;
+  }
+  const docxMetaAfter = await storage.readBookMeta(epubRangeBookPath);
+  const docxCfgAfter = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  let docxCfgSame =
+    Object.keys(epubRangeCfgBefore).sort().join(',') === Object.keys(docxCfgAfter).sort().join(',');
+  for (const key of Object.keys(epubRangeCfgBefore)) {
+    if (key === 'lastExportDir' || key === 'lastBook') continue;
+    if (JSON.stringify(epubRangeCfgBefore[key]) !== JSON.stringify(docxCfgAfter[key])) docxCfgSame = false;
+  }
+  const docxDirEntries = (await fs.readdir(epubRangeBookPath)).sort();
+  check(
+    'DOCX 导出：全程只读——章节 txt / 书目 chapters / 书内文件 / config 都没被导出改写',
+    docxFilesUntouched &&
+      JSON.stringify(docxMetaAfter.chapters) === epubRangeChaptersBefore &&
+      docxCfgSame &&
+      docxDirEntries.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')) &&
+      docxDirEntries.filter((name) => name.endsWith('.txt')).length === 5,
+    {
+      untouched: docxFilesUntouched,
+      chaptersSame: JSON.stringify(docxMetaAfter.chapters) === epubRangeChaptersBefore,
+      cfgSame: docxCfgSame,
+      dir: docxDirEntries
+    }
+  );
+
+  // 46l-8. DOCX 包里 XML / 关系都合法，内容类型和关系目标都存在
+  let docxXmlOk = true;
+  let docxXmlChecked = 0;
+  let docxXmlError = '';
+  for (const entry of docxRange.zip.entries) {
+    if (!/\.(xml|rels)$/.test(entry.name)) continue;
+    try {
+      assertWellFormedXml(entry.data.toString('utf8'), entry.name);
+      docxXmlChecked += 1;
+    } catch (err) {
+      docxXmlOk = false;
+      docxXmlError = err.message;
+    }
+  }
+  const docxTypes = docxRange.text('[Content_Types].xml');
+  const docxPackageRels = docxRange.text('_rels/.rels');
+  const docxDocumentRels = docxRange.text('word/_rels/document.xml.rels');
+  check(
+    'DOCX 导出：XML / 关系都合法，关系目标和内容类型都指向包里真实存在的部件',
+    docxXmlOk &&
+      docxXmlChecked === 7 &&
+      docxTypes.includes(
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'
+      ) &&
+      docxPackageRels.includes('Target="word/document.xml"') &&
+      docxPackageRels.includes('Target="docProps/core.xml"') &&
+      docxDocumentRels.includes('Target="styles.xml"') &&
+      docxRange.names.includes('word/document.xml') &&
+      docxRange.names.includes('word/styles.xml') &&
+      docxRange.names.includes('docProps/core.xml'),
+    { checked: docxXmlChecked, error: docxXmlError }
+  );
+
+  // 46l-9. 取消不写文件
+  const docxCancelPath = path.join(docxDir, 'cancel.docx');
+  await openExportDialogFromMenu('docx');
+  withSavePath(docxCancelPath);
+  try {
+    await exec("document.getElementById('btn-export-cancel').click()");
+  } finally {
+    restoreSaveDialog();
+  }
+  check(
+    'DOCX 导出：取消按钮关闭对话框、不写文件',
+    (await exec('window.__cwTest.exportDialogOpen()')) === false &&
+      !(await fileExists(docxCancelPath))
+  );
+
   // 47. 灵感箱（v0.7-3，提案 3.4）：碎片是书架 _碎片 里的普通 txt；插入只改编辑区、不写盘
   const fragDir = path.join(booksRoot, '_碎片');
   const fragStamp = fragmentsLib.formatDateStamp();

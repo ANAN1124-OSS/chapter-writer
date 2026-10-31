@@ -112,6 +112,7 @@
                 <button type="button" data-action="copy">复制整本到剪贴板</button>
                 <button type="button" data-action="txt">导出 TXT…</button>
                 <button type="button" data-action="epub" title="整本或按卷 / 按章节范围导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
+                <button type="button" data-action="docx" title="整本或按卷 / 按章节范围导出成 Word 文档（.docx）：标题页 + 卷 / 章标题 + 段首缩进 2 字、1.5 倍行距">导出 DOCX…</button>
                 <button type="button" data-action="sensitive" title="按你自己的词表检查命中位置：只报告、不改正文、不写盘（应用不内置任何词表）">敏感词预检…</button>
                 <button type="button" data-action="folder">打开本书文件夹</button>
                 <div class="dropdown-sep"></div>
@@ -384,7 +385,7 @@
         <div class="export-summary" id="export-summary"></div>
         <div class="export-conversion-note muted small" id="export-conversion-note"></div>
         <p class="muted small">
-          按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的文件里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。TXT 和 EPUB 都支持按卷 / 按范围导出。
+          按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的文件里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。TXT / EPUB / DOCX 都支持按卷 / 按范围导出。
         </p>
       </div>
       <div class="modal-buttons">

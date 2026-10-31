@@ -124,10 +124,11 @@ test('简繁互转：无歧义句子来回一致，长度始终不变', () => {
   assert.equal((convertedLong.match(/\r\n/g) || []).length, 200, '换行没有被吞掉');
 });
 
-test('书目显示字段：书名 / 章名 / 卷名跟着转，id / 文件名 / 结构字段不动', () => {
+test('书目显示字段：书名 / 作者 / 章名 / 卷名跟着转，id / 文件名 / 结构字段不动', () => {
   const meta = {
     id: 'book-1',
     title: '门后的人',
+    author: '说话人',
     schemaVersion: 1,
     chapters: [
       { id: 'c1', file: '001.txt', name: '开端', chars: 12 },
@@ -143,6 +144,7 @@ test('书目显示字段：书名 / 章名 / 卷名跟着转，id / 文件名 / 
   const converted = s2t.convertMeta(meta, 's2t');
   assert.equal(JSON.stringify(meta), before, '不修改调用方对象');
   assert.equal(converted.title, '門後的人');
+  assert.equal(converted.author, '說話人');
   assert.equal(converted.chapters[0].name, '開端');
   assert.equal(converted.chapters[1].name, '', '空章名还是空');
   assert.equal(converted.chapters[2].name, '說話');
