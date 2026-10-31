@@ -104,6 +104,7 @@ test('繁 → 简：多对一映射、语境例外、常见词', () => {
   assert.equal(s2t.convertText('他看著我，坐著不動', 't2s'), '他看着我，坐着不动');
   assert.equal(s2t.convertText('瞭解、明瞭、瞭望', 't2s'), '了解、明了、瞭望');
   assert.equal(s2t.convertText('藉口和憑藉', 't2s'), '借口和凭借');
+  assert.equal(s2t.convertText('穿著、計畫、傢俱、規畫', 't2s'), '穿着、计划、家具、规划');
   assert.equal(s2t.convertText('週末、一隻、麵條、穀物、輕鬆、剩餘', 't2s'), '周末、一只、面条、谷物、轻松、剩余');
   // 空白 / 数字 / 英文 / 标点 / 换行原样保留
   const mixed = '第1章　Hello, world!\r\n\t（測試）……「引號」';
