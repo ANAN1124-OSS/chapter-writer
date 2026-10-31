@@ -330,7 +330,7 @@ pnpm run demo      # 生成演示书库到 shots/demo-library（截图/演示用
 pnpm start -- --user-data=shots/ud-1 --books-root=shots/demo-library --screenshot=shots/shelf.png
 # 编辑视图（打开指定书、指定章节）
 pnpm start -- --user-data=shots/ud-2 --books-root=shots/demo-library --book=shots/demo-library/星海旅人 --chapter=0 --screenshot=shots/editor.png
-# 弹层（--dialog 可选：unsaved / settings / settings-snapshot / settings-stats / settings-calendar / settings-template / settings-sensitive / settings-proofread / settings-export / settings-logs / settings-update / bookmenu / bookinfo / exportmenu / export / splitter / format / formatmenu / find / proofread / sensitive / tts / marks / marks-menu / focus / reading / shelf-search / conflict / history / fragment / fragments）
+# 弹层（--dialog 可选：unsaved / settings / settings-snapshot / settings-stats / settings-calendar / settings-template / settings-sensitive / settings-proofread / settings-export / settings-logs / settings-update / bookmenu / bookinfo / exportmenu / export / export-epub / splitter / format / formatmenu / find / proofread / sensitive / tts / marks / marks-menu / focus / reading / shelf-search / conflict / history / fragment / fragments）
 pnpm start -- --user-data=shots/ud-3 --books-root=shots/demo-library --book=shots/demo-library/星海旅人 --chapter=0 --dialog=format --screenshot=shots/fmt-dialog.png
 # 阅读模式（--reading-chapter 是 0 基章下标，可选；不传就从书里上次打开的章开始）
 pnpm start -- --user-data=shots/ud-6 --books-root=shots/demo-library --book=shots/demo-library/星海旅人 --dialog=reading --reading-chapter=1 --screenshot=shots/reading.png
