@@ -1271,6 +1271,19 @@ async function runAutomation() {
           console.log('[screenshot] 朗读条没能准备好');
         }
         await sleep(400);
+      } else if (screenshotDialog === 'marks' || screenshotDialog === 'marks-menu') {
+        // 开发截图用：编辑器小件——不可见字符 ␣ / 行尾空白 / 超长段落左侧黄线（只读显示层，不写盘）
+        await win.webContents.executeJavaScript(
+          "window.__cwTest.setMarksToggle('invisibles', true); window.__cwTest.setMarksToggle('longParagraphs', true);",
+          true
+        );
+        await sleep(450);
+        if (screenshotDialog === 'marks-menu') {
+          await win.webContents.executeJavaScript('window.__cwTest.openFormatMenu();', true);
+        } else {
+          await win.webContents.executeJavaScript('window.__cwTest.selectRange(0, 42);', true);
+        }
+        await sleep(500);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',

@@ -4682,5 +4682,275 @@ module.exports = async function runScenario(ctx) {
   );
   await exec('window.__cwTest.ttsClose()');
 
+  // 50. 编辑器小件（v0.7-4，提案 4.1）：选中字数 / 超长段落提示 / 不可见字符 ␣ / Alt+↑↓ 段落导航 / 章节字数对比。
+  // 全部只读、可开关：标记只画在 #editor-marks 影子层上，正文 txt 一个字节都不动、不写盘。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('编辑器小件测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const marksBookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '长段')");
+  const marksLongStartText = '他沿着堤岸往回走，风把衣角吹得猎猎作响。';
+  const marksLongParagraph = `　　${marksLongStartText.repeat(55)}`;
+  const marksText = [
+    '　　开头一段，有全角空格和行尾空白。  ',
+    marksLongParagraph,
+    '　　结尾一段。'
+  ].join('\n');
+  await exec(`window.__cwTest.setText(${JSON.stringify(marksText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec("window.__cwTest.newChapter('短章')");
+  await waitFor("window.__cwTest.currentTitle().includes('短章')");
+  const marksShortText = '　　这一章很短。\n\n　　只有两段。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(marksShortText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+
+  const marksExpectedOne = chaptersLib.countChars(marksText);
+  const marksExpectedTwo = chaptersLib.countChars(marksShortText);
+  const marksChapterChars = await exec('window.__cwTest.chapterCharsTexts()');
+  check(
+    '编辑器小件：章节列表每项显示字数（保存后跟书目缓存一致）',
+    marksChapterChars.length === 2 &&
+      marksChapterChars[0] === String(marksExpectedOne) &&
+      marksChapterChars[1] === String(marksExpectedTwo),
+    marksChapterChars
+  );
+  check(
+    '编辑器小件：这一章比上一章短很多时，状态栏给「比上章短」软提示',
+    (await exec('window.__cwTest.charCountWarn()')) === true &&
+      (await exec('window.__cwTest.charCountText()')).includes('比上章短')
+  );
+  check(
+    '编辑器小件：章节条目 tooltip 也写明「比上章短」（只提示，不改任何东西）',
+    (await exec('window.__cwTest.chapterItemTitles()'))[1].includes('比上章短')
+  );
+
+  await exec('window.__cwTest.switchTo(0)');
+  await waitFor(`window.__cwTest.text() === ${JSON.stringify(marksText)}`);
+  const marksMetaBefore = JSON.stringify((await storage.readBookMeta(marksBookPath)).chapters);
+  const marksTxtBefore = [];
+  for (const chapter of JSON.parse(marksMetaBefore)) {
+    const stat = await fs.stat(path.join(marksBookPath, chapter.file));
+    marksTxtBefore.push({ file: chapter.file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  // 50b. 「排版 ▾」里的两个开关：打开后标记层显示，正文不动
+  await exec('window.__cwTest.openFormatMenu()');
+  const marksMenuTexts = await exec(
+    "Array.from(document.querySelectorAll('#format-menu button')).map((el) => el.textContent)"
+  );
+  check(
+    '编辑器小件：「排版 ▾」菜单里有「显示不可见字符」「超长段落提示」两个开关',
+    marksMenuTexts.some((text) => text.includes('显示不可见字符')) &&
+      marksMenuTexts.some((text) => text.includes('超长段落提示'))
+  );
+  await exec(
+    `document.querySelector('#format-menu button[data-action="toggle-invisibles"]').click()`
+  );
+  await waitFor('window.__cwTest.marksFlags().invisibles === true');
+  check(
+    '编辑器小件：打开「不可见字符」后标记层显示，正文仍是干净状态',
+    (await exec('window.__cwTest.marksOverlayVisible()')) === true &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec(
+    `document.querySelector('#format-menu button[data-action="toggle-long-para"]').click()`
+  );
+  await waitFor('window.__cwTest.marksFlags().longParagraphs === true');
+  await exec('window.__cwTest.openFormatMenu()');
+  const marksCheckedMenu = await exec(
+    "Array.from(document.querySelectorAll('#format-menu button[data-on=\"1\"]')).map((el) => el.textContent)"
+  );
+  check(
+    '编辑器小件：开着的开关在菜单里显示 ✓',
+    marksCheckedMenu.length === 2 && marksCheckedMenu.every((text) => text.startsWith('✓')),
+    marksCheckedMenu
+  );
+  await exec('window.__cwTest.openFormatMenu()'); // 收起菜单
+
+  // 50c. 不可见字符：全角空格逐个标 ␣，行尾空白只标一处；标记层文字与正文一一对应
+  check(
+    '编辑器小件：全角空格逐个标 ␣、行尾空白只标一处（行尾全角空格不重复算）',
+    (await exec('window.__cwTest.marksFullwidthCount()')) === 6 &&
+      (await exec('window.__cwTest.marksTrailingCount()')) === 1,
+    {
+      fullwidth: await exec('window.__cwTest.marksFullwidthCount()'),
+      trailing: await exec('window.__cwTest.marksTrailingCount()')
+    }
+  );
+  check(
+    '编辑器小件：标记层的文字与正文一一对应（只多了 ␣ / · 两个标记字符）',
+    (await exec("window.__cwTest.marksText().split('␣').join('').split('·').join('')")) === marksText
+  );
+  const marksMetrics = await exec('window.__cwTest.marksMetrics()');
+  check(
+    '编辑器小件：标记层与编辑区同宽同高、字体/行高一致（标记位置对得上）',
+    marksMetrics.visible &&
+      Math.abs(marksMetrics.overlayWidth - marksMetrics.contentWidth) <= 0.5 &&
+      Math.abs(marksMetrics.overlayScrollHeight - marksMetrics.contentHeight) <= 1 &&
+      marksMetrics.editorFontFamily === marksMetrics.overlayFontFamily &&
+      marksMetrics.overlayLineHeight === marksMetrics.editorLineHeight &&
+      Math.abs(parseFloat(marksMetrics.overlayFontSize) - parseFloat(marksMetrics.editorFontSize)) <= 0.1,
+    marksMetrics
+  );
+
+  // 50d. 超长段落：识别 1 段，左侧黄线按行画（不是只画第一行），状态栏标签可跳转
+  const marksLongFragments = (await exec('window.__cwTest.longParaRects()'))[0] || [];
+  check(
+    '编辑器小件：超长段落识别 1 段，左侧黄线按行画出来（每行一条）',
+    (await exec('window.__cwTest.marksLongParaCount()')) === 1 &&
+      marksLongFragments.length >= 3 &&
+      (await exec('window.__cwTest.longParaBarCount()')) === marksLongFragments.length &&
+      (await exec('window.__cwTest.longParaBarRects()')).every(
+        (rect) => rect.width <= 4 && rect.height > 10
+      ),
+    { fragments: marksLongFragments.length, bars: await exec('window.__cwTest.longParaBarCount()') }
+  );
+  check(
+    '编辑器小件：状态栏「超长段落 1 段」标签给出段数与行号提示',
+    (await exec('window.__cwTest.longParaChipVisible()')) === true &&
+      (await exec('window.__cwTest.longParaChipText()')) === '超长段落 1 段' &&
+      (await exec('window.__cwTest.longParaChipTitle()')).includes('第 2 行')
+  );
+  await exec('window.__cwTest.setCaret(0)');
+  await exec('window.__cwTest.clickLongParaChip()');
+  check(
+    '编辑器小件：点「超长段落」标签跳到段首（只移动光标，不改字）',
+    (await exec('window.__cwTest.caret()')) === marksText.indexOf(marksLongStartText)
+  );
+
+  // 50e. 选中字数：只选了文字才显示，段数按触及的非空行算
+  await exec('window.__cwTest.selectRange(0, 10)');
+  check(
+    '编辑器小件：选中后状态栏显示「选中 N 字 / M 段」',
+    (await exec('window.__cwTest.selectionStatsVisible()')) === true &&
+      (await exec('window.__cwTest.selectionStatsText()')) ===
+        `选中 ${chaptersLib.countChars(marksText.slice(0, 10))} 字 / 1 段`
+  );
+  await exec(`window.__cwTest.selectRange(0, ${marksText.length})`);
+  check(
+    '编辑器小件：跨 3 段选择显示 3 段（空行不算段）',
+    (await exec('window.__cwTest.selectionStatsText()')) ===
+      `选中 ${chaptersLib.countChars(marksText)} 字 / 3 段`
+  );
+  await exec('window.__cwTest.selectRange(3, 3)');
+  check(
+    '编辑器小件：取消选择后选中字数隐藏',
+    (await exec('window.__cwTest.selectionStatsVisible()')) === false
+  );
+
+  // 50f. 段落导航：Alt+↑/↓ 在段首之间跳（跳过段首缩进）
+  const marksFirstStart = marksText.indexOf('开头一段');
+  const marksSecondStart = marksText.indexOf(marksLongStartText);
+  const marksThirdStart = marksText.indexOf('结尾一段');
+  await exec('window.__cwTest.selectRange(0, 0)');
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))"
+  );
+  check(
+    '编辑器小件：Alt+↓ 从章首跳到第一段段首（段首缩进之后）',
+    (await exec('window.__cwTest.caret()')) === marksFirstStart
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))"
+  );
+  check(
+    '编辑器小件：Alt+↓ 再去下一段段首',
+    (await exec('window.__cwTest.caret()')) === marksSecondStart
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }))"
+  );
+  check(
+    '编辑器小件：Alt+↑ 回上一段段首',
+    (await exec('window.__cwTest.caret()')) === marksFirstStart
+  );
+  await exec(`window.__cwTest.selectRange(${marksSecondStart + 5}, ${marksSecondStart + 5})`);
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }))"
+  );
+  check(
+    '编辑器小件：光标在段中间时 Alt+↑ 回到本段开头',
+    (await exec('window.__cwTest.caret()')) === marksSecondStart
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))"
+  );
+  check(
+    '编辑器小件：Alt+↓ 从段首去下一段段首',
+    (await exec('window.__cwTest.caret()')) === marksThirdStart
+  );
+
+  // 50g. 滚动时标记层 / 左侧黄线跟着正文走
+  await exec('window.__cwTest.setEditorScroll(0)');
+  const marksTopsBefore = (await exec('window.__cwTest.longParaBarRects()')).map((rect) => rect.top);
+  const marksScrolled = await exec('window.__cwTest.setEditorScroll(140)');
+  const marksScrollMetrics = await exec('window.__cwTest.marksMetrics()');
+  const marksTopsAfter = (await exec('window.__cwTest.longParaBarRects()')).map((rect) => rect.top);
+  check(
+    '编辑器小件：滚动时标记层跟随，超长段落黄线跟着正文走',
+    marksScrolled > 0 &&
+      marksScrollMetrics.scrollLocked === true &&
+      Math.abs(marksScrollMetrics.overlayScrollTop - marksScrollMetrics.editorScrollTop) < 0.5 &&
+      marksTopsAfter.length === marksTopsBefore.length &&
+      marksTopsAfter.every((top, index) => Math.abs(marksTopsBefore[index] - marksScrolled - top) <= 1),
+    { marksScrolled, scrollLocked: marksScrollMetrics.scrollLocked }
+  );
+  await exec('window.__cwTest.setEditorScroll(0)');
+
+  // 50h. 关掉开关：标记层收起，正文 / 书目 / txt 都不动
+  await exec("window.__cwTest.setMarksToggle('invisibles', false)");
+  check(
+    '编辑器小件：关掉「不可见字符」后只剩超长段落黄线',
+    (await exec('window.__cwTest.marksFullwidthCount()')) === 0 &&
+      (await exec('window.__cwTest.marksTrailingCount()')) === 0 &&
+      (await exec('window.__cwTest.marksLongParaCount()')) === 1 &&
+      (await exec('window.__cwTest.marksOverlayVisible()')) === true
+  );
+  await exec("window.__cwTest.setMarksToggle('longParagraphs', false)");
+  check(
+    '编辑器小件：两个开关都关掉后标记层收起，正文一个字都不变',
+    (await exec('window.__cwTest.marksOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.longParaGutterVisible()')) === false &&
+      (await exec('window.__cwTest.longParaChipVisible()')) === false &&
+      (await exec('window.__cwTest.text()')) === marksText &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+  const marksTxtAfter = [];
+  for (const item of marksTxtBefore) {
+    const stat = await fs.stat(path.join(marksBookPath, item.file));
+    marksTxtAfter.push({ file: item.file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  check(
+    '编辑器小件：全程只读（txt 大小+mtime、书目 chapters、无 _trash 都没变）',
+    JSON.stringify(marksTxtAfter) === JSON.stringify(marksTxtBefore) &&
+      JSON.stringify((await storage.readBookMeta(marksBookPath)).chapters) === marksMetaBefore &&
+      !(await fileExists(path.join(marksBookPath, '_trash')))
+  );
+
+  // 50i. 旧数据兼容：v0.4.1 形状的老书照常显示标记，书目不被补字段
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const marksLegacyBefore = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(fragLegacyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec(
+    "window.__cwTest.setMarksToggle('invisibles', true); window.__cwTest.setMarksToggle('longParagraphs', true);"
+  );
+  await waitFor('window.__cwTest.marksOverlayVisible() === true');
+  const marksLegacyAfter = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  check(
+    '编辑器小件：没有 schemaVersion 的旧书照常用标记，书目不被补字段',
+    (await exec('window.__cwTest.marksLineCount()')) >= 1 &&
+      marksLegacyAfter === marksLegacyBefore &&
+      marksLegacyAfter.includes('"schemaVersion"') === false
+  );
+  await exec(
+    "window.__cwTest.setMarksToggle('invisibles', false); window.__cwTest.setMarksToggle('longParagraphs', false);"
+  );
+
   return { ok: true, checks: checks.length, details: checks };
 };

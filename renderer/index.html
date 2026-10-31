@@ -84,6 +84,9 @@
                 <button type="button" data-action="preset-normal">显示：标准</button>
                 <button type="button" data-action="preset-loose">显示：宽松</button>
                 <div class="dropdown-sep"></div>
+                <button type="button" data-action="toggle-invisibles" id="format-invisibles">显示不可见字符（␣ / 行尾空白）</button>
+                <button type="button" data-action="toggle-long-para" id="format-long-para">超长段落提示（>500 字左侧黄线）</button>
+                <div class="dropdown-sep"></div>
                 <button type="button" data-action="display-settings">正文显示设置…</button>
               </div>
             </div>
@@ -104,15 +107,21 @@
         </header>
         <textarea id="editor" class="editor" spellcheck="false"
                   placeholder="开始写作…（只有按 Ctrl+S 或点「保存」才会写盘）"></textarea>
+        <!-- 只读标记层：不可见字符 / 超长段落只画在这里，正文一个字节都不改（和编辑区同排版，跟着滚动） -->
+        <div id="editor-marks" class="editor-marks hidden" aria-hidden="true"></div>
+        <!-- 超长段落的左侧黄线画在正文左边距里，逐行跟随滚动 -->
+        <div id="editor-marks-gutter" class="editor-marks-gutter hidden" aria-hidden="true"></div>
         <footer class="statusbar">
           <span class="dot ok" id="status-dot"></span>
           <span id="status-text">已保存</span>
+          <span id="status-selection" class="status-selection hidden"></span>
           <span class="spacer"></span>
           <span id="status-stats" class="status-stats hidden">
             <span id="status-stats-text"></span>
             <span class="goal-track" id="status-goal-track"><i id="status-goal-fill"></i></span>
           </span>
-          <span id="char-count" class="muted small"></span>
+          <button id="status-long-para" class="status-long hidden" type="button">超长段落</button>
+          <span id="char-count" class="muted small" title="本章字数（不含空白），未保存的编辑也算"></span>
           <span class="kbd">Ctrl+G 跳章</span>
           <span class="kbd">Ctrl+S 保存</span>
         </footer>
@@ -660,6 +669,7 @@
     <button type="button" data-action="delete" class="danger-text">删除这本书…</button>
   </div>
 
-  <script src="renderer.js"></script>
+  <script src="editor-logic.js"></script>
+<script src="renderer.js"></script>
 </body>
 </html>

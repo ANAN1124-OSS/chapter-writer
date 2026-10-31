@@ -8,6 +8,10 @@
   const api = window.api;
   const $ = (id) => document.getElementById(id);
   const editorEl = $('editor');
+  // 编辑器小件的纯逻辑（选中字数 / 段落导航 / 超长段落 / 不可见字符 / 章节字数对比），
+  // 在 editor-logic.js 里、Node 单测覆盖；这里只负责显示和事件。
+  const editorLogic = window.CWEditorLogic;
+  const LONG_PARAGRAPH_THRESHOLD = editorLogic.LONG_PARAGRAPH_DEFAULT;
 
   // ---------- 小工具 ----------
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -158,6 +162,20 @@
     fragmentSelected: null, // 插入面板里当前选中的碎片 { name, text, chars }
     fragmentBusy: false, // 正在保存碎片（防重复写）
     insertFragmentRange: null, // 打开「插入碎片…」前编辑区的光标 / 选区（插入时按这个位置）
+    marks: {
+      invisibles: false, // 显示不可见字符（全角空格 ␣ / 行尾空白）
+      longParagraphs: false, // 超长段落提示（>500 字左侧淡黄竖线）
+      composing: false, // 中文输入法拼字中：先不重画标记层，免得闪
+      timer: null, // 重画防抖
+      longItems: [], // 本章超长段落（给状态栏小标签用；只读缓存）
+      longCount: 0,
+      longTruncated: false,
+      markCounts: { fullwidth: 0, trailing: 0 },
+      markTruncated: false,
+      marksTooLarge: false, // 正文太长（>30 万字）时不再逐字画标记
+      barBaseScrollTop: 0, // 左侧黄线的基准滚动位置（滚动时只改 top，不重新量行框）
+      resizeObserver: null
+    },
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
@@ -274,6 +292,10 @@
     $('editor-view').classList.toggle('hidden', view !== 'editor');
     updateWindowTitle();
     renderStatsUi();
+    // 标记层只在写作页显示；切回书架就收起（开关状态保留，回来还在）
+    if (view === 'editor') scheduleMarksRender(0);
+    else hideEditorMarks();
+    renderSelectionStats();
   }
 
   function updateWindowTitle() {
@@ -335,6 +357,8 @@
     for (const theme of ['cream', 'green', 'night', 'kraft', 'grid']) {
       document.body.classList.toggle(`theme-${theme}`, cfg.editorPaper === theme);
     }
+    // 字体 / 字号 / 行距变了，标记层要重新对齐
+    scheduleMarksRender(30);
   }
 
   // ---------- 章节栏 / 写作区 可拖动分隔条 ----------
@@ -1049,12 +1073,22 @@
   function makeChapterItem(chapter, index) {
     const status = chapterStatus(chapter);
     const note = chapterNote(chapter);
+    const chars = chapterCharsOf(chapter);
+    const previousChars = index > 0 ? chapterCharsOf(state.chapters[index - 1]) : null;
+    const comparison = chars != null ? editorLogic.compareChapterChars(chars, previousChars) : null;
     const item = document.createElement('div');
     item.className = `chapter-item status-${status}` + (index === state.index ? ' active' : '');
     if (index === state.index && state.dirty) item.classList.add('dirty');
     item.dataset.index = String(index);
     item.dataset.status = status;
-    const tip = [`状态：${CHAPTER_STATUS_LABELS[status]}`, note ? `备注：${note}` : ''].filter(Boolean).join('\n');
+    const tip = [
+      `状态：${CHAPTER_STATUS_LABELS[status]}`,
+      note ? `备注：${note}` : '',
+      chars != null ? `本章 ${chars} 字` : '',
+      comparison && comparison.direction === 'shorter' ? comparison.message : ''
+    ]
+      .filter(Boolean)
+      .join('\n');
     item.title = `单击切换；双击重命名；右键更多\n${tip}`;
 
     const dot = document.createElement('span');
@@ -1078,6 +1112,14 @@
       noteMark.textContent = '✎';
       noteMark.title = `备注：${note}`;
       item.appendChild(noteMark);
+    }
+    // 章节列表每项显示字数（书目缓存，紧凑显示）；保存后自动更新
+    if (chars != null) {
+      const charsEl = document.createElement('span');
+      charsEl.className = 'chapter-chars';
+      charsEl.textContent = editorLogic.formatCharsShort(chars);
+      charsEl.title = `本章 ${chars} 字（书目缓存；保存后更新）`;
+      item.appendChild(charsEl);
     }
     item.addEventListener('click', () => {
       if (state.suppressChapterClick && Date.now() < state.suppressChapterClick) {
@@ -1141,24 +1183,398 @@
   // 超过 20 万字符改成 400ms 防抖，多打几个字只算最后一次。
   let charCountTimer = null;
   const CHAR_COUNT_DEFER_ABOVE = 200000;
-  function renderCharCount() {
+
+  // 章节字数：书目里的 chars 缓存（打开书 / 保存后由主进程补齐）；没有就是 null
+  function chapterCharsOf(chapter) {
+    if (!chapter) return null;
+    const n = Number(chapter.chars);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+  }
+
+  // 本章字数 + 「比上章短」软提示（提案 4.1：章节字数对比）。
+  // 当前章按编辑区实时算（未保存也算），上一章按书目缓存；只提示，不改任何东西。
+  function updateCharCountText() {
     const el = $('char-count');
+    if (!el) return;
+    if (!state.bookPath || state.index < 0) {
+      el.textContent = '';
+      el.classList.remove('count-short');
+      el.title = '';
+      return;
+    }
+    const liveChars = countChars(editorEl.value);
+    let text = `本章 ${formatChars(liveChars)}`;
+    el.classList.remove('count-short');
+    el.title = '本章字数（不含空白）；未保存的编辑也算。';
+    const previousChars = state.index > 0 ? chapterCharsOf(state.chapters[state.index - 1]) : null;
+    const compared = editorLogic.compareChapterChars(liveChars, previousChars);
+    if (compared.direction === 'shorter') {
+      text += ` · ${compared.message}`;
+      el.classList.add('count-short');
+      el.title =
+        `本章 ${liveChars} 字，上一章 ${previousChars} 字（短了 ${Math.abs(compared.percent)}%）。` +
+        '只是提醒，不改任何东西；如果这一章还没写完，可能是漏了内容。';
+    }
+    el.textContent = text;
+  }
+
+  function renderCharCount() {
     if (!state.bookPath || state.index < 0) {
       clearTimeout(charCountTimer);
-      el.textContent = '';
+      updateCharCountText();
       return;
     }
     const text = editorEl.value;
     if (text.length <= CHAR_COUNT_DEFER_ABOVE) {
       clearTimeout(charCountTimer);
-      el.textContent = `本章 ${formatChars(countChars(text))}`;
+      updateCharCountText();
       return;
     }
     clearTimeout(charCountTimer);
     charCountTimer = setTimeout(() => {
       if (!state.bookPath || state.index < 0) return;
-      el.textContent = `本章 ${formatChars(countChars(editorEl.value))}`;
+      updateCharCountText();
     }, 400);
+  }
+
+  // 选中字数：只在真选了文字时显示；和「本章字数」同口径（不含空白），段数按触及的非空行算。
+  function renderSelectionStats() {
+    const el = $('status-selection');
+    if (!el) return;
+    if (state.view !== 'editor' || !state.bookPath || state.index < 0) {
+      el.classList.add('hidden');
+      el.textContent = '';
+      return;
+    }
+    const stats = editorLogic.selectionStats(editorEl.value, editorEl.selectionStart, editorEl.selectionEnd);
+    if (stats.collapsed || (stats.chars === 0 && stats.paragraphs === 0)) {
+      el.classList.add('hidden');
+      el.textContent = '';
+      return;
+    }
+    el.classList.remove('hidden');
+    el.textContent = `选中 ${formatChars(stats.chars)} / ${stats.paragraphs} 段`;
+    el.title = '选中的字数（不含空白，和「本章字数」同口径）与触及的自然段数';
+  }
+
+  // ---------- 编辑器小件（提案 4.1）----------
+  // 全部只读、可开关：选中字数 / 超长段落提示 / 不可见字符 / Alt+↑↓ 段落导航 / 章节列表字数对比。
+  // 「超长段落」和「不可见字符」画在一层绝对定位的影子层（#editor-marks）上：字体、行高、字距、宽高都从
+  // 编辑区实测值同步，文字本身透明，只画底色和 ␣ / · 标记 —— 正文一个字节都不动，也不写盘。
+  // 两个开关都关时这一层一直是 hidden，没有任何额外开销。
+  function marksEnabled() {
+    return Boolean(state.marks.invisibles || state.marks.longParagraphs);
+  }
+
+  function scheduleMarksRender(delay = 80) {
+    if (state.marks.timer) clearTimeout(state.marks.timer);
+    state.marks.timer = setTimeout(() => {
+      state.marks.timer = null;
+      renderEditorMarks();
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  function hideEditorMarks() {
+    const overlay = $('editor-marks');
+    const gutter = $('editor-marks-gutter');
+    if (gutter) {
+      gutter.classList.add('hidden');
+      gutter.textContent = '';
+    }
+    if (!overlay) return;
+    overlay.classList.add('hidden');
+    overlay.textContent = '';
+    state.marks.longItems = [];
+    state.marks.longCount = 0;
+    state.marks.markCounts = { fullwidth: 0, trailing: 0 };
+    renderLongParaChip();
+  }
+
+  // 把影子层改成和编辑区正文框完全一样的位置、大小、字体度量；返回实测值（测试钩子也用）
+  function syncMarksLayout() {
+    const overlay = $('editor-marks');
+    if (!overlay || overlay.classList.contains('hidden')) return null;
+    const styles = getComputedStyle(editorEl);
+    const px = (value) => {
+      const n = parseFloat(value);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const padding = {
+      top: px(styles.paddingTop),
+      bottom: px(styles.paddingBottom),
+      left: px(styles.paddingLeft),
+      right: px(styles.paddingRight)
+    };
+    const width = Math.max(0, editorEl.clientWidth - padding.left - padding.right);
+    const height = Math.max(0, editorEl.clientHeight - padding.top - padding.bottom);
+    overlay.style.left = `${editorEl.offsetLeft + padding.left}px`;
+    overlay.style.top = `${editorEl.offsetTop + padding.top}px`;
+    overlay.style.width = `${width}px`;
+    overlay.style.height = `${height}px`;
+    // 正文显示设置（字体 / 字号 / 行距 / 字距 / 页宽 / 边距）随时会变：每次都用实测值，别写死
+    overlay.style.fontFamily = styles.fontFamily;
+    overlay.style.fontSize = styles.fontSize;
+    overlay.style.fontWeight = styles.fontWeight;
+    overlay.style.fontStyle = styles.fontStyle;
+    overlay.style.lineHeight = styles.lineHeight;
+    overlay.style.letterSpacing = styles.letterSpacing;
+    overlay.scrollTop = editorEl.scrollTop;
+    overlay.scrollLeft = editorEl.scrollLeft;
+    return { width, height, padding };
+  }
+
+  function syncMarksScroll() {
+    const overlay = $('editor-marks');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+    overlay.scrollTop = editorEl.scrollTop;
+    overlay.scrollLeft = editorEl.scrollLeft;
+    syncLongParaBars();
+  }
+
+  // 超长段落的左侧黄线：画在正文左边距里（不压字），逐行按 .long-para 的实测行框定位；
+  // 滚动时只改 top（行位置本身不变），所以不用每帧重新量。
+  function renderLongParagraphBars() {
+    const gutter = $('editor-marks-gutter');
+    const overlay = $('editor-marks');
+    if (!gutter) return;
+    gutter.textContent = '';
+    gutter.classList.add('hidden');
+    if (!overlay || overlay.classList.contains('hidden') || !state.marks.longParagraphs) return;
+    const nodes = overlay.querySelectorAll('.long-para');
+    if (!nodes.length) return;
+    const styles = getComputedStyle(editorEl);
+    const px = (value) => {
+      const n = parseFloat(value);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const padLeft = px(styles.paddingLeft);
+    const mainRect = gutter.parentElement.getBoundingClientRect();
+    const editorRect = editorEl.getBoundingClientRect();
+    // 默认放在正文左边 9px（正文左右边距 56px 时很宽裕）；边距很小时贴着正文左缘，不跑到窗口外
+    const barLeft = Math.max(
+      editorRect.left - mainRect.left + 2,
+      editorRect.left - mainRect.left + padLeft - 9
+    );
+    const baseScrollTop = editorEl.scrollTop || 0;
+    for (const node of nodes) {
+      const rects = node.getClientRects();
+      for (const rect of rects) {
+        if (rect.width < 1 || rect.height < 1) continue;
+        const bar = document.createElement('div');
+        bar.className = 'long-para-bar';
+        bar.style.left = `${Math.round(barLeft * 100) / 100}px`;
+        bar.style.top = `${Math.round((rect.top - mainRect.top) * 100) / 100}px`;
+        bar.style.height = `${Math.round(rect.height * 100) / 100}px`;
+        bar.dataset.baseTop = String(rect.top - mainRect.top);
+        gutter.appendChild(bar);
+      }
+    }
+    state.marks.barBaseScrollTop = baseScrollTop;
+    gutter.classList.remove('hidden');
+    syncLongParaBars();
+  }
+
+  function syncLongParaBars() {
+    const gutter = $('editor-marks-gutter');
+    if (!gutter || gutter.classList.contains('hidden')) return;
+    const delta = (editorEl.scrollTop || 0) - (state.marks.barBaseScrollTop || 0);
+    for (const bar of gutter.children) {
+      const base = Number(bar.dataset.baseTop);
+      if (!Number.isFinite(base)) continue;
+      bar.style.top = `${Math.round((base - delta) * 100) / 100}px`;
+    }
+  }
+
+  function renderEditorMarks() {
+    const overlay = $('editor-marks');
+    if (!overlay) return;
+    if (state.view !== 'editor' || !state.bookPath || state.index < 0 || !marksEnabled()) {
+      hideEditorMarks();
+      return;
+    }
+    const text = editorEl.value;
+    const longResult = state.marks.longParagraphs
+      ? editorLogic.longParagraphs(text, LONG_PARAGRAPH_THRESHOLD)
+      : { items: [], count: 0, truncated: false, tooLarge: false };
+    const invisibleResult = state.marks.invisibles
+      ? editorLogic.invisibleMarks(text)
+      : { items: [], counts: { fullwidth: 0, trailing: 0 }, truncated: false, tooLarge: false };
+    state.marks.longItems = longResult.items;
+    state.marks.longCount = longResult.count;
+    state.marks.longTruncated = longResult.truncated;
+    state.marks.markCounts = invisibleResult.counts;
+    state.marks.markTruncated = invisibleResult.truncated;
+    state.marks.marksTooLarge = Boolean(invisibleResult.tooLarge);
+
+    overlay.classList.remove('hidden');
+    syncMarksLayout();
+    overlay.textContent = '';
+    const longLines = new Set(longResult.items.map((item) => item.line));
+    const marks = invisibleResult.items;
+    const fragment = document.createDocumentFragment();
+    const lines = text.split('\n');
+    let lineStart = 0;
+    let markIndex = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const raw = lines[i];
+      const lineEnd = lineStart + raw.length;
+      if (raw.length) {
+        const lineEl = document.createElement('span');
+        lineEl.className = 'marks-line';
+        if (longLines.has(i + 1)) lineEl.classList.add('long-para');
+        let cursor = lineStart;
+        while (cursor < lineEnd) {
+          while (markIndex < marks.length && marks[markIndex].end <= cursor) markIndex += 1;
+          const mark = markIndex < marks.length && marks[markIndex].start < lineEnd ? marks[markIndex] : null;
+          if (!mark) {
+            lineEl.appendChild(document.createTextNode(text.slice(cursor, lineEnd)));
+            cursor = lineEnd;
+            break;
+          }
+          if (mark.start > cursor) {
+            lineEl.appendChild(document.createTextNode(text.slice(cursor, mark.start)));
+            cursor = mark.start;
+            continue;
+          }
+          const markEl = document.createElement('span');
+          const rawMark = text.slice(mark.start, Math.min(mark.end, lineEnd));
+          if (mark.type === 'trailing') {
+            markEl.className = 'mark-trail';
+            markEl.appendChild(document.createTextNode(rawMark));
+            const dot = document.createElement('i');
+            dot.textContent = '·';
+            markEl.appendChild(dot);
+          } else {
+            markEl.className = 'mark-fw';
+            markEl.appendChild(document.createTextNode(rawMark));
+            const glyph = document.createElement('i');
+            glyph.textContent = '␣';
+            markEl.appendChild(glyph);
+          }
+          lineEl.appendChild(markEl);
+          cursor = Math.min(mark.end, lineEnd);
+          markIndex += 1;
+        }
+        fragment.appendChild(lineEl);
+      }
+      if (i < lines.length - 1) fragment.appendChild(document.createTextNode('\n'));
+      lineStart = lineEnd + 1;
+    }
+    overlay.appendChild(fragment);
+    syncMarksScroll();
+    renderLongParagraphBars();
+    renderLongParaChip();
+  }
+
+  function longParagraphsTitle() {
+    const items = state.marks.longItems || [];
+    const count = state.marks.longCount || 0;
+    const lines = [`超过 ${LONG_PARAGRAPH_THRESHOLD} 字的段落：`];
+    for (const item of items.slice(0, 6)) lines.push(`第 ${item.line} 行 · ${item.chars} 字`);
+    if (count > Math.min(items.length, 6)) {
+      lines.push(`…还有 ${count - Math.min(items.length, 6)} 段`);
+    }
+    lines.push('单击跳到下一段（只移动光标，不改字）');
+    return lines.join('\n');
+  }
+
+  function renderLongParaChip() {
+    const chip = $('status-long-para');
+    if (!chip) return;
+    const show =
+      state.marks.longParagraphs && state.marks.longCount > 0 && state.bookPath && state.index >= 0 && state.view === 'editor';
+    chip.classList.toggle('hidden', !show);
+    if (!show) {
+      chip.textContent = '超长段落';
+      chip.title = '';
+      return;
+    }
+    chip.textContent = `超长段落 ${state.marks.longCount} 段`;
+    chip.title = longParagraphsTitle();
+  }
+
+  function jumpToNextLongParagraph() {
+    if (!state.marks.longParagraphs) return false;
+    const item = editorLogic.nextLongParagraph(state.marks.longItems, editorEl.selectionStart || 0);
+    if (!item) return false;
+    editorEl.focus();
+    editorEl.setSelectionRange(item.start, item.start);
+    scrollCaretIntoView(item.start);
+    syncMarksScroll();
+    renderSelectionStats();
+    return true;
+  }
+
+  // Alt+↑ / Alt+↓：在自然段开头之间跳（只移动光标，不改字）
+  function jumpParagraph(direction) {
+    if (state.view !== 'editor' || !state.bookPath || state.index < 0) return false;
+    const target = editorLogic.paragraphJumpTarget(
+      editorEl.value,
+      editorEl.selectionStart || 0,
+      Number(direction) < 0 ? -1 : 1
+    );
+    if (target == null) return false;
+    editorEl.focus();
+    editorEl.setSelectionRange(target, target);
+    scrollCaretIntoView(target);
+    syncMarksScroll();
+    renderSelectionStats();
+    return true;
+  }
+
+  function renderMarksMenu() {
+    const invisibles = $('format-invisibles');
+    const long = $('format-long-para');
+    if (invisibles) {
+      invisibles.textContent = `${state.marks.invisibles ? '✓ ' : ''}显示不可见字符（␣ / 行尾空白）`;
+      invisibles.dataset.on = state.marks.invisibles ? '1' : '0';
+      invisibles.title =
+        '只在正文上面画标记：全角空格标成 ␣、行尾空白标成浅红底。正文一个字都不会改，也不写盘。';
+    }
+    if (long) {
+      long.textContent = `${state.marks.longParagraphs ? '✓ ' : ''}超长段落提示（>${LONG_PARAGRAPH_THRESHOLD} 字左侧黄线）`;
+      long.dataset.on = state.marks.longParagraphs ? '1' : '0';
+      long.title = `超过 ${LONG_PARAGRAPH_THRESHOLD} 字的段落，左侧画一条淡黄竖线（为手机阅读排版着想）。只显示，不改正文。`;
+    }
+  }
+
+  function setMarksToggle(name, on) {
+    if (name !== 'invisibles' && name !== 'longParagraphs') return false;
+    state.marks[name] = Boolean(on);
+    renderMarksMenu();
+    renderEditorMarks();
+    if (name === 'invisibles' && state.marks.invisibles && state.marks.marksTooLarge) {
+      toast('正文超过 30 万字，暂时不逐字标不可见字符（超长段落提示仍然可用）', 'warn');
+    }
+    return state.marks[name];
+  }
+
+  function toggleMarks(name) {
+    return setMarksToggle(name, !state.marks[name]);
+  }
+
+  function setupEditorMarks() {
+    editorEl.addEventListener('scroll', syncMarksScroll, { passive: true });
+    editorEl.addEventListener('compositionstart', () => {
+      state.marks.composing = true;
+    });
+    editorEl.addEventListener('compositionend', () => {
+      state.marks.composing = false;
+      scheduleMarksRender(0);
+    });
+    for (const type of ['keyup', 'mouseup', 'select']) {
+      editorEl.addEventListener(type, () => {
+        renderSelectionStats();
+        syncMarksScroll();
+      });
+    }
+    document.addEventListener('selectionchange', () => renderSelectionStats());
+    if (typeof ResizeObserver === 'function') {
+      state.marks.resizeObserver = new ResizeObserver(() => scheduleMarksRender(40));
+      state.marks.resizeObserver.observe(editorEl);
+    }
+    $('status-long-para').addEventListener('click', () => jumpToNextLongParagraph());
+    renderMarksMenu();
   }
 
   // ---------- 每日字数统计（提案 3.2） ----------
@@ -1297,6 +1713,9 @@
     const activeItem = $('chapter-list').querySelector('.chapter-item.active');
     if (activeItem) activeItem.classList.toggle('dirty', state.dirty);
     updateStatus();
+    renderSelectionStats();
+    // 输入法拼字中先不重画标记层（I 键过程中的中间态会闪），拼完 compositionend 再画
+    if (!state.marks.composing) scheduleMarksRender();
   }
 
   async function loadChapterAt(index) {
@@ -1318,6 +1737,8 @@
       renderChapterList();
       renderEditorHeader();
       updateStatus();
+      renderSelectionStats();
+      scheduleMarksRender(0);
       // 等主进程写完「上次打开章节」再返回，避免后续操作和它并发覆盖书目
       try {
         await api.setLastOpenChapter(state.bookPath, chapter.id);
@@ -1357,6 +1778,11 @@
       if (data.stats) {
         state.stats = data.stats;
         renderStatsUi();
+      }
+      // 保存后同步本章字数缓存：章节列表的字数 / 「比上章短」提示跟着更新
+      if (Number.isFinite(Number(data.chars))) {
+        chapter.chars = Number(data.chars);
+        renderChapterList();
       }
       updateStatus();
       // 「保存整本」语义：保存后顺带校验全书章节文件是否齐全
@@ -4480,6 +4906,7 @@
       $('format-undo-item').disabled = steps === 0;
       $('format-undo-item').textContent =
         steps > 0 ? `撤销上次整理（可撤销 ${steps} 步）` : '撤销上次整理';
+      renderMarksMenu();
     }
     menu.classList.toggle('hidden');
   }
@@ -5327,6 +5754,8 @@
       else if (action === 'preset-compact') await setDisplayPreset('compact');
       else if (action === 'preset-normal') await setDisplayPreset('normal');
       else if (action === 'preset-loose') await setDisplayPreset('loose');
+      else if (action === 'toggle-invisibles') toggleMarks('invisibles');
+      else if (action === 'toggle-long-para') toggleMarks('longParagraphs');
       else if (action === 'display-settings') openSettings();
     });
 
@@ -5377,6 +5806,7 @@
     });
 
     editorEl.addEventListener('input', onEditorInput);
+    setupEditorMarks();
 
     setupSidebarResizer();
 
@@ -5514,6 +5944,14 @@
         closeTtsBar();
         return;
       }
+      // 段落导航（提案 4.1）：Alt+↑/↓ 在自然段开头之间跳，只移动光标、不改字
+      if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        if (state.view === 'editor' && state.bookPath) {
+          event.preventDefault();
+          jumpParagraph(event.key === 'ArrowDown' ? 1 : -1);
+        }
+        return;
+      }
       // 复制本章（平台格式）：Ctrl+Shift+C；不抢 Ctrl+C 的普通复制
       if (event.ctrlKey && event.shiftKey && !event.altKey && String(event.key).toLowerCase() === 'c') {
         if (state.view === 'editor' && state.bookPath) {
@@ -5565,6 +6003,7 @@
       hideFormatMenu();
       hideBookMenu();
       applySidebarWidth(state.sidebarWidth);
+      scheduleMarksRender(40);
     });
   }
 
@@ -6040,6 +6479,108 @@
       selection: () => ({ start: editorEl.selectionStart || 0, end: editorEl.selectionEnd || 0 }),
       selectionText: () =>
         editorEl.value.slice(editorEl.selectionStart || 0, editorEl.selectionEnd || 0),
+      // 编辑器小件（v0.7-4，提案 4.1）：选中字数 / 超长段落 / 不可见字符 / 段落导航 / 章节字数对比。
+      // 全部只读，开关只影响显示层（#editor-marks），不碰正文、不写盘。
+      marksFlags: () => ({ invisibles: state.marks.invisibles, longParagraphs: state.marks.longParagraphs }),
+      setMarksToggle: (name, on) => setMarksToggle(name, on),
+      toggleMarks: (name) => toggleMarks(name),
+      marksOverlayVisible: () => !$('editor-marks').classList.contains('hidden'),
+      marksLineCount: () => $('editor-marks').querySelectorAll('.marks-line').length,
+      marksLongParaCount: () => $('editor-marks').querySelectorAll('.long-para').length,
+      marksFullwidthCount: () => $('editor-marks').querySelectorAll('.mark-fw').length,
+      marksTrailingCount: () => $('editor-marks').querySelectorAll('.mark-trail').length,
+      marksText: () => $('editor-marks').textContent,
+      marksPayload: () => ({
+        longItems: state.marks.longItems.map((item) => ({ ...item })),
+        longCount: state.marks.longCount,
+        longTruncated: state.marks.longTruncated,
+        markCounts: { ...state.marks.markCounts },
+        markTruncated: state.marks.markTruncated,
+        tooLarge: state.marks.marksTooLarge
+      }),
+      marksMetrics() {
+        const overlay = $('editor-marks');
+        const styles = getComputedStyle(editorEl);
+        const overlayStyles = getComputedStyle(overlay);
+        const px = (value) => {
+          const n = parseFloat(value);
+          return Number.isFinite(n) ? n : 0;
+        };
+        const editorRect = editorEl.getBoundingClientRect();
+        const overlayRect = overlay.getBoundingClientRect();
+        return {
+          visible: !overlay.classList.contains('hidden'),
+          overlayScrollHeight: overlay.scrollHeight,
+          overlayClientHeight: overlay.clientHeight,
+          overlayWidth: Math.round(overlayRect.width * 100) / 100,
+          overlayHeight: Math.round(overlayRect.height * 100) / 100,
+          overlayLeft: Math.round(overlayRect.left * 100) / 100,
+          overlayTop: Math.round(overlayRect.top * 100) / 100,
+          editorLeft: Math.round(editorRect.left * 100) / 100,
+          editorTop: Math.round(editorRect.top * 100) / 100,
+          contentWidth: editorEl.clientWidth - px(styles.paddingLeft) - px(styles.paddingRight),
+          contentHeight: editorEl.scrollHeight - px(styles.paddingTop) - px(styles.paddingBottom),
+          paddingTop: px(styles.paddingTop),
+          paddingLeft: px(styles.paddingLeft),
+          editorFontFamily: styles.fontFamily,
+          editorFontSize: styles.fontSize,
+          editorLineHeight: styles.lineHeight,
+          overlayFontFamily: overlayStyles.fontFamily,
+          overlayFontSize: overlayStyles.fontSize,
+          overlayLineHeight: overlayStyles.lineHeight,
+          overlayScrollTop: overlay.scrollTop,
+          editorScrollTop: editorEl.scrollTop,
+          scrollLocked: Math.abs(overlay.scrollTop - editorEl.scrollTop) < 0.5
+        };
+      },
+      longParaRects: () =>
+        Array.from($('editor-marks').querySelectorAll('.long-para')).map((el) =>
+          Array.from(el.getClientRects()).map((rect) => ({
+            top: Math.round(rect.top * 100) / 100,
+            left: Math.round(rect.left * 100) / 100,
+            width: Math.round(rect.width * 100) / 100,
+            height: Math.round(rect.height * 100) / 100
+          }))
+        ),
+      longParaBarCount: () => document.querySelectorAll('#editor-marks-gutter .long-para-bar').length,
+      longParaBarRects: () =>
+        Array.from(document.querySelectorAll('#editor-marks-gutter .long-para-bar')).map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            top: Math.round(rect.top * 100) / 100,
+            left: Math.round(rect.left * 100) / 100,
+            width: Math.round(rect.width * 100) / 100,
+            height: Math.round(rect.height * 100) / 100
+          };
+        }),
+      longParaGutterVisible: () => !$('editor-marks-gutter').classList.contains('hidden'),
+      setEditorScroll(top) {
+        editorEl.scrollTop = Math.max(0, Number(top) || 0);
+        syncMarksScroll();
+        return editorEl.scrollTop;
+      },
+      longParaChipText: () => $('status-long-para').textContent,
+      longParaChipVisible: () => !$('status-long-para').classList.contains('hidden'),
+      longParaChipTitle: () => $('status-long-para').title,
+      clickLongParaChip() {
+        return jumpToNextLongParagraph();
+      },
+      selectionStatsText: () => $('status-selection').textContent,
+      selectionStatsVisible: () => !$('status-selection').classList.contains('hidden'),
+      selectRange(start, end) {
+        editorEl.focus();
+        const length = editorEl.value.length;
+        const from = Math.max(0, Math.min(Number(start) || 0, length));
+        const to = Math.max(0, Math.min(Number(end) || 0, length));
+        editorEl.setSelectionRange(from, to);
+        renderSelectionStats();
+        return { start: editorEl.selectionStart, end: editorEl.selectionEnd };
+      },
+      charCountText: () => $('char-count').textContent,
+      charCountWarn: () => $('char-count').classList.contains('count-short'),
+      chapterCharsTexts: () =>
+        Array.from(document.querySelectorAll('#chapter-list .chapter-chars')).map((el) => el.textContent),
+      jumpParagraph: (direction) => jumpParagraph(direction),
       // 灵感箱（碎片速记）
       openFragmentDialog: () => openFragmentDialog(),
       closeFragmentDialog: () => closeFragmentDialog(),
@@ -6309,6 +6850,10 @@
     }
     applyEditorStyle();
     applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);
+    // 字体真正加载完可能会改变换行：加载好以后把标记层重新对齐一次
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => scheduleMarksRender(0)).catch(() => {});
+    }
     // 上次用的自定义字体：启动时异步加载（失败就退回内置字体，不影响写作）
     if (state.config && state.config.editorFont === 'custom' && state.config.editorCustomFontPath) {
       loadCustomFont(state.config.editorCustomFontPath, { silent: true }).then(() => applyEditorStyle());

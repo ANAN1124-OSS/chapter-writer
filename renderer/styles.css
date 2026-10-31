@@ -490,6 +490,14 @@ body.resizing .editor {
 .chapter-item.active .chapter-status-dot { box-shadow: 0 0 0 2px var(--paper-soft); }
 .chapter-note-mark { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
 .chapter-item.active .chapter-note-mark { color: var(--ink-soft); }
+/* 章节列表的字数（来自书目缓存，保存后更新）：紧凑的「1.2万」，窄栏也不会把章名挤没 */
+.chapter-chars {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.chapter-item.active .chapter-chars { color: var(--ink-soft); }
 .sidebar-actions {
   padding: 10px 12px 14px;
   border-top: 1px solid var(--line-strong);
@@ -530,6 +538,7 @@ body.resizing .editor {
 
 /* ---------- 正文区 ---------- */
 .editor-main {
+  position: relative; /* 只读标记层按编辑区定位 */
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -569,6 +578,8 @@ body.resizing .editor {
   border-radius: 8px;
   box-shadow: 0 10px 26px rgba(60, 48, 30, .18);
 }
+/* 「排版」菜单条目较长（显示不可见字符 / 超长段落提示），给宽一点避免折行 */
+#format-menu { min-width: 250px; }
 .dropdown-menu button {
   display: block;
   width: 100%;
@@ -613,6 +624,88 @@ body.resizing .editor {
   border: 2px solid var(--paper);
 }
 
+/* ---------- 编辑器小件（提案 4.1）：只读标记层 ----------
+ * 覆盖在编辑区上的一个「影子层」：字体/字号/行高/字距/宽高都从 textarea 的实测值同步（renderer 里设内联样式），
+ * 文字本身透明，只画底色和标记。正文一个字节都不动，也不参与编辑 / 选择。
+ * 行内元素上下加 padding 是为了让底色铺满行高；只加纵向 padding，不改变排版和换行。 */
+.editor-marks {
+  position: absolute;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+}
+.editor-marks .long-para,
+.editor-marks .mark-fw,
+.editor-marks .mark-trail {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+/* 超长段落：段落本身只作为定位标记（背景在跨行行内元素上不可靠），
+   每一行的左侧黄线由 #editor-marks-gutter 按实测行位置画在左边距里 */
+.editor-marks .long-para { background: none; }
+/* 全角空格：黄底 + 居中的 ␣（绝对定位，不改字宽） */
+.editor-marks .mark-fw {
+  position: relative;
+  padding: 7px 0;
+  background: rgba(222, 164, 30, .25);
+}
+.editor-marks .mark-fw > i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: "Segoe UI Symbol", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  font-style: normal;
+  font-size: .8em;
+  line-height: 1;
+  color: #a9741e;
+}
+/* 行尾空白：浅红底 + 末端一个小点 */
+.editor-marks .mark-trail {
+  position: relative;
+  padding: 7px 0;
+  background: rgba(190, 96, 86, .16);
+}
+.editor-marks .mark-trail > i {
+  position: absolute;
+  right: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-style: normal;
+  font-size: .8em;
+  line-height: 1;
+  color: #b25a52;
+}
+body.theme-night .editor-marks .long-para {
+  background-image: linear-gradient(90deg, rgba(208, 160, 74, .8) 0 3px, rgba(208, 160, 74, .12) 3px 100%);
+}
+body.theme-night .editor-marks .mark-fw { background: rgba(208, 160, 74, .28); }
+body.theme-night .editor-marks .mark-fw > i { color: #e2b75c; }
+body.theme-night .editor-marks .mark-trail { background: rgba(208, 106, 106, .22); }
+body.theme-night .editor-marks .mark-trail > i { color: #e08a84; }
+
+/* 超长段落左侧黄线：位置由 renderer 按编辑区实测行框算，滚动时跟着走 */
+.editor-marks-gutter {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+.long-para-bar {
+  position: absolute;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(206, 156, 34, .78);
+}
+body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
+
 .statusbar {
   height: 34px;
   flex: 0 0 34px;
@@ -644,6 +737,27 @@ body.resizing .editor {
   white-space: nowrap;
 }
 .status-stats .goal-track { width: 54px; height: 4px; }
+/* 选中字数：只在真选了文字时出现，不占平时的地方 */
+.status-selection {
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* 超长段落小标签：点一下跳到下一段（只移动光标，不改字） */
+.status-long {
+  padding: 1px 8px;
+  border: 1px solid rgba(169, 116, 30, .45);
+  border-radius: 10px;
+  background: rgba(226, 186, 74, .16);
+  color: var(--warn);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.status-long:hover { background: rgba(226, 186, 74, .32); }
+#char-count.count-short { color: var(--warn); }
 .kbd {
   padding: 1px 6px;
   border: 1px solid var(--line-strong);
