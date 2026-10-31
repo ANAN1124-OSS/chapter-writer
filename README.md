@@ -19,11 +19,27 @@
 
 ## 环境要求
 
+**安装版（作者日常用）**：Windows 11 / Windows 10 1809+，**不需要装 Node**。
+
+**开发版（改代码时用）**：
+
 - Windows 11（Windows 10 1809+ 也可）
 - Node.js ≥ 22（开发机实测 v24.22.1）
 - pnpm ≥ 10（实测 12.11.2）
 
 ## 安装与启动
+
+### 方式一：安装包（推荐，不用命令行）
+
+双击 `dist\章节写作器-0.1.0-安装包.exe`：
+
+1. 安装包**没有代码签名**，Windows 可能弹「已保护你的电脑」→ 点「更多信息」→「仍要运行」。
+2. 可以自己选安装目录（默认装到当前用户目录，不需要管理员），安装完有**桌面快捷方式**和**开始菜单**入口。
+3. 卸载：Windows「设置 → 应用」里卸载，或开始菜单里「卸载」。**卸载不会删你的小说**（书架在 `文档\我的小说`，应用配置在 `%APPDATA%\chapter-writer`；安装包也特意没勾「卸载时删除应用数据」）。
+
+> 安装版和开发版**共用同一份配置和书架设置**（同一个 `%APPDATA%\chapter-writer\config.json`），换着用不会丢设置。
+
+### 方式二：开发版（代码方式）
 
 ```bash
 cd D:\code\chapter-writer
@@ -47,7 +63,23 @@ pnpm start          # 启动应用
 - `.npmrc` 已配置 `electron_mirror=https://npmmirror.com/mirrors/electron/`，避免卡 GitHub。
 - 某些宿主环境（例如某些 AI 工具、CI）会带 `ELECTRON_RUN_AS_NODE=1`，会让 Electron 退化成纯 Node 而启动失败。
   `pnpm start` 实际执行的是 `scripts/start.js`，它会自动清掉这个环境变量再启动。
+  （**安装版**从桌面/开始菜单双击启动不受影响；只有在那种环境里用命令行直接跑 exe 才要先清掉它。）
 - 数据目录不在项目里：默认 `文档\我的小说`，可在应用「设置」里改。
+
+## 打包（开发者/维护用）
+
+```bash
+pnpm run icon       # 重新生成图标（build/icon.ico / icon.png，纯 Pillow 绘制，需要 python）
+pnpm run dist       # 打 Windows 安装包 → dist\章节写作器-<版本>-安装包.exe（NSIS，x64）
+pnpm run dist:dir   # 只打免安装目录 → dist\win-unpacked\章节写作器.exe（改完快速验证用）
+```
+
+- 配置在 `package.json` 的 `build` 字段：appId、产品名、NSIS 安装器选项（可选目录、桌面/开始菜单快捷方式、中文界面）。
+- 国内网络打包时如果下载 Electron/NSIS 卡住，先设镜像：
+  `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`、
+  `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`。
+- 目前**没有代码签名**（个人自用省掉证书），所以每台新机器首次安装会看到 SmartScreen 提示。
+- 安装包产物在 `dist/`（已加进 `.gitignore`，不进仓库）；`build/icon.*` 是图标源文件，会进仓库。
 
 ## 数据在哪
 
@@ -196,13 +228,13 @@ pnpm start -- --user-data=shots/ud-3 --books-root=shots/demo-library --book=shot
 
 ```
 chapter-writer/
-├─ package.json / pnpm-workspace.yaml / .npmrc
+├─ package.json / pnpm-workspace.yaml / .npmrc   # package.json 里含 electron-builder 打包配置
 ├─ main.js                  # Electron 主进程：窗口、生命周期、关闭拦截、全部文件 IO
 ├─ preload.js               # contextBridge 白名单 IPC
 ├─ core/                    # 纯 Node 逻辑，不依赖 Electron，可单测
 │  ├─ atomic.js             # 原子写（临时文件 + fsync + rename + 重试）
 │  ├─ chapters.js           # 编号、标题、文件名净化、顺序增删
-│  ├─ storage.js            # 书架扫描、书目读写、章节读写、_trash、写锁
+│  ├─ storage.js            # 书架扫描、书目读写、章节读写、_trash、写锁、排序/查找/整本替换
 │  ├─ config.js             # 配置读写（字体/字号/行间距/字间距/边距/宽度/背景主题/排版规则）
 │  ├─ format.js             # 智能排版（缩进/空行/行尾空白/标点，纯文本变换、幂等）
 │  ├─ find.js               # 全书查找/替换纯逻辑（字面量、上下文片段）
@@ -210,19 +242,24 @@ chapter-writer/
 │  ├─ importer.js           # 导入小说（整本书复制 / 从 txt 重建书目）
 │  └─ exporter.js           # 整本拼接（导出与复制共用）
 ├─ renderer/                # 界面（HTML/CSS/JS，无框架）
+├─ build/                   # 打包资源
+│  ├─ icon.ico              # 安装包/exe 图标（多尺寸）
+│  └─ icon.png              # 图标预览/源图
 ├─ scripts/
 │  ├─ start.js              # 启动器（清理 ELECTRON_RUN_AS_NODE）
 │  ├─ run-e2e.js            # pnpm run e2e
 │  ├─ e2e-scenario.js       # 端到端自检场景
-│  └─ demo-data.js          # 生成演示书库
+│  ├─ demo-data.js          # 生成演示书库
+│  └─ make-icon.py          # 生成 build/icon.*（Pillow，纯本地绘制）
 ├─ tests/                   # node:test 单元测试
+├─ dist/                    # 打包产物（.gitignore，不进仓库）
 ├─ README.md
 └─ 验收清单.md
 ```
 
 ## 已知限制（v0.1 有意不做）
 
-- 不打包 exe / 没有安装器（需求约定）
+- 安装包**未签名**：首次安装 Windows SmartScreen 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可；没有自动更新（升级要重新装一次新包）
 - 无自动保存、无每日备份、无云同步、无多端（按作者要求）
 - 无富文本、无大纲、无设定库、无 AI 辅助（需求砍掉）
 - 「智能排版」只处理当前章，没有「整本批量整理」（按作者要求只做当前章；以后需要再加）
@@ -262,10 +299,14 @@ chapter-writer/
 | 查找支持正则吗 | 不支持，按字面量找（`.*` 就是三个字符）。这样不会因为一条正则把全稿改坏；需要更复杂的替换可以把例子发我，单独加规则 |
 | 拖完章节，硬盘上的文件名乱了吗 | 没乱。拖拽只改 `书目.json` 的顺序，章节 txt 的文件名（创建序号）永远不变，界面上显示的「第N章」是按顺序现算的 |
 | 拖不动章节？ | 按住左键上下拖，移动超过 5 像素才开始拖；松手生效。章节只有一章时不能拖 |
+| 双击安装包被 Windows 拦了 | 安装包没做代码签名，SmartScreen 会提示。点「更多信息」→「仍要运行」即可；想彻底不提示需要买数字证书 |
+| 安装到哪了？会删我的小说吗 | 默认装到当前用户目录（安装时可以改），桌面和开始菜单有快捷方式。**小说和配置都不在安装目录**，卸载不会删稿 |
+| 安装版和 `pnpm start` 开发版数据互通吗 | 互通：都读同一个 `%APPDATA%\chapter-writer\config.json` 和同一个书架目录，换着开不会分裂 |
+| 升级怎么办 | 直接双击新版本安装包覆盖安装即可；书架和配置不受影响（目前没有自动更新） |
 
 ## v0.2 候选（按需再做）
 
-- 打包 exe + 图标 + 安装包
+- 代码签名 + 自动更新（让 SmartScreen 不提示、点一下就能升级）
 - 「只替换这一处」/ 正则查找（如果作者确实需要；现在为避免误伤只做字面量全替换）
 - 「整本批量整理」（如果你想一次把旧书都排一遍；现在只做当前章）
 - 想更贴口袋写作的话：背景图片 / 背景特效 / 主题色（需要往 `%APPDATA%` 存图片，不改书库）
