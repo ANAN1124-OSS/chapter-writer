@@ -1,11 +1,13 @@
 // 配置读写：存在 Electron userData 目录，不污染小说文件夹。
 // 纯 Node，可在测试里传入临时目录。
 const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { writeJsonAtomic, stripBom } = require('./atomic');
 const formatLib = require('./format');
 
-const DEFAULT_BOOKS_ROOT = '文档\\我的小说';
+// 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
+const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
 const FONTS = ['serif', 'sans', 'kai', 'custom'];
 // 背景主题：纯色 4 档 + 两种纸张纹理（对应口袋写作「背景设置」里的配色/纸张纹理/夜间）
 const PAPER_THEMES = ['paper', 'cream', 'green', 'night', 'kraft', 'grid'];

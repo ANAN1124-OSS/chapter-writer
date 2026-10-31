@@ -9,7 +9,7 @@ async function mkTmp() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'cw-config-'));
 }
 
-test('配置默认值：书架在 文档\\我的小说，窗口 1200x760', async () => {
+test('配置默认值：书架在「文档\\我的小说」，窗口 1200x760', async () => {
   const dir = await mkTmp();
   const store = createConfigStore(dir);
   const cfg = await store.get();

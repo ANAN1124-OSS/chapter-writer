@@ -17,11 +17,11 @@
     "electron": "45.1.0",
     "electron-builder": "^26.18.0"
   },
-  "author": "个人自用",
+  "author": "chapter-writer",
   "build": {
     "appId": "local.chapter-writer",
     "productName": "章节写作器",
-    "copyright": "Copyright © 2026 个人自用",
+    "copyright": "Copyright © 2026 chapter-writer",
     "npmRebuild": false,
     "asar": true,
     "compression": "normal",
