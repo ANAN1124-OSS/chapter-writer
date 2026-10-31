@@ -40,6 +40,7 @@ const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
 const statsLib = require('./core/stats');
 const epubLib = require('./core/epub');
+const fragmentsLib = require('./core/fragments');
 
 let win = null;
 let configStore = null;
@@ -278,6 +279,21 @@ function registerIpc() {
   handle('stats:get', async () => {
     const cfg = await getConfig();
     return getStatsStore().summary({ goal: cfg.dailyGoal, days: statsLib.DEFAULT_RECENT_DAYS });
+  });
+
+  // 灵感箱（碎片速记）：书架根目录 _碎片 里的普通 txt。
+  // 不传路径进来，文件名由主进程按日期 + 当天序号生成；写盘走 core/atomic，不碰 书目.json / 章节文件。
+  handle('fragments:list', async () => {
+    const cfg = await getConfig();
+    return fragmentsLib.createFragmentStore(cfg.booksRoot).list();
+  });
+  handle('fragments:create', async (text) => {
+    const cfg = await getConfig();
+    return fragmentsLib.createFragmentStore(cfg.booksRoot).create(text);
+  });
+  handle('fragments:read', async (name) => {
+    const cfg = await getConfig();
+    return fragmentsLib.createFragmentStore(cfg.booksRoot).read(name);
   });
 
   // 每本书的显示设置覆盖（写作页里改的字体/背景/间距/章节栏宽度只影响这本书）
@@ -1046,6 +1062,23 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'fragment') {
+        // 开发截图用：书架「＋ 碎片」弹层 + 示例内容（只是界面演示，不会写盘）
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.openFragmentDialog(); window.__cwTest.setFragmentText('雨还在下。旧车站的钟停在 3:17，像在等一个不会再回来的人。');`,
+          true
+        );
+        await sleep(400);
+      } else if (screenshotDialog === 'fragments') {
+        // 开发截图用：写作页「插入碎片…」弹层，等列表读出来再选第一条
+        await win.webContents.executeJavaScript(`window.__cwTest.openInsertFragmentDialog();`, true);
+        try {
+          await waitForRenderer('window.__cwTest.fragmentRowCount() > 0', 8000);
+          await win.webContents.executeJavaScript(`window.__cwTest.clickFragmentRow(0);`, true);
+        } catch {
+          console.log('[screenshot] 没有可展示的碎片（可在 _碎片 里先放一条）');
+        }
+        await sleep(600);
       } else if (screenshotDialog === 'splitter') {
         await win.webContents.executeJavaScript(
           `window.__cwTest.setSidebarWidth(420);`,

@@ -1321,6 +1321,121 @@ body.resizing .editor {
   border-top: 1px solid var(--line);
 }
 
+/* ---------- 灵感箱（碎片速记） ---------- */
+.fragment-modal { width: min(640px, 92vw); }
+.fragment-text {
+  display: block;
+  width: 100%;
+  min-height: 190px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  font-family: var(--editor-font-family);
+  font-size: 15px;
+  line-height: 1.85;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  user-select: text;
+}
+.fragment-text:focus { border-color: var(--accent-soft); }
+.fragment-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  min-height: 18px;
+}
+.fragment-error { color: var(--danger); }
+
+.insert-fragment-modal {
+  width: min(880px, 94vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fragment-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+.fragment-main {
+  display: flex;
+  gap: 12px;
+  min-height: 220px;
+  max-height: min(400px, 52vh);
+  margin-top: 8px;
+}
+.fragment-list {
+  flex: 0 0 330px;
+  min-width: 0;
+  overflow: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.fragment-item {
+  display: block;
+  width: 100%;
+  padding: 8px 11px;
+  text-align: left;
+  font-family: var(--ui-font);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.fragment-item:last-child { border-bottom: none; }
+.fragment-item:hover { background: var(--paper-deep); }
+.fragment-item.selected { background: var(--paper-deep); box-shadow: inset 3px 0 0 var(--accent); }
+.fragment-item:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.fragment-item-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fragment-item-meta { margin-top: 2px; font-size: 11.5px; color: var(--ink-soft); }
+.fragment-item-preview {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fragment-preview-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.fragment-preview-name { flex: 0 0 auto; }
+.fragment-preview {
+  flex: 1 1 auto;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--editor-font-family);
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--ink);
+}
+.fragment-empty { padding: 14px; font-size: 13px; line-height: 1.8; color: var(--ink-soft); }
+.fragment-hint { margin-top: 10px; }
+.insert-fragment-modal .modal-buttons {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
 /* ---------- 章节拖拽排序 ---------- */
 .chapter-item.dragging { opacity: .5; background: var(--paper-deep); }
 .chapter-item.drop-before { box-shadow: inset 0 2px 0 var(--accent); }

@@ -77,6 +77,10 @@ contextBridge.exposeInMainWorld('api', {
   getConfig: () => invoke('config:get'),
   setConfig: (patch) => invoke('config:set', patch),
   getStats: () => invoke('stats:get'),
+  // 灵感箱（碎片速记）：书架根目录 _碎片 里的普通 txt，不写 书目.json、不碰章节
+  listFragments: () => invoke('fragments:list'),
+  createFragment: (text) => invoke('fragments:create', text),
+  readFragment: (name) => invoke('fragments:read', name),
   getBookDisplay: (bookId) => invoke('book:get-display', bookId),
   setBookDisplay: (bookId, patch) => invoke('book:set-display', bookId, patch),
   resetBookDisplay: (bookId) => invoke('book:reset-display', bookId),

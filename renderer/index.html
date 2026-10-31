@@ -23,6 +23,7 @@
             <button id="btn-shelf-search-clear" class="shelf-search-clear hidden" type="button" title="清除搜索（Esc）">×</button>
           </div>
           <span id="books-root-label" class="muted small"></span>
+          <button id="btn-add-fragment" class="btn ghost" type="button" title="灵感箱：随手记一条碎片，存到书架根目录的 _碎片 文件夹（纯 txt，不用新建章节）">＋ 碎片</button>
           <button id="btn-import" class="btn ghost" type="button" title="把一个外部文件夹导入成书架里的一本书">导入小说</button>
           <button id="btn-settings" class="btn ghost" type="button">设置</button>
         </div>
@@ -69,6 +70,7 @@
           <div class="editor-actions">
             <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
             <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
+            <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
             <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
             <div class="dropdown">
               <button id="btn-format" class="btn ghost" type="button" title="整理本章正文 / 调整正文显示">排版 ▾</button>
@@ -292,6 +294,56 @@
       <div class="modal-buttons">
         <button id="btn-history-open-folder" class="btn ghost" type="button">打开书文件夹</button>
         <button id="btn-history-close" class="btn primary" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 灵感箱：记一条碎片 ============ -->
+  <div id="fragment-backdrop" class="backdrop hidden">
+    <div class="modal fragment-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">记一条碎片</h2>
+      <p class="modal-message">
+        灵感先记下来，不用新建一章。内容会原样存成书架根目录 <code>_碎片</code> 文件夹里的一个普通 txt
+        （文件名按当天日期编号，不会覆盖以前的碎片）；资源管理器里直接能看到，也能用记事本打开。
+      </p>
+      <textarea id="fragment-text" class="fragment-text" rows="8" spellcheck="false"
+                placeholder="随手写一句、一段对白、一个场景…（Ctrl+Enter 保存）"></textarea>
+      <div class="fragment-meta">
+        <span id="fragment-counter" class="muted small">0 字</span>
+        <span id="fragment-save-state" class="muted small"></span>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-fragment-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-fragment-save" class="btn primary" type="button">保存碎片</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 灵感箱：插入碎片 ============ -->
+  <div id="fragments-backdrop" class="backdrop hidden">
+    <div class="modal insert-fragment-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">插入碎片</h2>
+      <p class="modal-message">
+        选一条碎片插到光标处：只改编辑区（仍是未保存，Ctrl+S 才写盘），<strong>不会删除原碎片文件</strong>。
+        想先记一条新的，回书架点「＋ 碎片」。
+      </p>
+      <div class="fragment-toolbar">
+        <span id="fragments-summary" class="muted small"></span>
+        <button id="btn-fragments-refresh" class="btn ghost tiny" type="button" title="重新读取 _碎片 文件夹（只读）">刷新</button>
+      </div>
+      <div class="fragment-main">
+        <div id="fragments-list" class="fragment-list"></div>
+        <div class="fragment-preview-wrap">
+          <div id="fragment-preview-name" class="fragment-preview-name muted small">选一条碎片看内容</div>
+          <pre id="fragment-preview" class="fragment-preview"></pre>
+        </div>
+      </div>
+      <div id="fragment-hint" class="fragment-hint muted small">
+        碎片会插在打开面板前光标 / 选区的位置；如果当时选中了一段文字，会用碎片替换选中的部分。
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-fragments-close" class="btn ghost" type="button">关闭</button>
+        <button id="btn-fragment-insert" class="btn primary" type="button" disabled>插入到光标处</button>
       </div>
     </div>
   </div>
