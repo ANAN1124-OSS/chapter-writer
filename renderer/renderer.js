@@ -123,6 +123,7 @@
     replaceBackups: [], // 当前书的「整本替换」备份列表（查找面板里展示 / 还原用）
     bookDisplay: {}, // 当前书的显示设置覆盖（只覆盖改过的项）
     recentBook: null, // 上次写作的书 / 章（书架顶部「继续上次写作」；主进程从 config 读）
+    conflictBook: null, // 正在看「同步冲突副本」弹层的那本书（只用于打开文件夹）
     shelfQuery: '', // 书架搜索词（书名 / 章节名）
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
@@ -501,6 +502,33 @@
     return { ok: state.view === 'editor', index: state.index };
   }
 
+  // ---------- 同步冲突副本提示 ----------
+  // 只提示、不合并、不动文件：冲突副本可能含用户没合并的手稿，自动处理风险太大。
+  function openConflictDialog(book) {
+    if (!book) return;
+    const conflicts = Array.isArray(book.conflicts) ? book.conflicts.slice() : [];
+    if (!conflicts.length) return;
+    state.conflictBook = book;
+    $('conflict-book').textContent = `《${book.title || book.folder}》 · ${book.path || ''}`;
+    $('conflict-book').title = book.path || '';
+    $('conflict-summary').textContent = `共 ${conflicts.length} 个冲突副本（只提示，不会自动合并或删除）`;
+    const list = $('conflict-files');
+    list.innerHTML = '';
+    for (const name of conflicts) {
+      const row = document.createElement('div');
+      row.className = 'conflict-file';
+      row.textContent = name;
+      row.title = name;
+      list.appendChild(row);
+    }
+    $('conflict-backdrop').classList.remove('hidden');
+  }
+
+  function closeConflictDialog() {
+    state.conflictBook = null;
+    $('conflict-backdrop').classList.add('hidden');
+  }
+
   function renderShelf() {
     $('books-root-label').textContent = state.config ? `书架：${state.config.booksRoot}` : '';
     $('books-root-label').title = state.config ? state.config.booksRoot : '';
@@ -526,8 +554,13 @@
 
     for (const { book, info } of rows) {
       const card = document.createElement('div');
-      card.className = 'book-card' + (book.status === 'corrupt' ? ' corrupt' : '');
+      const conflictCount = Array.isArray(book.conflicts) ? book.conflicts.length : 0;
+      card.className =
+        'book-card' +
+        (book.status === 'corrupt' ? ' corrupt' : '') +
+        (conflictCount ? ' has-conflict' : '');
       card.dataset.path = book.path;
+      card.dataset.folder = book.folder;
 
       const title = document.createElement('div');
       title.className = 'book-card-title';
@@ -543,6 +576,20 @@
           : `${book.chapterCount} 章 · ${formatChars(book.totalChars)}` +
             (done > 0 ? ` · 完稿 ${done}/${book.chapterCount} 章` : '');
       card.appendChild(meta);
+
+      // 同步盘冲突副本：醒目提示，点开看是哪几个文件；绝不自动合并/删除
+      if (conflictCount) {
+        const badge = document.createElement('button');
+        badge.type = 'button';
+        badge.className = 'book-conflict-badge';
+        badge.textContent = `⚠ 检测到同步冲突副本（${conflictCount} 个）`;
+        badge.title = `这些文件不会被自动合并：\n${(book.conflicts || []).join('\n')}`;
+        badge.addEventListener('click', (event) => {
+          event.stopPropagation();
+          openConflictDialog(book);
+        });
+        card.appendChild(badge);
+      }
 
       // 书名没命中、靠章名命中时，把命中的章名列出来
       if (info.chapterHits && info.chapterHits.length) {
@@ -698,7 +745,8 @@
       if (res.action === 'bak') {
         toast(`已从备份恢复：${data.meta.chapters.length} 章`);
       } else {
-        toast(`已重建书目：${data.count} 章`);
+        const skipped = Number(data.skippedConflicts) || 0;
+        toast(`已重建书目：${data.count} 章${skipped ? `（跳过 ${skipped} 个同步冲突副本）` : ''}`);
       }
       await refreshShelf();
     } catch (err) {
@@ -2094,6 +2142,7 @@
     closeFormatDialog();
     if (!$('export-backdrop').classList.contains('hidden')) closeExportDialog();
     if (!$('jump-backdrop').classList.contains('hidden')) closeJumpDialog();
+    if (!$('conflict-backdrop').classList.contains('hidden')) closeConflictDialog();
     if (!$('settings-backdrop').classList.contains('hidden')) closeSettings();
     if (!state.dirty || !state.bookPath) {
       api.closeReady(true);
@@ -3296,6 +3345,17 @@
     });
 
     $('btn-continue-writing').addEventListener('click', () => openContinueBook());
+    $('btn-conflict-close').addEventListener('click', closeConflictDialog);
+    $('btn-conflict-open-folder').addEventListener('click', async () => {
+      const book = state.conflictBook;
+      if (!book) return;
+      try {
+        await call(api.openBookFolder, book.path);
+        toast('已在资源管理器打开书文件夹');
+      } catch (err) {
+        toast(`打开文件夹失败：${err.message}`, 'error');
+      }
+    });
     $('btn-back').addEventListener('click', backToShelf);
     $('btn-rename-book').addEventListener('click', renameBookFlow);
     $('btn-new-chapter').addEventListener('click', () => createChapterAt(state.chapters.length));
@@ -3475,6 +3535,13 @@
           event.preventDefault();
           const okButton = $('modal-buttons').querySelector('button[data-value="ok"]');
           if (okButton) okButton.click();
+        }
+        return;
+      }
+      if (!$('conflict-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeConflictDialog();
         }
         return;
       }
@@ -3758,6 +3825,41 @@
         state.recentBook = await call(api.getRecentBook);
         renderContinueWriting();
         return state.recentBook;
+      },
+      async refreshShelf() {
+        await refreshShelf();
+      },
+      // 同步冲突副本提示
+      shelfConflictBadgeText(folder) {
+        const card = Array.from(document.querySelectorAll('.book-card[data-folder]')).find(
+          (el) => el.dataset.folder === folder
+        );
+        const badge = card ? card.querySelector('.book-conflict-badge') : null;
+        return badge ? badge.textContent : '';
+      },
+      conflictCardHasClass(folder, className) {
+        const card = Array.from(document.querySelectorAll('.book-card[data-folder]')).find(
+          (el) => el.dataset.folder === folder
+        );
+        return Boolean(card && card.classList.contains(className));
+      },
+      openConflictDialogFor(folder) {
+        const book = (state.books || []).find((item) => item.folder === folder || item.title === folder);
+        if (!book) return false;
+        openConflictDialog(book);
+        return true;
+      },
+      closeConflictDialog: () => closeConflictDialog(),
+      conflictDialogOpen: () => !$('conflict-backdrop').classList.contains('hidden'),
+      conflictBookText: () => $('conflict-book').textContent,
+      conflictSummary: () => $('conflict-summary').textContent,
+      conflictFileTexts: () =>
+        Array.from(document.querySelectorAll('#conflict-files .conflict-file')).map((el) => el.textContent),
+      firstConflictBookFolder: () => {
+        const book = (state.books || []).find(
+          (item) => Array.isArray(item.conflicts) && item.conflicts.length
+        );
+        return book ? book.folder : '';
       },
       shelfTitles: () => state.books.map((b) => b.title),
       shelfQuery: () => state.shelfQuery,

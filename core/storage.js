@@ -6,6 +6,8 @@ const { atomicWriteFile, writeJsonAtomic, stripBom } = require('./atomic');
 const chaptersLib = require('./chapters');
 const findLib = require('./find');
 const formatLib = require('./format');
+const schemaLib = require('./schema');
+const conflictLib = require('./conflict');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -85,6 +87,9 @@ async function readBookMeta(bookPath) {
     throw new StorageError('PARSE_ERROR', `${BOOK_FILE} 解析失败（内容不是合法 JSON）`);
   }
   validateMeta(meta);
+  // 版本迁移：v0.4.x 的书没有 schemaVersion，按版本 0 走一遍迁移（目前是空迁移），
+  // 只在内存里补成 1；下次正常写盘才会落进 书目.json。未来版本号原样保留。
+  meta = schemaLib.migrateMeta(meta);
   meta.chapters = meta.chapters.map((c, i) =>
     chaptersLib.cleanChapterMeta({
       ...c,
@@ -113,7 +118,12 @@ async function writeBookMeta(bookPath, meta) {
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
-  const next = { ...meta, updatedAt: nowIso() };
+  const next = {
+    ...meta,
+    // 新书 / 旧书第一次写盘时补上版本号；比本应用新的版本不降级
+    schemaVersion: schemaLib.normalizeSchemaVersion(meta.schemaVersion),
+    updatedAt: nowIso()
+  };
   await writeJsonAtomic(metaPath, next);
   return next;
 }
@@ -222,6 +232,19 @@ async function findMissingChapters(bookPath, meta, concurrency = 16) {
   return flags.filter(Boolean);
 }
 
+// 同步盘冲突副本：只看书文件夹顶层（_trash 里的备份不算），只提示、不合并、不删除。
+// 文件夹读不到（权限/刚好被占用）就当没有，不影响书架显示。
+async function scanConflictCopies(bookPath) {
+  try {
+    const entries = await fs.readdir(bookPath, { withFileTypes: true });
+    return conflictLib.findConflictCopies(
+      entries.filter((entry) => entry.isFile()).map((entry) => entry.name)
+    );
+  } catch {
+    return [];
+  }
+}
+
 async function listBooks(booksRoot) {
   await ensureDir(booksRoot);
   let entries;
@@ -238,17 +261,23 @@ async function listBooks(booksRoot) {
   const scanned = await mapLimit(candidates, 12, async ({ folder, bookPath }) => {
     try {
       const meta = await readBookMeta(bookPath);
-      const stats = await bookStats(bookPath, meta);
+      const [stats, conflicts] = await Promise.all([
+        bookStats(bookPath, meta),
+        scanConflictCopies(bookPath)
+      ]);
       return {
         path: bookPath,
         folder,
         status: 'ok',
         title: meta.title || folder,
+        schemaVersion: meta.schemaVersion,
         chapterCount: meta.chapters.length,
         // 章节名给书架搜索用（只搜书名/章节名，不搜正文）
         chapterNames: meta.chapters.map((chapter) => chapter.name || ''),
         // 书卡上的「完稿 X/Y 章」（只统计 status === 'done' 的章）
         doneChapters: chaptersLib.countChapterStatuses(meta).done,
+        // 同步盘冲突副本的文件名（只提示；不是章节，也不会被自动合并）
+        conflicts,
         totalChars: stats.totalChars,
         lastModified: stats.latestMtime,
         missing: []
@@ -263,6 +292,7 @@ async function listBooks(booksRoot) {
         chapterCount: 0,
         chapterNames: [],
         doneChapters: 0,
+        conflicts: await scanConflictCopies(bookPath),
         totalChars: 0,
         lastModified: 0,
         reason: err.message,
@@ -301,6 +331,7 @@ async function createBook(booksRoot, title) {
   await atomicWriteFile(path.join(bookPath, file), '');
   const meta = {
     version: 1,
+    schemaVersion: schemaLib.CURRENT_SCHEMA_VERSION,
     id: `b_${Date.now().toString(36)}`,
     title: displayTitle,
     titleTemplate: chaptersLib.TITLE_TEMPLATE,

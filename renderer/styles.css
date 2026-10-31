@@ -243,6 +243,27 @@ html, body {
 .book-card.corrupt .book-card-title { color: var(--danger); }
 .book-card.corrupt .btn { align-self: flex-start; margin-top: 4px; }
 
+/* 同步冲突副本：书卡标黄提示（只提示；不自动合并、不删文件） */
+.book-card.has-conflict { border-color: rgba(169, 116, 30, .5); }
+.book-conflict-badge {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 3px 9px;
+  overflow: hidden;
+  border: 1px solid rgba(169, 116, 30, .45);
+  border-radius: 999px;
+  background: rgba(169, 116, 30, .12);
+  color: var(--warn);
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.book-conflict-badge:hover { background: rgba(169, 116, 30, .22); }
+
 .book-card-more {
   position: absolute;
   top: 8px;
@@ -839,6 +860,52 @@ body.resizing .editor {
   flex: 0 0 auto;
   font-size: 12px;
   color: var(--ink-faint);
+}
+
+/* ---------- 同步冲突副本 ---------- */
+.conflict-modal {
+  width: min(620px, 92vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.conflict-book {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  word-break: break-all;
+}
+.conflict-summary {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--warn);
+}
+.conflict-files {
+  max-height: 34vh;
+  margin-top: 8px;
+  padding: 4px 12px;
+  overflow: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.conflict-file {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  word-break: break-all;
+}
+.conflict-file:last-child { border-bottom: none; }
+.conflict-modal .modal-buttons {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 .format-rules { margin-top: 12px; }
 .check-row-pair {

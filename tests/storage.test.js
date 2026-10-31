@@ -770,3 +770,79 @@ test('分卷：moveChapterTo 可以跨卷插到指定章节之前，也可以落
   meta = await storage.readBookMeta(bookPath);
   assert.equal(meta.chapters.filter((c) => !c.volumeId).length, 2, '移回未分卷后应该有两章在未分卷组');
 });
+
+test('书目 schemaVersion：新建书带 1；旧书只读补 1 不落盘；写盘才补；未来版本不降级', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '版本测试');
+  const metaPath = path.join(bookPath, '书目.json');
+  const rawNew = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  assert.equal(rawNew.schemaVersion, 1);
+
+  // 模拟 v0.4.1 写出的书目：没有 schemaVersion
+  delete rawNew.schemaVersion;
+  await fs.writeFile(metaPath, JSON.stringify(rawNew, null, 2), 'utf8');
+  const legacy = await storage.readBookMeta(bookPath);
+  assert.equal(legacy.schemaVersion, 1, '内存里按版本 1 读');
+  const rawAfterRead = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  assert.equal(rawAfterRead.schemaVersion, undefined, '只是读，不写盘补字段');
+
+  // 正常写盘（改章名）时才补上版本号
+  await storage.renameChapter(bookPath, legacy.chapters[0].id, '大风');
+  const rawAfterWrite = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  assert.equal(rawAfterWrite.schemaVersion, 1);
+  assert.equal(rawAfterWrite.chapters[0].name, '大风');
+
+  // 比本应用新的版本号：能读，写回也不降级
+  await fs.writeFile(metaPath, JSON.stringify({ ...rawAfterWrite, schemaVersion: 2 }), 'utf8');
+  const future = await storage.readBookMeta(bookPath);
+  assert.equal(future.schemaVersion, 2);
+  await storage.renameBook(bookPath, '未来版本书');
+  const rawFuture = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  assert.equal(rawFuture.schemaVersion, 2);
+});
+
+test('listBooks：识别同步冲突副本，不当作章节、不影响统计，冲突文件原样保留', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '同步冲突书');
+  await storage.createChapter(bookPath, 1, '夜雨');
+  const before = await storage.readBookMeta(bookPath);
+  const conflictFiles = [
+    '001-未命名 (conflicted copy 1).txt',
+    '书目-冲突副本.json'
+  ];
+  for (const name of conflictFiles) {
+    await fs.writeFile(path.join(bookPath, name), '冲突副本内容', 'utf8');
+  }
+  // _trash 里的旧备份名字带 conflicted 也不算（只看书文件夹顶层）
+  await fs.mkdir(path.join(bookPath, '_trash'));
+  await fs.writeFile(path.join(bookPath, '_trash', '旧 (conflicted copy).txt'), '备份', 'utf8');
+
+  const books = await storage.listBooks(root);
+  const listed = books.find((book) => book.folder === '同步冲突书');
+  assert.ok(listed);
+  assert.equal(listed.status, 'ok');
+  assert.equal(listed.chapterCount, 2, '冲突副本不能算成章节');
+  assert.equal(listed.doneChapters, 0);
+  assert.deepEqual(listed.conflicts.slice().sort(), conflictFiles.slice().sort());
+
+  // 书目里的章节记录没变（listBooks 只会补字数缓存，不会把冲突副本收进 chapters），冲突文件也没被移动/删除
+  const after = await storage.readBookMeta(bookPath);
+  const pick = (list) => list.map((c) => ({ id: c.id, file: c.file, name: c.name }));
+  assert.deepEqual(pick(after.chapters), pick(before.chapters));
+  assert.equal(after.chapters.some((c) => /conflicted|冲突副本/i.test(c.file)), false);
+  const files = await fs.readdir(bookPath);
+  for (const name of conflictFiles) assert.ok(files.includes(name), `${name} 应原样保留`);
+});
+
+test('listBooks：损坏书目的书也带冲突副本提示（方便先修书目再处理副本）', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '坏书带冲突');
+  await fs.writeFile(path.join(bookPath, '书目.json'), '{ 坏掉了', 'utf8');
+  await fs.writeFile(path.join(bookPath, '书目 (conflicted copy 1).json'), '{}', 'utf8');
+
+  const books = await storage.listBooks(root);
+  const listed = books.find((book) => book.folder === '坏书带冲突');
+  assert.ok(listed);
+  assert.equal(listed.status, 'corrupt');
+  assert.deepEqual(listed.conflicts, ['书目 (conflicted copy 1).json']);
+});

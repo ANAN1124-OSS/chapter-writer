@@ -3,6 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { stripBom } = require('./atomic');
 const chaptersLib = require('./chapters');
+const schemaLib = require('./schema');
+const conflictLib = require('./conflict');
 const storage = require('./storage');
 
 function stampForBackup(date = new Date()) {
@@ -23,10 +25,18 @@ async function archiveCorruptMeta(bookPath) {
 }
 
 // 从目录里的 txt 重建：文件名形如 001-起风.txt，按序号排序。
+// 同步盘的冲突副本（*conflicted* / *-冲突副本*）不是真正的章节，不参与重建、原样留在文件夹里。
 async function rebuildFromFiles(bookPath) {
-  const files = await storage.listTxtFiles(bookPath);
+  const allFiles = await storage.listTxtFiles(bookPath);
+  const files = allFiles.filter((file) => !conflictLib.isConflictCopyName(file));
+  const conflictCopies = conflictLib.findConflictCopies(allFiles);
   if (!files.length) {
-    throw new storage.StorageError('NO_FILES', '这个文件夹里没有找到章节 txt，无法重建');
+    throw new storage.StorageError(
+      'NO_FILES',
+      allFiles.length
+        ? '这个文件夹里只有同步冲突副本，没有可用的章节 txt，无法重建'
+        : '这个文件夹里没有找到章节 txt，无法重建'
+    );
   }
   const parsed = files.map((file, index) => {
     const match = /^(\d+)-(.+)\.txt$/i.exec(file);
@@ -41,6 +51,7 @@ async function rebuildFromFiles(bookPath) {
   const now = new Date().toISOString();
   const meta = {
     version: 1,
+    schemaVersion: schemaLib.CURRENT_SCHEMA_VERSION,
     id: `b_${Date.now().toString(36)}`,
     title: path.basename(bookPath),
     titleTemplate: chaptersLib.TITLE_TEMPLATE,
@@ -55,7 +66,14 @@ async function rebuildFromFiles(bookPath) {
     createdAt: now
   };
   const saved = await storage.writeBookMeta(bookPath, meta);
-  return { meta: saved, archived, count: saved.chapters.length };
+  return {
+    meta: saved,
+    archived,
+    count: saved.chapters.length,
+    // 只用来说明「跳过了几个同步冲突副本」；这些文件原样保留，不删也不合并
+    skippedConflicts: conflictCopies.length,
+    conflictCopies
+  };
 }
 
 // 从 书目.json.bak 恢复（.bak 是上一次成功写入前的版本）
@@ -79,7 +97,7 @@ async function restoreFromBak(bookPath) {
   }
   const archived = await archiveCorruptMeta(bookPath);
   const saved = await storage.writeBookMeta(bookPath, {
-    ...meta,
+    ...schemaLib.migrateMeta(meta),
     title: typeof meta.title === 'string' && meta.title ? meta.title : path.basename(bookPath)
   });
   // writeBookMeta 会再次把（已经不存在的）主文件备份逻辑跳过，.bak 保持原样

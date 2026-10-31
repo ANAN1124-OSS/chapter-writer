@@ -842,6 +842,18 @@ async function runAutomation() {
           true
         );
         await sleep(900);
+      } else if (screenshotDialog === 'conflict') {
+        const folder = await win.webContents.executeJavaScript(
+          'window.__cwTest.firstConflictBookFolder()',
+          true
+        );
+        if (folder) {
+          await win.webContents.executeJavaScript(
+            `window.__cwTest.openConflictDialogFor(${JSON.stringify(folder)})`,
+            true
+          );
+        }
+        await sleep(500);
       }
       await sleep(500);
       const image = await win.webContents.capturePage();

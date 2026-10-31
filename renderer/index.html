@@ -201,6 +201,24 @@
     </div>
   </div>
 
+  <!-- ============ 同步冲突副本提示 ============ -->
+  <div id="conflict-backdrop" class="backdrop hidden">
+    <div class="modal conflict-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">检测到同步冲突副本</h2>
+      <p class="modal-message">
+        这本书的文件夹里有同步盘（OneDrive / 坚果云等）生成的冲突副本。写作器<strong>不会自动合并</strong>，也不会改动或删除这些文件。
+        请点「打开书文件夹」，对比后把要保留的内容合并回原章节，再把多余的副本移走。
+      </p>
+      <div class="conflict-book" id="conflict-book"></div>
+      <div class="conflict-summary" id="conflict-summary"></div>
+      <div class="conflict-files" id="conflict-files"></div>
+      <div class="modal-buttons">
+        <button id="btn-conflict-open-folder" class="btn ghost" type="button">打开书文件夹</button>
+        <button id="btn-conflict-close" class="btn primary" type="button">知道了</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ 通用模态 ============ -->
   <div id="modal-backdrop" class="backdrop hidden">
     <div class="modal" role="dialog" aria-modal="true">
