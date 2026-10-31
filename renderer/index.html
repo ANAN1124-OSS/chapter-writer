@@ -49,6 +49,7 @@
         <header class="editor-header">
           <div class="chapter-title" id="chapter-title"></div>
           <div class="editor-actions">
+            <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
             <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
             <div class="dropdown">
               <button id="btn-format" class="btn ghost" type="button" title="整理本章正文 / 调整正文显示">排版 ▾</button>
@@ -88,6 +89,40 @@
   </div>
 
   <div id="toast-area"></div>
+
+  <!-- ============ 查找替换 ============ -->
+  <div id="find-backdrop" class="backdrop hidden">
+    <div class="modal find-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">查找替换</h2>
+      <div class="find-row">
+        <input id="find-query" class="text-input" type="text" placeholder="要查找的内容（字面量，不是正则）" />
+        <label class="check-row inline"><input type="checkbox" id="find-case" /> 区分大小写</label>
+      </div>
+      <div class="find-row">
+        <input id="find-replace" class="text-input" type="text" placeholder="替换为（留空 = 删除）" />
+      </div>
+      <div class="find-row">
+        <label class="field inline">
+          <span>范围</span>
+          <select id="find-scope" class="text-input">
+            <option value="current">当前这一章</option>
+            <option value="book">整本书</option>
+          </select>
+        </label>
+        <button id="btn-find-run" class="btn ghost" type="button">查找</button>
+        <button id="btn-find-replace" class="btn primary" type="button">全部替换</button>
+      </div>
+      <div class="find-summary muted small" id="find-summary"></div>
+      <div class="find-results" id="find-results"></div>
+      <p class="muted small">
+        整本替换是显式动作：替换前会把原章节备份到书内 <code>_trash\替换备份-时间戳\</code>，可人工找回。
+        当前章替换只改编辑区（未保存），按 Ctrl+S 才写盘，Ctrl+Z 可撤销。
+      </p>
+      <div class="modal-buttons">
+        <button id="btn-find-close" class="btn ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ============ 通用模态 ============ -->
   <div id="modal-backdrop" class="backdrop hidden">

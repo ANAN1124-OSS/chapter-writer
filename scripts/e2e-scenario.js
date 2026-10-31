@@ -682,5 +682,136 @@ module.exports = async function runScenario(ctx) {
   );
   check('改主题/边距不动正文一个字', (await exec('window.__cwTest.text()')) === indentBlankText);
 
+  // 27. 章节拖拽排序：只改书目顺序，章节文件永不重命名，内容跟着章节走
+  await exec("window.__cwTest.newBook('拖拽排序书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec("window.__cwTest.newChapter('第二')");
+  await exec("window.__cwTest.newChapter('第三')");
+  const sortBookPath = await exec('window.__cwTest.state.bookPath');
+  const filesBeforeMove = await exec('window.__cwTest.chapterFiles()');
+  await exec('window.__cwTest.switchTo(2, "discard")');
+  await exec("window.__cwTest.setText('这是第三章的正文，看它能不能跟着章节走。')");
+  await exec('window.__cwTest.save()');
+  const titlesBeforeMove = await exec('window.__cwTest.chapterTitles()');
+  const namesBeforeMove = await exec('window.__cwTest.chapterNames()');
+
+  await exec('window.__cwTest.moveChapterByDrag(2, 0)');
+  await sleep(300);
+  const namesAfterMove = await exec('window.__cwTest.chapterNames()');
+  check(
+    '拖拽排序：第 3 章移到最前',
+    JSON.stringify(namesAfterMove) ===
+      JSON.stringify([namesBeforeMove[2], namesBeforeMove[0], namesBeforeMove[1]]),
+    { namesBeforeMove, namesAfterMove }
+  );
+  const titlesAfterMove = await exec('window.__cwTest.chapterTitles()');
+  check(
+    '拖拽排序：章号按新顺序自动重排',
+    titlesAfterMove[0] === '第1章：第三' && titlesAfterMove[2] === '第3章：第二',
+    { titlesBeforeMove, titlesAfterMove }
+  );
+  const filesAfterMove = await exec('window.__cwTest.chapterFiles()');
+  check(
+    '拖拽排序：章节文件一个都没改名',
+    JSON.stringify(filesAfterMove.slice().sort()) === JSON.stringify(filesBeforeMove.slice().sort()),
+    { filesBeforeMove, filesAfterMove }
+  );
+  const sortedMeta = await storage.readBookMeta(sortBookPath);
+  check('拖拽排序：书目.json 顺序已落盘', sortedMeta.chapters[0].name === '第三', sortedMeta.chapters.map((c) => c.name));
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await waitFor("window.__cwTest.currentIndex() === 0");
+  check(
+    '拖拽排序：内容跟着章节一起搬家',
+    (await exec('window.__cwTest.text()')) === '这是第三章的正文，看它能不能跟着章节走。'
+  );
+
+  // 28. 全书查找 / 替换（替换前自动备份原章节）
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await exec("window.__cwTest.setText('阿明走进屋里。\\n阿明坐下。')");
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.switchTo(1, "discard")');
+  await exec("window.__cwTest.setText('这里没有那个人。')");
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.switchTo(2, "discard")');
+  await exec("window.__cwTest.setText('阿明抬头看了看天。')");
+  await exec('window.__cwTest.save()');
+
+  await exec('window.__cwTest.openFindPanel()');
+  check('Ctrl+F /「查找」按钮能打开查找面板', (await exec('window.__cwTest.findPanelOpen()')) === true);
+  await exec("window.__cwTest.setFindFields({ query: '阿明', replacement: '小明', scope: 'book' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSummary().includes('整本命中')");
+  check(
+    '全书查找：命中数与章节数正确',
+    (await exec('window.__cwTest.findSummary()')).includes('整本命中 3 处，分布在 2 章'),
+    await exec('window.__cwTest.findSummary()')
+  );
+  check('全书查找：结果列表按章列出', (await exec('window.__cwTest.findResultCount()')) === 2);
+
+  await exec('window.__cwTest.clickFindResult(1)');
+  await waitFor('window.__cwTest.currentIndex() === 2');
+  check('点击结果能跳到那一章', (await exec('window.__cwTest.currentIndex()')) === 2);
+  await sleep(200);
+  const selectionAfterJump = await exec('window.__cwTest.state.index');
+  check('跳转后仍停在该章（没有被点击误切走）', selectionAfterJump === 2);
+
+  // 当前章替换：只改编辑区，不写盘
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '阿明', replacement: '小明', scope: 'current' })");
+  await exec('window.__cwTest.findReplaceAll()');
+  await sleep(300);
+  check(
+    '当前章替换：编辑区已改',
+    (await exec('window.__cwTest.text()')) === '小明走进屋里。\n小明坐下。'
+  );
+  check('当前章替换：仍是未保存状态', (await exec('window.__cwTest.dirty()')) === true);
+  check(
+    '当前章替换：磁盘上还是旧内容',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '阿明走进屋里。\n阿明坐下。'
+  );
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.closeFindPanel()');
+
+  // 恢复成含「阿明」的原文，再测整本替换
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await exec("window.__cwTest.setText('阿明走进屋里。\\n阿明坐下。')");
+  await exec('window.__cwTest.save()');
+
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '阿明', replacement: '小明', scope: 'book' })");
+  const replacePromise = exec('window.__cwTest.findReplaceAll()');
+  await waitFor('window.__cwTest.modalOpen()');
+  check('整本替换会先弹确认框', (await exec('window.__cwTest.dialog()')) === '整本替换确认');
+  await exec("window.__cwTest.answerModal('ok')");
+  await replacePromise;
+  await waitFor("window.__cwTest.findPanelOpen() === false", 15000);
+  await sleep(400);
+
+  const replacedMeta = await storage.readBookMeta(sortBookPath);
+  const replacedText0 = await storage.loadChapterText(sortBookPath, replacedMeta.chapters[0].file);
+  const replacedText1 = await storage.loadChapterText(sortBookPath, replacedMeta.chapters[1].file);
+  const replacedText2 = await storage.loadChapterText(sortBookPath, replacedMeta.chapters[2].file);
+  check(
+    '整本替换：命中章节已改写',
+    replacedText0.text === '小明走进屋里。\n小明坐下。' && replacedText2.text === '小明抬头看了看天。',
+    { replacedText0: replacedText0.text, replacedText2: replacedText2.text }
+  );
+  check('整本替换：没有命中的章节原样不动', replacedText1.text === '这里没有那个人。');
+  check(
+    '整本替换：字数缓存已更新',
+    replacedMeta.chapters[0].chars === 12 && replacedMeta.chapters[2].chars === 9,
+    replacedMeta.chapters.map((c) => c.chars)
+  );
+  const trashEntries = await fs.readdir(path.join(sortBookPath, '_trash')).catch(() => []);
+  const backupName = trashEntries.find((name) => name.startsWith('替换备份-'));
+  check('整本替换：原文已备份到书内 _trash', Boolean(backupName), trashEntries);
+  const backupText = await fs.readFile(path.join(sortBookPath, '_trash', backupName, replacedMeta.chapters[0].file), 'utf8');
+  check('整本替换：备份里是替换前的原文', backupText === '阿明走进屋里。\r\n阿明坐下。', backupText);
+  check(
+    '整本替换：当前章已从磁盘重新载入',
+    (await exec('window.__cwTest.text()')) === '小明走进屋里。\n小明坐下。'
+  );
+
   return { ok: true, checks: checks.length, details: checks };
 };

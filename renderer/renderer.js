@@ -95,6 +95,7 @@
     formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了）
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
+    suppressChapterClick: 0, // 拖拽结束后短暂屏蔽 click，避免误切章
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -508,6 +509,106 @@
     }
   }
 
+  // ---------- 章节拖拽排序 ----------
+  // 只改 书目.json 的顺序，章节文件永不重命名；拖拽用 pointer 事件（比 HTML5 DnD 好测、也不挑渲染层）。
+  let chapterDrag = null;
+
+  function startChapterDrag(event, index) {
+    if (event.button !== 0) return;
+    if (state.saving || state.loading || !state.bookPath) return;
+    if (state.chapters.length < 2) return;
+    chapterDrag = {
+      index,
+      startY: event.clientY,
+      active: false,
+      targetIndex: index,
+      item: event.currentTarget
+    };
+  }
+
+  function clearDragMarks() {
+    const list = $('chapter-list');
+    if (!list) return;
+    list.querySelectorAll('.chapter-item.dragging, .chapter-item.drop-before, .chapter-item.drop-after')
+      .forEach((el) => el.classList.remove('dragging', 'drop-before', 'drop-after'));
+    document.body.classList.remove('chapter-dragging');
+  }
+
+  function updateChapterDrag(event) {
+    if (!chapterDrag) return;
+    if (!chapterDrag.active) {
+      if (Math.abs(event.clientY - chapterDrag.startY) < 5) return;
+      chapterDrag.active = true;
+      chapterDrag.item.classList.add('dragging');
+      document.body.classList.add('chapter-dragging');
+    }
+    const list = $('chapter-list');
+    const items = Array.from(list.querySelectorAll('.chapter-item'));
+    items.forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+
+    // 计算插入槽位：指针落在哪个条目上半部分 = 插到它前面
+    let slot = items.length;
+    for (let i = 0; i < items.length; i += 1) {
+      const rect = items[i].getBoundingClientRect();
+      if (event.clientY < rect.top + rect.height / 2) {
+        slot = i;
+        break;
+      }
+    }
+    const targetIndex = slot > chapterDrag.index ? slot - 1 : slot;
+    chapterDrag.targetIndex = targetIndex;
+    if (targetIndex < chapterDrag.index) items[targetIndex].classList.add('drop-before');
+    else if (targetIndex > chapterDrag.index) items[targetIndex].classList.add('drop-after');
+
+    // 拖动到列表顶部/底部附近时自动滚动
+    const listRect = list.getBoundingClientRect();
+    if (event.clientY < listRect.top + 28) list.scrollTop -= 12;
+    else if (event.clientY > listRect.bottom - 28) list.scrollTop += 12;
+  }
+
+  async function endChapterDrag() {
+    if (!chapterDrag) return;
+    const drag = chapterDrag;
+    chapterDrag = null;
+    clearDragMarks();
+    if (!drag.active) return; // 普通点击，交给 click 处理
+    state.suppressChapterClick = Date.now() + 300;
+    if (drag.targetIndex === drag.index) return;
+    await moveChapterByDrag(drag.index, drag.targetIndex);
+  }
+
+  async function moveChapterByDrag(fromIndex, toIndex) {
+    const chapter = state.chapters[fromIndex];
+    if (!chapter || fromIndex === toIndex) return;
+    const currentId = (state.chapters[state.index] || {}).id;
+    try {
+      const data = await call(api.moveChapter, state.bookPath, chapter.id, toIndex);
+      state.chapters = data.meta.chapters;
+      state.meta = { ...state.meta, chapters: data.meta.chapters, updatedAt: data.meta.updatedAt };
+      const newCurrent = currentId ? state.chapters.findIndex((c) => c.id === currentId) : -1;
+      if (newCurrent >= 0) state.index = newCurrent;
+      renderChapterList();
+      renderEditorHeader();
+      updateStatus();
+      toast(`已移动章节：第${data.from + 1}章 → 第${data.to + 1}章（章节文件没有改名）`);
+      if (currentId) {
+        try { await api.setLastOpenChapter(state.bookPath, currentId); } catch { /* 记不住也无所谓 */ }
+      }
+    } catch (err) {
+      toast(`移动章节失败：${err.message}`, 'error');
+    }
+  }
+
+  function setupChapterDrag() {
+    window.addEventListener('pointermove', (event) => {
+      if (chapterDrag) updateChapterDrag(event);
+    });
+    window.addEventListener('pointerup', () => {
+      if (chapterDrag) endChapterDrag();
+    });
+    window.addEventListener('pointercancel', () => clearDragMarks());
+  }
+
   // ---------- 章节列表 ----------
   function renderChapterList() {
     const list = $('chapter-list');
@@ -529,7 +630,14 @@
 
       item.appendChild(num);
       item.appendChild(name);
-      item.addEventListener('click', () => switchChapter(index));
+      item.addEventListener('click', () => {
+        if (state.suppressChapterClick && Date.now() < state.suppressChapterClick) {
+          state.suppressChapterClick = 0;
+          return; // 刚拖拽完，别把这次点击当成切章
+        }
+        switchChapter(index);
+      });
+      item.addEventListener('pointerdown', (event) => startChapterDrag(event, index));
       item.addEventListener('dblclick', () => renameChapterAt(index));
       item.addEventListener('contextmenu', (event) => {
         event.preventDefault();
@@ -1129,6 +1237,229 @@
     $('export-menu').classList.add('hidden');
   }
 
+  // ---------- 查找替换（全书 / 当前章） ----------
+  function openFindPanel() {
+    if (!state.bookPath) {
+      toast('先打开一本书再查找', 'warn');
+      return;
+    }
+    hideFormatMenu();
+    hideExportMenu();
+    // 编辑器里选中了一段短文本时，直接带进查找框
+    const selection = String(window.getSelection ? window.getSelection().toString() : '');
+    if (selection && selection.length <= 60 && !selection.includes('\n')) {
+      $('find-query').value = selection;
+    }
+    $('find-backdrop').classList.remove('hidden');
+    $('find-query').focus();
+    $('find-query').select();
+  }
+
+  function closeFindPanel() {
+    $('find-backdrop').classList.add('hidden');
+  }
+
+  function readFindOptions() {
+    return {
+      query: $('find-query').value,
+      replacement: $('find-replace').value,
+      scope: $('find-scope').value,
+      caseSensitive: $('find-case').checked
+    };
+  }
+
+  function renderFindResults(payload) {
+    const box = $('find-results');
+    box.innerHTML = '';
+    if (!payload.results.length) {
+      const empty = document.createElement('div');
+      empty.className = 'find-empty';
+      empty.textContent = `没有找到「${payload.query}」`;
+      box.appendChild(empty);
+      return;
+    }
+    for (const result of payload.results) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'find-result';
+      row.dataset.chapterId = result.chapterId;
+
+      const head = document.createElement('div');
+      const index = state.chapters.findIndex((chapter) => chapter.id === result.chapterId);
+      const chapterName = document.createElement('span');
+      chapterName.className = 'find-chapter';
+      chapterName.textContent = index >= 0 ? chapterTitle(index, result.name) : String(result.name || '');
+      const count = document.createElement('span');
+      count.className = 'find-count';
+      count.textContent = `${result.count} 处`;
+      head.append(chapterName, count);
+
+      const snippet = document.createElement('div');
+      snippet.className = 'find-snippet';
+      const first = result.matches[0];
+      if (first) {
+        snippet.appendChild(document.createTextNode(first.before || ''));
+        const mark = document.createElement('mark');
+        mark.textContent = first.match;
+        snippet.appendChild(mark);
+        snippet.appendChild(document.createTextNode(first.after || ''));
+      }
+      row.append(head, snippet);
+      row.addEventListener('click', () => jumpToFindResult(result));
+      box.appendChild(row);
+    }
+  }
+
+  async function jumpToFindResult(result) {
+    const index = state.chapters.findIndex((chapter) => chapter.id === result.chapterId);
+    if (index < 0) {
+      toast('这一章已经不存在了', 'warn');
+      return;
+    }
+    closeFindPanel();
+    if (index !== state.index) {
+      const switched = await switchChapter(index);
+      if (!switched || switched.ok === false) return;
+    }
+    const match = result.matches && result.matches[0];
+    if (!match) return;
+    editorEl.focus();
+    const start = Math.min(match.index, editorEl.value.length);
+    editorEl.setSelectionRange(start, Math.min(start + match.length, editorEl.value.length));
+    scrollCaretIntoView(start);
+  }
+
+  async function runFind() {
+    const options = readFindOptions();
+    if (!options.query.trim()) {
+      $('find-summary').textContent = '先在查找框里输入内容';
+      $('find-results').innerHTML = '';
+      return;
+    }
+    $('find-summary').textContent = '查找中…';
+    try {
+      if (options.scope === 'book') {
+        const payload = await call(api.searchBook, state.bookPath, {
+          query: options.query,
+          caseSensitive: options.caseSensitive
+        });
+        $('find-summary').textContent = payload.totalMatches
+          ? `整本命中 ${payload.totalMatches} 处，分布在 ${payload.chapterCount} 章（点结果跳过去）`
+          : `整本没有找到「${options.query}」`;
+        renderFindResults(payload);
+        return;
+      }
+      const res = await call(api.findInText, editorEl.value, options.query, {
+        caseSensitive: options.caseSensitive
+      });
+      $('find-results').innerHTML = '';
+      if (!res.count) {
+        $('find-summary').textContent = `本章没有找到「${options.query}」`;
+        return;
+      }
+      $('find-summary').textContent = `本章命中 ${res.count} 处（已选中第 1 处）`;
+      const first = res.matches[0];
+      editorEl.focus();
+      const start = Math.min(first.index, editorEl.value.length);
+      editorEl.setSelectionRange(start, Math.min(start + first.length, editorEl.value.length));
+      scrollCaretIntoView(start);
+    } catch (err) {
+      $('find-summary').textContent = `查找失败：${err.message}`;
+    }
+  }
+
+  // 当前章替换：走原生输入，保住 Ctrl+Z 撤销链；只改编辑区（未保存）
+  function replaceEditorText(text) {
+    editorEl.focus();
+    editorEl.setSelectionRange(0, editorEl.value.length);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, text);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted || editorEl.value !== text) editorEl.value = text;
+    editorEl.setSelectionRange(0, 0);
+    onEditorInput();
+  }
+
+  async function runReplaceAll() {
+    const options = readFindOptions();
+    if (!options.query.trim()) {
+      $('find-summary').textContent = '先在查找框里输入内容';
+      return;
+    }
+    if (options.scope === 'current') {
+      try {
+        const res = await call(api.replaceInText, editorEl.value, options.query, options.replacement, {
+          caseSensitive: options.caseSensitive
+        });
+        if (!res.count) {
+          $('find-summary').textContent = `本章没有找到「${options.query}」，未做替换`;
+          return;
+        }
+        replaceEditorText(res.text);
+        $('find-summary').textContent = `本章已替换 ${res.count} 处（还没保存：Ctrl+S 写盘，Ctrl+Z 可撤销）`;
+        toast(`本章替换 ${res.count} 处（未保存）`);
+      } catch (err) {
+        toast(`替换失败：${err.message}`, 'error');
+      }
+      return;
+    }
+
+    // 整本替换：先处理未保存修改，再确认，替换前由主进程备份原章节
+    if (state.dirty) {
+      const action = await askUnsaved({
+        title: '整本替换前先处理未保存的修改',
+        message: `「${currentChapterLabel()}」还有未保存的修改；整本替换会直接写盘，建议先保存。`
+      });
+      if (action === 'cancel') return;
+      if (action === 'save') {
+        const saved = await saveCurrent();
+        if (!saved.ok) return;
+      } else if (action === 'discard') {
+        await loadChapterAt(state.index); // 用磁盘上的旧内容继续
+      }
+    }
+
+    try {
+      const preview = await call(api.searchBook, state.bookPath, {
+        query: options.query,
+        caseSensitive: options.caseSensitive
+      });
+      if (!preview.totalMatches) {
+        $('find-summary').textContent = `整本没有找到「${options.query}」，未做替换`;
+        return;
+      }
+      const confirmed = await openModal({
+        title: '整本替换确认',
+        message: `将在 ${preview.chapterCount} 章里替换 ${preview.totalMatches} 处：\n「${options.query}」→「${options.replacement}」\n\n替换前会把原章节备份到书内 _trash/替换备份-时间戳/，可以人工找回。`,
+        buttons: [
+          { label: '取消', value: 'cancel' },
+          { label: '全部替换', value: 'ok', kind: 'primary' }
+        ],
+        cancelValue: 'cancel'
+      });
+      if (confirmed.action !== 'ok') return;
+      closeFindPanel();
+      const result = await call(api.replaceBook, state.bookPath, {
+        query: options.query,
+        replacement: options.replacement,
+        caseSensitive: options.caseSensitive
+      });
+      await loadChapterAt(state.index);
+      renderChapterList();
+      refreshShelf(); // 字数变了，书架统计后台刷新即可
+      toast(
+        `整本替换完成：${result.chaptersChanged} 章 / ${result.occurrences} 处${
+          result.backupDir ? ' · 原文已备份到 _trash' : ''
+        }`
+      );
+    } catch (err) {
+      toast(`整本替换失败：${err.message}`, 'error');
+    }
+  }
+
   // ---------- 排版 ----------
   // 「智能排版/一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
   const DEFAULT_FORMAT_OPTIONS = {
@@ -1533,6 +1864,23 @@
     $('btn-new-chapter').addEventListener('click', () => createChapterAt(state.chapters.length));
     $('btn-insert').addEventListener('click', () => createChapterAt(state.index + 1));
     $('btn-save').addEventListener('click', () => saveCurrent());
+    $('btn-find').addEventListener('click', openFindPanel);
+    $('btn-find-run').addEventListener('click', runFind);
+    $('btn-find-replace').addEventListener('click', runReplaceAll);
+    $('btn-find-close').addEventListener('click', closeFindPanel);
+    $('find-query').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        runFind();
+      }
+    });
+    $('find-replace').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        runReplaceAll();
+      }
+    });
+    setupChapterDrag();
     $('btn-export').addEventListener('click', (event) => {
       event.stopPropagation();
       toggleExportMenu();
@@ -1655,7 +2003,25 @@
         }
         return;
       }
+      // 查找面板：Esc 关、回车查找；其他按键继续往下走（Ctrl+S 仍可保存）
+      if (!$('find-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeFindPanel();
+          return;
+        }
+        if (event.key === 'Enter' && document.activeElement === $('find-query')) {
+          event.preventDefault();
+          runFind();
+          return;
+        }
+      }
       const ctrl = event.ctrlKey && !event.altKey && !event.shiftKey;
+      if (ctrl && String(event.key).toLowerCase() === 'f') {
+        event.preventDefault();
+        if (state.view === 'editor' && state.bookPath) openFindPanel();
+        return;
+      }
       if (ctrl && String(event.key).toLowerCase() === 'z') {
         // 「整理本章」留下的快照优先撤销；没有快照就让原生 Ctrl+Z 照常工作
         if (state.view === 'editor' && state.bookPath && undoFormat()) {
@@ -1775,6 +2141,32 @@
       undoFormat: () => undoFormat(),
       formatUndoDepth: () => state.formatUndo.length,
       applyDisplayPreset: (name) => setDisplayPreset(name),
+      // 查找替换 / 拖拽排序
+      openFindPanel: () => openFindPanel(),
+      closeFindPanel: () => closeFindPanel(),
+      findPanelOpen: () => !$('find-backdrop').classList.contains('hidden'),
+      setFindFields(fields) {
+        const f = fields || {};
+        if (typeof f.query === 'string') $('find-query').value = f.query;
+        if (typeof f.replacement === 'string') $('find-replace').value = f.replacement;
+        if (typeof f.scope === 'string') $('find-scope').value = f.scope;
+        if (typeof f.caseSensitive === 'boolean') $('find-case').checked = f.caseSensitive;
+      },
+      async findRun() {
+        return runFind();
+      },
+      async findReplaceAll() {
+        return runReplaceAll();
+      },
+      findSummary: () => $('find-summary').textContent,
+      findResultCount: () => $('find-results').querySelectorAll('.find-result').length,
+      clickFindResult(index) {
+        const rows = $('find-results').querySelectorAll('.find-result');
+        if (rows[index]) rows[index].click();
+      },
+      async moveChapterByDrag(from, to) {
+        return moveChapterByDrag(from, to);
+      },
       loadCustomFont: (fontPath) => loadCustomFont(fontPath, { silent: true }),
       customFontLoaded: () => ({ ...loadedCustomFont }),
       // 测试用：等价于「设置里选好字体文件 + 保存设置」的落库路径

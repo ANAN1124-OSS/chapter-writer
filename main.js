@@ -33,6 +33,7 @@ const repair = require('./core/repair');
 const importer = require('./core/importer');
 const exporter = require('./core/exporter');
 const formatLib = require('./core/format');
+const findLib = require('./core/find');
 
 let win = null;
 let configStore = null;
@@ -192,6 +193,25 @@ function registerIpc() {
     return formatLib.formatText(text, options);
   });
 
+  // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
+  handle('text:find', async (text, query, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    const matches = findLib.findMatches(text, query, options);
+    return {
+      count: matches.length,
+      matches: matches.slice(0, 12).map((match) => ({
+        index: match.index,
+        length: match.length,
+        ...findLib.makeSnippet(text, match.index, match.length, 18)
+      }))
+    };
+  });
+
+  handle('text:replace', async (text, query, replacement, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    return findLib.replaceAllLiteral(text, query, replacement, options);
+  });
+
   handle('chapter:save', async (bookPath, chapterId, text) => {
     return storage.withBookLock(bookPath, async () => {
       const meta = await storage.readBookMeta(bookPath);
@@ -241,6 +261,13 @@ function registerIpc() {
     storage.renameChapter(bookPath, chapterId, name)
   );
   handle('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId));
+  handle('chapter:move', async (bookPath, chapterId, toIndex) =>
+    storage.moveChapter(bookPath, chapterId, toIndex)
+  );
+
+  // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
+  handle('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
+  handle('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
 
   handle('book:export', async (bookPath) => {
     const meta = await storage.readBookMeta(bookPath);
@@ -483,6 +510,12 @@ async function runAutomation() {
           true
         );
         await sleep(400);
+      } else if (screenshotDialog === 'find') {
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.openFindPanel(); window.__cwTest.setFindFields({ query: '风', scope: 'book' }); window.__cwTest.findRun();`,
+          true
+        );
+        await sleep(900);
       }
       await sleep(500);
       const image = await win.webContents.capturePage();

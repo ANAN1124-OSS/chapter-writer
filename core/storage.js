@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { atomicWriteFile, writeJsonAtomic, stripBom } = require('./atomic');
 const chaptersLib = require('./chapters');
+const findLib = require('./find');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -408,6 +409,94 @@ async function deleteChapter(bookPath, chapterId) {
   };
 }
 
+// 拖拽排序：只改 书目.json 里的数组顺序，章节文件永不重命名（显示章号按数组顺序现算）
+async function moveChapter(bookPath, chapterId, toIndex) {
+  const meta = await readBookMeta(bookPath);
+  const from = chaptersLib.findChapterIndex(meta, chapterId);
+  if (from < 0) throw new StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+  const total = meta.chapters.length;
+  const to = Math.max(0, Math.min(Math.round(Number(toIndex) || 0), total - 1));
+  if (from === to) return { meta, moved: false, from, to };
+  const list = meta.chapters.slice();
+  const [moved] = list.splice(from, 1);
+  list.splice(to, 0, moved);
+  const saved = await writeBookMeta(bookPath, { ...meta, chapters: list });
+  return { meta: saved, moved: true, from, to };
+}
+
+async function loadTextOrSkip(bookPath, chapter) {
+  try {
+    return await loadChapterText(bookPath, chapter.file);
+  } catch (err) {
+    if (err.code === 'CHAPTER_MISSING') return null; // 缺文件的章节直接跳过，别让查找整个失败
+    throw err;
+  }
+}
+
+// 全书查找：逐章读正文，返回命中章节 + 前几处上下文（只读，不写盘）
+async function searchBook(bookPath, options = {}) {
+  const query = String(options.query == null ? '' : options.query);
+  if (!query.trim()) throw new StorageError('EMPTY_QUERY', '查找内容不能为空');
+  const caseSensitive = Boolean(options.caseSensitive);
+  const meta = await readBookMeta(bookPath);
+  const results = [];
+  let totalMatches = 0;
+  for (const chapter of meta.chapters) {
+    const loaded = await loadTextOrSkip(bookPath, chapter);
+    if (!loaded) continue;
+    const matches = findLib.findMatches(loaded.text, query, { caseSensitive });
+    if (!matches.length) continue;
+    totalMatches += matches.length;
+    results.push({
+      chapterId: chapter.id,
+      file: chapter.file,
+      name: chapter.name,
+      count: matches.length,
+      matches: matches.slice(0, 12).map((match) => ({
+        index: match.index,
+        length: match.length,
+        ...findLib.makeSnippet(loaded.text, match.index, match.length)
+      }))
+    });
+  }
+  return { query, caseSensitive, totalMatches, chapterCount: results.length, results };
+}
+
+// 全书替换：逐章字面量替换并写盘；写之前把原文件备份到书内 _trash/替换备份-时间戳/。
+// 这是作者显式点「全部替换」才发生的动作，和「打字不自动保存」不冲突。
+async function replaceInBook(bookPath, options = {}) {
+  const query = String(options.query == null ? '' : options.query);
+  const replacement = String(options.replacement == null ? '' : options.replacement);
+  const caseSensitive = Boolean(options.caseSensitive);
+  if (!query.trim()) throw new StorageError('EMPTY_QUERY', '查找内容不能为空');
+  const meta = await readBookMeta(bookPath);
+  const backupDir = path.join(bookPath, TRASH_DIR, `替换备份-${timestampForFile()}`);
+  let chaptersChanged = 0;
+  let occurrences = 0;
+  let backupCreated = false;
+  for (const chapter of meta.chapters) {
+    const loaded = await loadTextOrSkip(bookPath, chapter);
+    if (!loaded) continue;
+    const res = findLib.replaceAllLiteral(loaded.text, query, replacement, { caseSensitive });
+    if (!res.count) continue;
+    if (!backupCreated) {
+      await ensureDir(backupDir);
+      backupCreated = true;
+    }
+    await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
+    await saveChapterText(bookPath, chapter.file, res.text);
+    chapter.chars = chaptersLib.countChars(res.text);
+    chaptersChanged += 1;
+    occurrences += res.count;
+  }
+  if (chaptersChanged) await writeBookMeta(bookPath, meta);
+  return {
+    chaptersChanged,
+    occurrences,
+    backupDir: backupCreated ? backupDir : null
+  };
+}
+
 async function renameBook(bookPath, title) {
   const meta = await readBookMeta(bookPath);
   const nextTitle = String(title == null ? '' : title).trim() || meta.title;
@@ -477,6 +566,9 @@ module.exports = {
   createChapter: locked(createChapter),
   renameChapter: locked(renameChapter),
   deleteChapter: locked(deleteChapter),
+  moveChapter: locked(moveChapter),
+  searchBook,
+  replaceInBook: locked(replaceInBook),
   renameBook: locked(renameBook),
   trashBook,
   setLastOpenChapter: locked(setLastOpenChapter),

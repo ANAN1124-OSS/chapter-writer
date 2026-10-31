@@ -216,3 +216,92 @@ test('字数缓存：旧书首次扫描会补缓存，之后书架统计不再�
   const again = await storage.listBooks(root);
   assert.equal(again[0].totalChars, 6);
 });
+
+test('拖拽排序：只改书目顺序，章节文件一个都不改名', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '排序书');
+  let meta = await storage.readBookMeta(bookPath);
+  const firstId = meta.chapters[0].id;
+  await storage.createChapter(bookPath, 1, '第二章');
+  await storage.createChapter(bookPath, 2, '第三章');
+  meta = await storage.readBookMeta(bookPath);
+  const filesBefore = meta.chapters.map((c) => c.file);
+  const idsBefore = meta.chapters.map((c) => c.id);
+
+  // 把第 3 章拖到最前
+  const res = await storage.moveChapter(bookPath, idsBefore[2], 0);
+  assert.equal(res.moved, true);
+  assert.equal(res.from, 2);
+  assert.equal(res.to, 0);
+  const after = await storage.readBookMeta(bookPath);
+  assert.deepEqual(after.chapters.map((c) => c.id), [idsBefore[2], idsBefore[0], idsBefore[1]]);
+  assert.deepEqual(after.chapters.map((c) => c.file).sort(), filesBefore.slice().sort(), '文件名不能变');
+  // 顺序颠倒后，原文件内容还跟着它自己的章节走
+  await storage.saveChapterText(bookPath, after.chapters[0].file, '第三章的内容');
+  const loaded = await storage.loadChapterText(bookPath, after.chapters[0].file);
+  assert.equal(loaded.text, '第三章的内容');
+
+  // 越界目标被夹住；原地移动返回 moved=false
+  const clamped = await storage.moveChapter(bookPath, firstId, 999);
+  assert.equal(clamped.to, after.chapters.length - 1);
+  const noop = await storage.moveChapter(bookPath, firstId, clamped.to);
+  assert.equal(noop.moved, false);
+});
+
+test('全书查找：跨章统计命中，返回上下文；只读不写盘', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '查找书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '阿明走进屋里。\n阿明坐下。');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '这里没有那个人。');
+  await storage.createChapter(bookPath, 2, '第三章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[2].file, '阿明抬头看了看天。');
+
+  const res = await storage.searchBook(bookPath, { query: '阿明' });
+  assert.equal(res.totalMatches, 3);
+  assert.equal(res.chapterCount, 2);
+  assert.equal(res.results[0].count, 2);
+  assert.equal(res.results[1].name, '第三章');
+  assert.equal(res.results[0].matches[0].match, '阿明');
+  assert.ok(res.results[0].matches[0].after.includes('走进'));
+
+  const none = await storage.searchBook(bookPath, { query: '不存在的人' });
+  assert.equal(none.totalMatches, 0);
+  await assert.rejects(() => storage.searchBook(bookPath, { query: '  ' }), /不能为空/);
+});
+
+test('全书替换：先备份原文件到 _trash，再原子写盘并更新字数缓存', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '替换书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '阿明说：阿明走了。');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '阿明回头。');
+  meta = await storage.readBookMeta(bookPath);
+  const firstFile = meta.chapters[0].file;
+  const secondFile = meta.chapters[1].file;
+
+  const res = await storage.replaceInBook(bookPath, { query: '阿明', replacement: '小明' });
+  assert.equal(res.chaptersChanged, 2);
+  assert.equal(res.occurrences, 3);
+  assert.ok(res.backupDir && res.backupDir.includes('替换备份-'));
+  // 备份里是替换前的原文
+  const backupText = await fs.readFile(path.join(res.backupDir, firstFile), 'utf8');
+  assert.equal(backupText, '阿明说：阿明走了。');
+  // 新内容已落盘（CRLF）
+  const raw = await fs.readFile(path.join(bookPath, firstFile), 'utf8');
+  assert.equal(raw, '小明说：小明走了。');
+  assert.equal((await storage.loadChapterText(bookPath, secondFile)).text, '小明回头。');
+  // 书目里的字数缓存跟着更新
+  const updated = await storage.readBookMeta(bookPath);
+  assert.equal(updated.chapters[0].chars, 9);
+  assert.equal(updated.chapters[1].chars, 5);
+  // 不命中的替换不产生备份目录
+  const res2 = await storage.replaceInBook(bookPath, { query: '不存在', replacement: 'x' });
+  assert.equal(res2.chaptersChanged, 0);
+  assert.equal(res2.backupDir, null);
+});
