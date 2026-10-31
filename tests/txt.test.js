@@ -85,14 +85,45 @@ test('原样切章：章名照抄原文标题、正文不做 trim', () => {
   assert.equal(parts[1].body, '\n正文二\n');
 });
 
-test('原样切章：开头有引子时单独成「开篇」，原文标题保留空白差异', () => {
+test('原样切章：开头有书名/引子时并入第一章正文，不多出「开篇」章', () => {
   const text = '书名：测试\n作者：某人\n\n　　楔子\n\n引子内容\n\n第1章 开端\n\n正文一';
   const parts = splitChaptersRaw(text);
-  assert.equal(parts.length, 3);
-  assert.equal(parts[0].title, '开篇');
-  assert.equal(parts[0].body, '书名：测试\n作者：某人\n');
-  assert.equal(parts[1].title, '楔子');
-  assert.equal(parts[2].title, '第1章 开端');
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0].title, '楔子');
+  assert.ok(parts[0].body.includes('书名：测试'));
+  assert.ok(parts[0].body.includes('引子内容'));
+  assert.equal(parts[1].title, '第1章 开端');
+});
+
+test('标题识别扩展：第X幕 / 第X话 / 番外（1）/ 前言（无色）/ 尾声】 / 长标题', () => {
+  assert.equal(parseHeading('第一幕 穿越为白发金眸小龙娘！').name, '穿越为白发金眸小龙娘！');
+  assert.equal(parseHeading('第3话 某个日常').name, '某个日常');
+  assert.ok(parseHeading('番外（1）'));
+  assert.ok(parseHeading('番外篇：后日谈'));
+  assert.ok(parseHeading('前言（无色）'));
+  assert.ok(parseHeading('尾声】（纯剧情，无H内容）'));
+  assert.ok(parseHeading('后记和设定说明'));
+  assert.ok(parseHeading('附录：设定集'));
+  // 各种奇怪但真实的标题写法
+  assert.ok(parseHeading('附录，兔女郎的酒吧密会'));
+  assert.ok(parseHeading('尾声？：'));
+  assert.ok(parseHeading('后记。'));
+  assert.ok(parseHeading('番外·终:马屌比赛的结局'));
+  assert.ok(parseHeading('第四章;转生成铃兰小姐后，为了还债只能被迫在浴馆中打工'));
+  assert.ok(parseHeading('番外，目前可以解锁的素世的调教表格：'));
+  // 有分隔符的长标题（很多网文标题上百字）也应识别
+  const longTitle = `第2章  ${'照顾男友一起按摩的清纯少女'.repeat(4)}`;
+  assert.ok(parseHeading(longTitle));
+  assert.ok(parseHeading(longTitle).name.length > 30);
+});
+
+test('正文长句不会被当成标题', () => {
+  assert.equal(isChapterHeading('第三节课结束时，大部分学生已经如同从水里捞出来一般，瘫在各自狼藉的座位上。'), false);
+  assert.equal(isChapterHeading('第三节课上，老师讲的内容我一个字也没听进去。'), false);
+  assert.equal(isChapterHeading('尾声的序章，便是菈妮丝代表蔷薇骑士团，为岚等三人献上了蔷薇骑士团的信物徽章。'), false);
+  assert.equal(isChapterHeading('第二节课后，紫萱又靠了过来，身上那股浓郁的雌性荷尔蒙媚香立刻把我包围了。'), false);
+  // 没有分隔符但很短：仍可能是标题
+  assert.ok(parseHeading('第一章男朋友（无色）'));
 });
 
 test('原样切章：没有标题行时整本一章、正文原样', () => {

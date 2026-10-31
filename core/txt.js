@@ -1,10 +1,26 @@
 // 纯文本小说解析：编码识别 + 章节切分。
-// 给「导入小说」用：一个 txt 就是一本书时，按「第X章 / 楔子 / Chapter N」等标题行切章。
+// 给「导入小说」用：一个 txt 就是一本书时，按「第X章 / 第X幕 / 楔子 / 番外 / Chapter N」等标题行切章。
+// 注意：标题识别只决定「在哪里切」，章节名一律保留原文标题行，不改写作者的字。
 const CHAPTER_NUM_RE =
-  /^\s*第\s*([0-9零〇一二三四五六七八九十百千万两]{1,12})\s*([章节回卷集篇部])\s*([：:、.．\-—–”"'‘’\s]*)(.*)$/;
+  /^\s*第\s*([0-9零〇一二三四五六七八九十百千万两]{1,12})\s*([章节回卷集篇部话幕])([\s\S]*)$/;
 const CHAPTER_KEY_RE =
-  /^\s*(楔子|序章|序言|引子|前言|尾声|后记|番外|终章|大结局|Chapter\s+\d+)(?:\s*[：:、.．\-—–”"'‘’]+\s*|\s+|$)(.*)$/i;
-const MAX_HEADING_LENGTH = 80;
+  /^\s*(楔子|序章|序言|引子|前言|前传|外传|尾声|后记|番外篇?|终章|大结局|附录|Chapter\s+\d+)([\s\S]*)$/i;
+
+// 标题行允许的长度上限（极长的一行更可能是正文，直接排除）
+const MAX_HEADING_LENGTH = 300;
+// 「第X章」后面没有分隔符、直接接文字时，只接受较短的行（避免把「第三节课结束时……」这种正文当成标题）
+const MAX_NO_SEPARATOR_TITLE = 80;
+// 「楔子 / 番外 / 前言」这类没有编号的关键词标题，无分隔符时行长度上限（如「后记和设定说明」）
+const MAX_KEYWORD_HEADING = 40;
+
+// 「第X章」后面的分隔符（不带逗号句号，避免把「第一章，他……」这种正文当标题）
+const NUM_SEPARATORS = /^[：:、.．\-—–”"'‘’】）》」』（(【《「『，,;；\s]/;
+// 关键词标题（楔子/番外/后记…）后面的分隔符可以更宽，因为关键词本身已经很明确
+const KEY_SEPARATORS = /^[：:、.．\-—–”"'‘’】）》」』（(【《「『，,;；。!！?？·…\s]/;
+// 关键词标题后面没有分隔符时，只有这些开头才像标题；
+// 「尾声的序章，便是…」「引子内容」这类是正文，不能当标题。
+const KEYWORD_NO_SEPARATOR_OK =
+  /^(?:[0-9０-９零〇一二三四五六七八九十百千万两]+[.、．]?|[和与及、·\-—–][\s\S]*)/;
 
 const BOM_UTF8 = Buffer.from([0xef, 0xbb, 0xbf]);
 const BOM_UTF16LE = Buffer.from([0xff, 0xfe]);
@@ -40,20 +56,43 @@ function normalizeText(text) {
   return stripBom(text).replace(/\r\n?/g, '\n');
 }
 
+function trimLeadingPunctuation(text) {
+  return String(text || '')
+    .replace(/^[：:、.．\-—–”"'‘’】）》」』（(【《「『，,;；。!！?？·…\s]+/, '')
+    .trim();
+}
+
 // 判断一行是不是章节标题；返回 { kind, name } 或 null
 function parseHeading(line) {
   const raw = String(line == null ? '' : line);
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > MAX_HEADING_LENGTH) return null;
-  const numMatch = CHAPTER_NUM_RE.exec(raw);
+
+  const numMatch = CHAPTER_NUM_RE.exec(trimmed);
   if (numMatch) {
-    const name = String(numMatch[4] || '').trim();
-    return { kind: 'num', raw: trimmed, name };
+    const restRaw = numMatch[3] || '';
+    const marker = numMatch[2];
+    const hasSeparator = restRaw === '' || NUM_SEPARATORS.test(restRaw);
+    if (!hasSeparator) {
+      // 「第三节课…」「第二节课后…」是正文常用说法，不是章节标题
+      if (marker === '节' && restRaw.startsWith('课')) return null;
+      // 没有分隔符又很长：基本是正文句子
+      if (trimmed.length > MAX_NO_SEPARATOR_TITLE) return null;
+    }
+    return { kind: 'num', raw: trimmed, name: trimLeadingPunctuation(restRaw) };
   }
-  const keyMatch = CHAPTER_KEY_RE.exec(raw);
+
+  const keyMatch = CHAPTER_KEY_RE.exec(trimmed);
   if (keyMatch) {
     const keyword = String(keyMatch[1] || '').trim();
-    const rest = String(keyMatch[2] || '').trim();
+    const restRaw = keyMatch[2] || '';
+    const hasSeparator = restRaw === '' || KEY_SEPARATORS.test(restRaw);
+    if (!hasSeparator) {
+      // 没有分隔符时只接受「后记和设定说明」这类短标题，拒绝「尾声的序章，便是…」这类正文
+      if (!KEYWORD_NO_SEPARATOR_OK.test(restRaw)) return null;
+      if (trimmed.length > MAX_KEYWORD_HEADING) return null;
+    }
+    const rest = trimLeadingPunctuation(restRaw);
     return { kind: 'key', raw: trimmed, name: rest ? `${keyword} ${rest}` : keyword };
   }
   return null;
@@ -69,7 +108,7 @@ function headingToName(line) {
   return parsed ? parsed.name : '';
 }
 
-// 把整本书文本切成 [{ title, text }]
+// 把整本书文本切成 [{ title, text }]（旧版自动分章用）
 function splitChapters(text) {
   const normalized = normalizeText(text);
   const lines = normalized.split('\n');
@@ -98,9 +137,10 @@ function splitChapters(text) {
 }
 
 // 把整本书文本按原文标题行切成 [{ title, body }]：
-// title = 原文标题行（去掉首尾空白），body = 标题行之后到下一标题行之前的原文（不做 trim，保留空行）
+// title = 原文标题行（去掉首尾空白），body = 该标题之后到下一标题之前的原文（不做 trim，保留空行）。
 // 用于「按原文章节导入」：章名和正文都保持原样。
-function splitChaptersRaw(text, { prefaceTitle = '开篇' } = {}) {
+// 第一个标题之前的书名/作者/简介等，会并入第一章正文，避免多出一个原文没有的「开篇」章。
+function splitChaptersRaw(text) {
   const normalized = stripBom(String(text == null ? '' : text)).replace(/\r\n?/g, '\n');
   const lines = normalized.split('\n');
   const marks = [];
@@ -112,13 +152,13 @@ function splitChaptersRaw(text, { prefaceTitle = '开篇' } = {}) {
   if (!marks.length) return [{ title: '', body: normalized }];
 
   const parts = [];
-  if (marks[0].index > 0) {
-    parts.push({ title: prefaceTitle, body: lines.slice(0, marks[0].index).join('\n') });
-  }
+  const preface = marks[0].index > 0 ? lines.slice(0, marks[0].index).join('\n') : '';
   for (let i = 0; i < marks.length; i += 1) {
     const start = marks[i].index + 1;
     const end = i + 1 < marks.length ? marks[i + 1].index : lines.length;
-    parts.push({ title: marks[i].title, body: lines.slice(start, end).join('\n') });
+    let body = lines.slice(start, end).join('\n');
+    if (i === 0 && preface.trim()) body = `${preface}\n${body}`;
+    parts.push({ title: marks[i].title, body });
   }
   return parts;
 }
@@ -131,5 +171,7 @@ module.exports = {
   headingToName,
   splitChapters,
   splitChaptersRaw,
-  MAX_HEADING_LENGTH
+  MAX_HEADING_LENGTH,
+  MAX_NO_SEPARATOR_TITLE,
+  MAX_KEYWORD_HEADING
 };

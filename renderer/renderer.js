@@ -44,7 +44,7 @@
   // 章节标题显示规则（与 core/chapters.js 的 formatTitle 保持一致）：
   // 原文自带章节标题（第1章 / 楔子 / Chapter N…）原样显示；没有名字显示「第N章」；其余显示「第N章：名字」
   const RAW_TITLE_RE =
-    /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部]|楔子|序章|序言|引子|前言|尾声|后记|番外|终章|大结局|开篇|Chapter\s+\d+)/i;
+    /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部话幕]|楔子|序章|序言|引子|前言|前传|外传|尾声|后记|番外|终章|大结局|附录|开篇|Chapter\s+\d+)/i;
 
   function chapterTitle(index, name) {
     const clean = String(name == null ? '' : name).trim();
