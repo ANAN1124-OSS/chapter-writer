@@ -846,3 +846,127 @@ test('listBooks：损坏书目的书也带冲突副本提示（方便先修书�
   assert.equal(listed.status, 'corrupt');
   assert.deepEqual(listed.conflicts, ['书目 (conflicted copy 1).json']);
 });
+
+// ---------- 多窗口：打开登记 + 保存前校验 + 跨窗口拦截 ----------
+function resetRegistry() {
+  storage.openBookRegistry.reset();
+}
+
+test('保存前校验：正常书 / 章返回 meta 与章节，允许保存', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '保存校验');
+  const meta = await storage.readBookMeta(bookPath);
+  const prepared = await storage.prepareChapterSave(bookPath, meta.chapters[0].id);
+  assert.equal(prepared.chapter.id, meta.chapters[0].id);
+  assert.equal(prepared.chapter.file, '001-未命名.txt');
+  assert.equal(prepared.index, 0);
+});
+
+test('保存前校验：章节文件被删掉 → CHAPTER_MISSING，绝不重建影子 txt', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '缺章书');
+  const meta = await storage.readBookMeta(bookPath);
+  const file = meta.chapters[0].file;
+  await fs.unlink(path.join(bookPath, file));
+  const before = (await fs.readdir(bookPath)).sort();
+  await assert.rejects(
+    () => storage.prepareChapterSave(bookPath, meta.chapters[0].id),
+    (err) => err.code === 'CHAPTER_MISSING' && /影子文件/.test(err.message)
+  );
+  assert.deepEqual((await fs.readdir(bookPath)).sort(), before);
+  assert.equal(await storage.exists(path.join(bookPath, file)), false);
+});
+
+test('保存前校验：书文件夹被删掉 → BOOK_MISSING，绝不 mkdir 重建目录', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '整本没了');
+  const meta = await storage.readBookMeta(bookPath);
+  await fs.rm(bookPath, { recursive: true, force: true });
+  await assert.rejects(
+    () => storage.prepareChapterSave(bookPath, meta.chapters[0].id),
+    (err) => err.code === 'BOOK_MISSING'
+  );
+  assert.equal(await storage.exists(bookPath), false);
+});
+
+test('保存前校验：章节从书目里删掉 → CHAPTER_NOT_FOUND', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '章没了');
+  const meta = await storage.readBookMeta(bookPath);
+  const removedId = meta.chapters[0].id;
+  await storage.deleteChapter(bookPath, removedId);
+  await assert.rejects(
+    () => storage.prepareChapterSave(bookPath, removedId),
+    (err) => err.code === 'CHAPTER_NOT_FOUND'
+  );
+});
+
+test('保存前校验：书目损坏 → 明确报错，不写盘', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '书目坏了');
+  const meta = await storage.readBookMeta(bookPath);
+  await fs.writeFile(path.join(bookPath, '书目.json'), '{ 坏掉了', 'utf8');
+  await assert.rejects(
+    () => storage.prepareChapterSave(bookPath, meta.chapters[0].id),
+    (err) => err.code === 'PARSE_ERROR'
+  );
+});
+
+test('跨窗口拦截：别的窗口开着的书拒绝保存 / 删除 / 改名 / 整理', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '跨窗口书');
+  const meta = await storage.readBookMeta(bookPath);
+  storage.registerOpenBook(1, bookPath);
+  assert.equal(storage.findOpenBookWindow(bookPath), '1');
+  for (const action of ['save', 'delete', 'rename', 'format']) {
+    await assert.rejects(
+      () => Promise.resolve().then(() => storage.assertBookNotBusy(bookPath, 2, action)),
+      (err) => err.code === 'CROSS_WINDOW_BUSY' && /请先关掉另一个窗口/.test(err.message),
+      action
+    );
+  }
+  // 自己窗口不受影响，保存校验也能通过
+  assert.equal(storage.assertBookNotBusy(bookPath, 1, 'save'), true);
+  await storage.prepareChapterSave(bookPath, meta.chapters[0].id, { windowId: 1 });
+  // 释放后另一个窗口就能操作了
+  storage.releaseOpenBook(1);
+  assert.equal(storage.findOpenBookWindow(bookPath), null);
+  await storage.prepareChapterSave(bookPath, meta.chapters[0].id, { windowId: 2 });
+});
+
+test('跨窗口拦截：删除书后按路径清掉登记', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '删掉的书');
+  storage.registerOpenBook(3, bookPath);
+  assert.equal(storage.findOpenBookWindow(bookPath), '3');
+  assert.equal(storage.releaseOpenBookPath(bookPath), true);
+  assert.equal(storage.findOpenBookWindow(bookPath), null);
+  assert.equal(storage.openBookRegistry.getBook(3), null);
+  assert.equal(storage.releaseOpenBookPath(bookPath), false);
+});
+
+test('ensureDir:false：目录不在时原子写直接失败，不会创建目录 / 临时文件', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const targetDir = path.join(root, '不存在的书');
+  const target = path.join(targetDir, '001-未命名.txt');
+  await assert.rejects(() => storage.saveChapterText(targetDir, '001-未命名.txt', '不该落盘', { ensureDir: false }));
+  assert.equal(await storage.exists(targetDir), false);
+  assert.equal(await storage.exists(target), false);
+});
+
+test('ensureDir:false：目录存在时照常原子写（保存校验通过后的正常路径）', async () => {
+  resetRegistry();
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '正常写');
+  const meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '正文', { ensureDir: false });
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '正文');
+});

@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('api', {
   appVersion: () => invoke('app:version'),
   appWarning: () => invoke('app:warning'),
   getRecentBook: () => invoke('app:recent-book'),
+  // 多窗口：这个窗口的会话信息 / 在新窗口打开书 / 回书架时释放「打开中的书」登记
+  windowInfo: () => invoke('window:info'),
+  openBookInNewWindow: (bookPath) => invoke('window:open-book', bookPath),
+  releaseBook: () => invoke('window:release-book'),
   listBooks: () => invoke('books:list'),
   createBook: (title) => invoke('book:create', title),
   openBook: (bookPath) => invoke('book:open', bookPath),
@@ -111,6 +115,10 @@ contextBridge.exposeInMainWorld('api', {
 
   onCloseRequested: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());
+  },
+  // 书架数据变了（别的窗口新建 / 删除 / 保存 / 整理）：停在书架的窗口跟着刷新
+  onShelfChanged: (cb) => {
+    if (typeof cb === 'function') ipcRenderer.on('shelf:changed', (_event, info) => cb(info));
   },
   onImportProgress: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('import:progress', (_event, progress) => cb(progress));

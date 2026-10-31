@@ -3,6 +3,7 @@
 const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen, net } = require('electron');
 
 // ---------- 启动参数（自动化/隔离用，正常用户启动不受影响） ----------
@@ -46,20 +47,180 @@ const ttsLib = require('./core/tts');
 const logsLib = require('./core/logs');
 const searchIndexLib = require('./core/search-index');
 const updateLib = require('./core/update');
+const openBooksLib = require('./core/open-books');
 
-let win = null;
+// ---------- 多窗口会话 ----------
+// 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
+// 脏状态、关闭状态、进度事件目标。窗口对象、窗口 id、webContents id 三张表互相对应；
+// IPC 处理函数用 AsyncLocalStorage 记住「这次调用来自哪个窗口」，弹窗 / 进度事件按窗口路由。
+let automationWin = null; // 仅截图 / E2E 驱动用（第一个窗口）；生产逻辑一律按会话路由
+const windowSessions = new Map(); // windowId(number) -> session
+const webContentsSessions = new Map(); // webContents.id(number) -> session
+const ipcFlow = new AsyncLocalStorage();
+// E2E：close-ready 回执按窗口记录；isE2E 下默认不真的关窗口，'真实关窗'模式用于多窗口用例
+const e2eCloseReadyByWindow = new Map();
+let e2eLastCloseReady = undefined;
+let e2eRealClose = false;
+let e2eWindowAllClosed = false;
+
 let configStore = null;
 let config = null;
 let statsStore = null; // 每日字数统计（userData/stats.json，绝不写书库）
 let configWarning = null; // 配置损坏被归档时的提示，界面启动后取一次
-let forceClose = false;
-let closePending = false;
-let closeTimer = null;
-let e2eCloseReady = undefined;
-let rendererDirty = false;
 // 正常使用时就是 Electron 的系统剪贴板；只有 E2E 在锁屏/无交互桌面环境（系统剪贴板
 // 拒绝所有读写）时会临时换成进程内剪贴板，见 createE2EClipboard()。
 let activeClipboard = clipboard;
+
+// ---------- 窗口会话工具 ----------
+function createSession(browserWin) {
+  const session = {
+    id: browserWin.id,
+    win: browserWin,
+    dirty: false,
+    closePending: false,
+    closeTimer: null,
+    forceClose: false,
+    boundsTimer: null,
+    e2eCloseReady: undefined
+  };
+  windowSessions.set(session.id, session);
+  webContentsSessions.set(browserWin.webContents.id, session);
+  try {
+    storage.openBookRegistry.registerWindow(session.id);
+  } catch {
+    /* 登记失败也不影响开窗口；跨窗口检查会退化成「没有开着的书」 */
+  }
+  return session;
+}
+
+function sessionOfWindow(browserWin) {
+  if (!browserWin || browserWin.isDestroyed()) return null;
+  return windowSessions.get(browserWin.id) || null;
+}
+
+function sessionOfSender(event) {
+  if (!event || !event.sender) return null;
+  return webContentsSessions.get(event.sender.id) || null;
+}
+
+function sessionById(windowId) {
+  const id = Number(windowId);
+  if (!Number.isFinite(id)) return null;
+  const session = windowSessions.get(id);
+  return session && !session.win.isDestroyed() ? session : null;
+}
+
+function flowSession() {
+  const store = ipcFlow.getStore();
+  if (!store) return null;
+  return sessionById(store.windowId);
+}
+
+function mostRecentSession() {
+  const recentId = storage.openBookRegistry.mostRecentWindow();
+  const recent = recentId ? sessionById(recentId) : null;
+  if (recent) return recent;
+  // 兜底：登记表异常时取最后创建且还活着的窗口
+  let last = null;
+  for (const session of windowSessions.values()) {
+    if (!session.win.isDestroyed()) last = session;
+  }
+  return last;
+}
+
+// 当前 IPC 调用所属窗口；没有上下文（主进程内部触发）时退回最近使用的窗口
+function liveSession() {
+  return flowSession() || mostRecentSession();
+}
+
+function webContentsAlive(session) {
+  return Boolean(
+    session &&
+      !session.win.isDestroyed() &&
+      session.win.webContents &&
+      !session.win.webContents.isDestroyed()
+  );
+}
+
+function sendToSession(session, channel, payload) {
+  if (!webContentsAlive(session)) return false;
+  try {
+    session.win.webContents.send(channel, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sendToFlow(channel, payload) {
+  const session = liveSession();
+  if (session) return sendToSession(session, channel, payload);
+  return false;
+}
+
+function broadcast(channel, payload, { except = null } = {}) {
+  const skip = except == null ? null : String(except);
+  for (const session of windowSessions.values()) {
+    if (skip && String(session.id) === skip) continue;
+    sendToSession(session, channel, payload);
+  }
+}
+
+function focusSession(session) {
+  if (!session || session.win.isDestroyed()) return false;
+  try {
+    if (session.win.isMinimized()) session.win.restore();
+    session.win.show();
+    session.win.focus();
+    if (session.win.flashFrame) session.win.flashFrame(true);
+    storage.openBookRegistry.touch(session.id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 系统对话框的父窗口：发起这次 IPC 的窗口；没有就退回最近使用的窗口
+function dialogParent() {
+  const session = liveSession();
+  if (session && !session.win.isDestroyed()) return session.win;
+  return null;
+}
+
+function showOpenDialog(options) {
+  const parent = dialogParent();
+  return parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options);
+}
+
+function showSaveDialog(options) {
+  const parent = dialogParent();
+  return parent ? dialog.showSaveDialog(parent, options) : dialog.showSaveDialog(options);
+}
+
+function showMessageBox(options, parent = dialogParent()) {
+  return parent && !parent.isDestroyed()
+    ? dialog.showMessageBox(parent, options)
+    : dialog.showMessageBox(options);
+}
+
+// 书架数据变了：其它窗口若正停在书架就刷新；在写作页的窗口回书架时会自己刷新
+function notifyShelfChanged(session, reason = '') {
+  broadcast('shelf:changed', { reason }, { except: session ? session.id : null });
+}
+
+// 只保存「最近使用的窗口」的位置 / 大小（下次启动按它恢复）
+async function saveRecentWindowBounds(session) {
+  if (!session || session.win.isDestroyed()) return false;
+  const recentId = storage.openBookRegistry.mostRecentWindow();
+  if (recentId && String(recentId) !== String(session.id) && windowSessions.size > 1) return false;
+  try {
+    await configStore.set({ windowBounds: session.win.getBounds() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 
 // ---------- 崩溃 / 错误日志（提案 7.4） ----------
 // 只记元数据（时间 / 类型 / 错误码 / IPC 频道 / 路径 / 栈 / 版本），绝不传正文；
@@ -114,14 +275,13 @@ function notifyInternalError(kind, err) {
     const described = logsLib.describeError(err);
     console.error(`[${kind}]`, described.code || '', described.message);
     logError(kind, err);
-    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
-      win.webContents.send('app:internal-error', {
-        kind,
-        code: described.code || '',
-        message: INTERNAL_ERROR_TEXT[kind] || INTERNAL_ERROR_TEXT.uncaughtException,
-        time: new Date().toISOString()
-      });
-    }
+    // 所有窗口都提示一句固定文案（哪个窗口都可能正开着稿子）
+    broadcast('app:internal-error', {
+      kind,
+      code: described.code || '',
+      message: INTERNAL_ERROR_TEXT[kind] || INTERNAL_ERROR_TEXT.uncaughtException,
+      time: new Date().toISOString()
+    });
   } catch {
     /* 处理错误时再抛错就真没救了：吞掉 */
   }
@@ -163,13 +323,14 @@ function getSearchIndexStore() {
 }
 
 function sendSearchProgress(info) {
-  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return;
+  const session = liveSession();
+  if (!session) return;
   const now = Date.now();
   // 进度事件很密：除「完成」外 120ms 合并一次（渲染层只需要大致进度）
   if (info && info.phase !== 'done' && now - searchProgressAt < 120) return;
   searchProgressAt = now;
   try {
-    win.webContents.send('search:progress', info);
+    sendToSession(session, 'search:progress', info);
   } catch {
     /* 进度事件丢了不影响建索引 */
   }
@@ -237,19 +398,26 @@ function fail(err, channel) {
   return { ok: false, code, message };
 }
 
-// 只接受来自我们自己窗口的 IPC（防止将来引入 webview / 远程内容后越权）
+// 只接受来自本应用管理的窗口的 IPC（防止将来引入 webview / 远程内容后越权）
 function isTrustedSender(event) {
-  return Boolean(win && !win.isDestroyed() && event && event.sender === win.webContents);
+  return Boolean(sessionOfSender(event));
+}
+
+function runInWindowFlow(session, fn) {
+  return ipcFlow.run({ windowId: session.id }, fn);
 }
 
 function handle(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
-    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
-    try {
-      return ok(await fn(...args));
-    } catch (err) {
-      return fail(err, channel);
-    }
+    const session = sessionOfSender(event);
+    if (!session) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
+    return runInWindowFlow(session, async () => {
+      try {
+        return ok(await fn(...args));
+      } catch (err) {
+        return fail(err, channel);
+      }
+    });
   });
 }
 
@@ -264,15 +432,25 @@ function assertBookPath(bookPath, booksRoot) {
   return target;
 }
 
-function handleBook(channel, fn) {
+// mutation：写书的操作（save / delete / rename / format / replace / write）。
+// 有值时统一做跨窗口拦截：别的窗口正开着这本书 → 拒绝并提示先关 / 先切过去。
+function handleBook(channel, fn, { mutation = null } = {}) {
   ipcMain.handle(channel, async (event, bookPath, ...args) => {
-    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
-    try {
-      const cfg = await getConfig();
-      return ok(await fn(assertBookPath(bookPath, cfg.booksRoot), ...args));
-    } catch (err) {
-      return fail(err, channel);
-    }
+    const session = sessionOfSender(event);
+    if (!session) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
+    return runInWindowFlow(session, async () => {
+      try {
+        const cfg = await getConfig();
+        const target = assertBookPath(bookPath, cfg.booksRoot);
+        if (mutation) storage.assertBookNotBusy(target, session.id, mutation);
+        const result = await fn(target, ...args);
+        // 书架数据可能变了（字数 / 章节 / 书名）：其它窗口的书架跟着刷新
+        if (mutation && channel !== 'book:set-last') notifyShelfChanged(session, channel);
+        return ok(result);
+      } catch (err) {
+        return fail(err, channel);
+      }
+    });
   });
 }
 
@@ -359,64 +537,118 @@ function clampBounds(bounds) {
   }
 }
 
-// ---------- 关闭流程（保存失败不静默退出） ----------
-function setupCloseFlow() {
-  win.on('close', (event) => {
-    if (forceClose) return;
+// ---------- 关闭流程（每个窗口各自拦截；保存失败不静默退出） ----------
+function setupCloseFlow(session) {
+  const browserWin = session.win;
+  browserWin.on('close', (event) => {
+    if (session.forceClose) return;
     event.preventDefault();
-    if (closePending) return;
-    closePending = true;
+    if (session.closePending) return;
+    session.closePending = true;
     try {
-      win.webContents.send('app:close-requested');
+      browserWin.webContents.send('app:close-requested');
     } catch {
+      session.closePending = false;
       return;
     }
-    clearTimeout(closeTimer);
-    closeTimer = setTimeout(async () => {
-      if (!closePending || !win || win.isDestroyed()) return;
-      const { response } = await dialog.showMessageBox(win, {
-        type: 'warning',
-        title: '编辑器无响应',
-        message: '保存流程没有在 3 秒内完成。',
-        detail: '继续等待通常更安全；强制退出可能丢失未保存的内容。',
-        buttons: ['继续等待', '强制退出'],
-        defaultId: 0,
-        cancelId: 0
-      });
+    clearTimeout(session.closeTimer);
+    session.closeTimer = setTimeout(async () => {
+      if (!session.closePending || browserWin.isDestroyed()) return;
+      const { response } = await showMessageBox(
+        {
+          type: 'warning',
+          title: '编辑器无响应',
+          message: '保存流程没有在 3 秒内完成。',
+          detail: '继续等待通常更安全；强制退出可能丢失未保存的内容。',
+          buttons: ['继续等待', '强制退出'],
+          defaultId: 0,
+          cancelId: 0
+        },
+        browserWin
+      );
       if (response === 1) {
-        closePending = false;
-        forceClose = true;
-        if (win && !win.isDestroyed()) win.destroy();
+        session.closePending = false;
+        session.forceClose = true;
+        if (!browserWin.isDestroyed()) browserWin.destroy();
       } else {
-        closePending = false;
+        session.closePending = false;
       }
     }, 3000);
   });
+}
 
+// 关闭回执 / 脏状态上报只注册一次，按发送方窗口路由（多窗口各管各的）
+function setupCloseIpc() {
   ipcMain.on('app:close-ready', async (event, allowed) => {
-    if (!win || event.sender !== win.webContents) return;
-    closePending = false;
-    clearTimeout(closeTimer);
+    const session = sessionOfSender(event);
+    if (!session) return;
+    session.closePending = false;
+    clearTimeout(session.closeTimer);
+    const okToClose = Boolean(allowed);
+    session.e2eCloseReady = okToClose;
+    e2eLastCloseReady = okToClose;
     if (isE2E) {
-      e2eCloseReady = Boolean(allowed);
+      // 默认只记回执、不真的关窗（既有 646 项依赖窗口继续存在）；
+      // 多窗口用例显式打开「真实关窗」模式再关。
+      e2eCloseReadyByWindow.set(String(session.id), okToClose);
+      if (!e2eRealClose || !okToClose) return;
+    } else if (!okToClose) {
       return;
     }
-    if (!allowed) return;
-    try {
-      await configStore.set({ windowBounds: win.getBounds() });
-    } catch { /* 保存窗口位置失败不影响退出 */ }
-    forceClose = true;
-    if (win && !win.isDestroyed()) win.close();
+    // 只记「最近使用的窗口」的位置 / 大小；关一个非最近窗口不覆盖它
+    await saveRecentWindowBounds(session);
+    if (session.win.isDestroyed()) return;
+    session.forceClose = true;
+    session.win.close();
   });
 
-  // 渲染层上报「是否有未保存修改」，供 Windows 关机拦截判断
+  // 渲染层上报「是否有未保存修改」，供 Windows 关机拦截判断（按窗口记录）
   ipcMain.on('app:dirty', (event, dirty) => {
-    if (win && event.sender === win.webContents) rendererDirty = Boolean(dirty);
+    const session = sessionOfSender(event);
+    if (session) session.dirty = Boolean(dirty);
   });
 }
 
 // ---------- IPC ----------
 function registerIpc() {
+  // ---------- 窗口会话（多窗口） ----------
+  // 属于哪个窗口、这个窗口开着哪本书（打开登记只有主进程 + storage 知道）
+  handle('window:info', async () => {
+    const session = flowSession();
+    return {
+      windowId: session ? session.id : null,
+      bookPath: session ? storage.openBookRegistry.getBook(session.id) : null,
+      windows: storage.openBookRegistry.counts().windows
+    };
+  });
+  // 回书架 / 切到没有书的视图时释放登记（关窗由主进程在窗口销毁时统一释放）
+  handle('window:release-book', async () => {
+    const session = flowSession();
+    if (!session) return { released: false };
+    return { released: storage.releaseOpenBook(session.id) };
+  });
+  // 书卡右键「在新窗口打开」：同书已开在别窗口就聚焦那个窗口、绝不开第二个
+  handle('window:open-book', async (bookPath) => {
+    const session = flowSession();
+    const cfg = await getConfig();
+    const target = assertBookPath(bookPath, cfg.booksRoot);
+    const owner = storage.findOpenBookWindow(target);
+    if (owner) {
+      const ownerSession = sessionById(owner);
+      if (ownerSession) focusSession(ownerSession);
+      return {
+        focused: true,
+        sameWindow: Boolean(session && String(session.id) === String(owner)),
+        windowId: Number(owner),
+        message: openBooksLib.openInOtherWindowMessage(target)
+      };
+    }
+    // 先确认书能正常读，避免开出一个空窗口（读失败照常返回错误）
+    await storage.openBook(target);
+    const created = await createWindow({ bookPath: target, cascade: true });
+    return { focused: false, windowId: created.id };
+  });
+
   handle('config:get', async () => getConfig());
   // 界面上的版本号从 package.json 读，免得每次发版忘了改静态文字
   handle('app:version', async () => ({ version: app.getVersion() }));
@@ -492,11 +724,30 @@ function registerIpc() {
   handle('book:create', async (title) => {
     const cfg = await getConfig();
     await fs.mkdir(cfg.booksRoot, { recursive: true });
-    return storage.createBook(cfg.booksRoot, title);
+    const created = await storage.createBook(cfg.booksRoot, title);
+    notifyShelfChanged(flowSession(), 'book:create');
+    return created;
   });
 
   handleBook('book:open', async (bookPath) => {
+    const session = flowSession();
+    // 同一本书只允许一个窗口：已开在别处就聚焦那个窗口并拒绝
+    const owner = storage.findOpenBookWindow(bookPath);
+    if (owner && session && String(owner) !== String(session.id)) {
+      focusSession(sessionById(owner));
+      throw new storage.StorageError(
+        openBooksLib.CODE.BOOK_OPEN_IN_OTHER_WINDOW,
+        openBooksLib.openInOtherWindowMessage(bookPath)
+      );
+    }
     const data = await storage.openBook(bookPath);
+    if (session) {
+      const registered = storage.registerOpenBook(session.id, bookPath);
+      if (!registered.ok) {
+        focusSession(sessionById(registered.ownerWindowId));
+        throw new storage.StorageError(registered.code, registered.message);
+      }
+    }
     const meta = data && data.meta;
     if (meta && Array.isArray(meta.chapters) && meta.chapters.length) {
       let index = meta.chapters.findIndex((chapter) => chapter && chapter.id === meta.lastOpenChapterId);
@@ -512,12 +763,14 @@ function registerIpc() {
     return data;
   });
   handleBook('book:verify', async (bookPath) => storage.verifyBook(bookPath));
-  handleBook('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title));
+  handleBook('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title), {
+    mutation: 'rename'
+  });
   handleBook('book:set-last', async (bookPath, chapterId) => {
     const info = await storage.setLastOpenChapter(bookPath, chapterId);
     if (info && info.ok) await rememberRecentBook(bookPath, info);
     return info;
-  });
+  }, { mutation: 'save' });
 
   handleBook('chapter:load', async (bookPath, file) => storage.loadChapterText(bookPath, file));
   handleBook('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
@@ -545,7 +798,7 @@ function registerIpc() {
 
   // 选词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
   handle('sensitive:pick-words', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    const { canceled, filePaths } = await showOpenDialog({
       title: '选择敏感词表（每行一个词）',
       buttonLabel: '使用这个词表',
       properties: ['openFile'],
@@ -610,11 +863,16 @@ function registerIpc() {
   });
 
   handleBook('chapter:save', async (bookPath, chapterId, text) => {
+    const session = flowSession();
     return storage.withBookLock(bookPath, async () => {
       const cfg = await getConfig();
-      const meta = await storage.readBookMeta(bookPath);
-      const chapter = meta.chapters.find((c) => c.id === chapterId);
-      if (!chapter) throw new storage.StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+      // 保存前校验（写盘安全检查）：书文件夹、书目、章节记录、章节文件都还在才允许写，
+      // 且书不能正开在另一个窗口。任何一项失效都报错，绝不 mkdir 重建影子文件。
+      const prepared = await storage.prepareChapterSave(bookPath, chapterId, {
+        windowId: session ? session.id : null
+      });
+      const meta = prepared.meta;
+      const chapter = prepared.chapter;
       // 每日字数的「上次已知值」：优先书目里缓存的正文字符数；缓存缺失（老书/新章）时
       // 只在这一次读一遍旧文件，保证第一次保存的增量仍然准确。
       let previousChars = null;
@@ -648,10 +906,12 @@ function registerIpc() {
           };
         }
       }
-      const result = await storage.saveChapterText(bookPath, chapter.file, String(text == null ? '' : text));
+      const result = await storage.saveChapterText(bookPath, chapter.file, String(text == null ? '' : text), {
+        ensureDir: false
+      });
       // 同步章节字数缓存，书架就不用为了算字数去重读整本书
       chapter.chars = result.chars;
-      await storage.writeBookMeta(bookPath, meta);
+      await storage.writeBookMeta(bookPath, meta, { ensureDir: false });
       // 正文变了：告诉搜索索引这本书要重建（不 await，索引更新绝不能拖慢 / 挡住保存）
       try {
         getSearchIndexStore().markDirty(bookPath);
@@ -681,6 +941,7 @@ function registerIpc() {
         chapterIndex: meta.chapters.indexOf(chapter),
         chapterName: chapter.name
       });
+      if (session) storage.openBookRegistry.touch(session.id);
       return { ...result, file: chapter.file, snapshot, stats, statsDelta, statsError };
     });
   });
@@ -690,7 +951,7 @@ function registerIpc() {
   const FONT_MAX_BYTES = 24 * 1024 * 1024;
 
   handle('font:pick', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    const { canceled, filePaths } = await showOpenDialog({
       title: '选择正文字体文件',
       buttonLabel: '使用这个字体',
       properties: ['openFile'],
@@ -715,38 +976,46 @@ function registerIpc() {
   });
 
   handleBook('chapter:create', async (bookPath, insertIndex, name, volumeId) =>
-    storage.createChapter(bookPath, insertIndex, name, volumeId)
+    storage.createChapter(bookPath, insertIndex, name, volumeId), { mutation: 'write' }
   );
   handleBook('chapter:rename', async (bookPath, chapterId, name) =>
-    storage.renameChapter(bookPath, chapterId, name)
+    storage.renameChapter(bookPath, chapterId, name), { mutation: 'rename' }
   );
   // 章节状态 / 备注：只改书目可选字段（txt 不动）
   handleBook('chapter:update-meta', async (bookPath, chapterId, patch) =>
-    storage.updateChapterMeta(bookPath, chapterId, patch)
+    storage.updateChapterMeta(bookPath, chapterId, patch), { mutation: 'write' }
   );
-  handleBook('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId));
+  handleBook('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId), {
+    mutation: 'delete'
+  });
   handleBook('chapter:move', async (bookPath, chapterId, toIndex) =>
-    storage.moveChapter(bookPath, chapterId, toIndex)
+    storage.moveChapter(bookPath, chapterId, toIndex), { mutation: 'write' }
   );
   // 分卷：新建 / 改名 / 删除（章节回未分卷，不删章）/ 把章移到别的卷
-  handleBook('volume:create', async (bookPath, name) => storage.createVolume(bookPath, name));
+  handleBook('volume:create', async (bookPath, name) => storage.createVolume(bookPath, name), {
+    mutation: 'write'
+  });
   handleBook('volume:rename', async (bookPath, volumeId, name) =>
-    storage.renameVolume(bookPath, volumeId, name)
+    storage.renameVolume(bookPath, volumeId, name), { mutation: 'write' }
   );
-  handleBook('volume:delete', async (bookPath, volumeId) => storage.deleteVolume(bookPath, volumeId));
+  handleBook('volume:delete', async (bookPath, volumeId) => storage.deleteVolume(bookPath, volumeId), {
+    mutation: 'write'
+  });
   handleBook('chapter:move-to-volume', async (bookPath, chapterId, volumeId) =>
-    storage.moveChapterToVolume(bookPath, chapterId, volumeId)
+    storage.moveChapterToVolume(bookPath, chapterId, volumeId), { mutation: 'write' }
   );
   handleBook('volume:move', async (bookPath, volumeId, toIndex) =>
-    storage.moveVolume(bookPath, volumeId, toIndex)
+    storage.moveVolume(bookPath, volumeId, toIndex), { mutation: 'write' }
   );
   handleBook('chapter:move-to', async (bookPath, chapterId, volumeId, beforeChapterId) =>
-    storage.moveChapterTo(bookPath, chapterId, volumeId, beforeChapterId)
+    storage.moveChapterTo(bookPath, chapterId, volumeId, beforeChapterId), { mutation: 'write' }
   );
 
   // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
   handleBook('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
-  handleBook('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
+  handleBook('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options), {
+    mutation: 'replace'
+  });
 
   // 校对整本（提案 5.1）：逐章只读正文，按 core/proofread.js 的规则列出可疑位置；
   // 全程不写盘。当前章未保存的内容用 override 传进来（和导出同一个惯例：只参与这一次检查）。
@@ -907,7 +1176,7 @@ function registerIpc() {
   // 整本替换的还原：列出 / 还原书内 _trash/替换备份-*/（还原前把当前内容再备份一份）
   handleBook('book:list-replace-backups', async (bookPath) => storage.listReplaceBackups(bookPath));
   handleBook('book:restore-replace-backup', async (bookPath, backupName) =>
-    storage.restoreReplaceBackup(bookPath, backupName)
+    storage.restoreReplaceBackup(bookPath, backupName), { mutation: 'replace' }
   );
 
   // 本书历史：统一列出 / 预览 / 还原书内 _trash 的各种备份（替换/整理/还原前/快照/删章 + 书目.json.bak）
@@ -916,10 +1185,10 @@ function registerIpc() {
     storage.previewHistoryFile(bookPath, groupId, fileName)
   );
   handleBook('book:restore-history-file', async (bookPath, groupId, fileName) =>
-    storage.restoreHistoryFile(bookPath, groupId, fileName)
+    storage.restoreHistoryFile(bookPath, groupId, fileName), { mutation: 'write' }
   );
   handleBook('book:restore-history-dir', async (bookPath, groupId) =>
-    storage.restoreHistoryGroup(bookPath, groupId)
+    storage.restoreHistoryGroup(bookPath, groupId), { mutation: 'write' }
   );
 
   // 整本智能排版：预检查只算不写；正式整理逐章写盘（写前把原章节备份到 _trash/整理备份-*）
@@ -928,8 +1197,8 @@ function registerIpc() {
   );
   handleBook('book:format', async (bookPath, options) =>
     storage.formatBook(bookPath, options, (progress) => {
-      if (win && !win.isDestroyed()) win.webContents.send('format:progress', progress);
-    })
+      sendToFlow('format:progress', progress);
+    }), { mutation: 'format' }
   );
 
   // 拼导出/复制用的正文：默认读磁盘；override 是编辑区里当前章的最新内容（未保存也算，只参与拼接不写盘）
@@ -1014,7 +1283,7 @@ function registerIpc() {
     });
     // 文件名默认带上范围：书名.txt / 书名-卷名.txt / 书名-第X-Y章.txt（可在保存对话框里改）
     const defaultName = exporter.exportFileName(meta, range);
-    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    const { canceled, filePath } = await showSaveDialog({
       title: '导出 TXT',
       defaultPath: path.join(defaultDir, defaultName),
       filters: [{ name: '文本文件', extensions: ['txt'] }]
@@ -1053,7 +1322,7 @@ function registerIpc() {
       }
     });
     const defaultName = epubLib.epubFileName(meta);
-    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    const { canceled, filePath } = await showSaveDialog({
       title: '导出 EPUB',
       defaultPath: path.join(defaultDir, defaultName),
       filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }]
@@ -1113,7 +1382,7 @@ function registerIpc() {
     if (mode === 'bak') return repair.restoreFromBak(bookPath);
     if (mode === 'rebuild') return repair.rebuildFromFiles(bookPath);
     throw new storage.StorageError('BAD_MODE', `未知的修复方式：${mode}`);
-  });
+  }, { mutation: 'write' });
 
   handle('book:import', async (explicitPaths, options) => {
     const cfg = await getConfig();
@@ -1122,7 +1391,7 @@ function registerIpc() {
       ? explicitPaths.filter((p) => typeof p === 'string' && p.trim())
       : [];
     if (!dirs.length) {
-      const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      const { canceled, filePaths } = await showOpenDialog({
         title: '导入小说（选择一个或多个书文件夹）',
         buttonLabel: '导入',
         properties: ['openDirectory', 'multiSelections', 'dontAddToRecent']
@@ -1132,45 +1401,67 @@ function registerIpc() {
       }
       dirs = filePaths;
     }
-    return importer.importFolders(cfg.booksRoot, dirs, {
+    // 导入会往书库里写文件夹：目标正好是别的窗口正开着的书 → 拒绝（「导入覆盖」也要拦）
+    const session = flowSession();
+    for (const sourceDir of dirs) {
+      const base = path.basename(path.resolve(String(sourceDir)));
+      const target = path.join(cfg.booksRoot, base);
+      const owner = storage.findOpenBookWindow(target);
+      if (owner && (!session || String(owner) !== String(session.id))) {
+        throw new storage.StorageError(
+          'CROSS_WINDOW_BUSY',
+          `导入目标「${base}」正在另一个窗口打开。请先关掉另一个窗口，或先切换到那个窗口后再导入。`
+        );
+      }
+    }
+    const imported = await importer.importFolders(cfg.booksRoot, dirs, {
       mode: options && options.mode,
       onProgress: (progress) => {
-        if (win && !win.isDestroyed()) win.webContents.send('import:progress', progress);
+        sendToFlow('import:progress', progress);
       }
     });
+    notifyShelfChanged(session, 'book:import');
+    return imported;
   });
 
   handleBook('book:delete', async (bookPath) => {
+    const session = flowSession();
     const cfg = await getConfig();
     const root = path.resolve(cfg.booksRoot);
     const target = path.resolve(String(bookPath || ''));
     if (path.dirname(target).toLowerCase() !== root.toLowerCase()) {
       throw new storage.StorageError('BAD_PATH', '只能删除书架目录下的书');
     }
+    // 别的窗口正开着这本书：拒绝，绝不让它在另一个窗口里继续盯着被删的文件夹
     if (!(await storage.exists(target))) {
       throw new storage.StorageError('NOT_FOUND', '这本书的文件夹已经不存在了');
     }
+    let result;
     // 测试环境用固定兜底路径，避免把测试数据丢进你的回收站
     if (isE2E) {
       const trashPath = await storage.trashBook(cfg.booksRoot, target);
-      return { method: 'move', folder: path.basename(target), trashPath };
+      result = { method: 'move', folder: path.basename(target), trashPath };
+    } else {
+      try {
+        await shell.trashItem(target);
+        result = { method: 'recycle', folder: path.basename(target) };
+      } catch (err) {
+        const trashPath = await storage.trashBook(cfg.booksRoot, target);
+        result = {
+          method: 'move',
+          folder: path.basename(target),
+          trashPath,
+          note: `回收站不可用（${err.message}），已移到书架的 _trash`
+        };
+      }
     }
-    try {
-      await shell.trashItem(target);
-      return { method: 'recycle', folder: path.basename(target) };
-    } catch (err) {
-      const trashPath = await storage.trashBook(cfg.booksRoot, target);
-      return {
-        method: 'move',
-        folder: path.basename(target),
-        trashPath,
-        note: `回收站不可用（${err.message}），已移到书架的 _trash`
-      };
-    }
-  });
+    // 删除成功：清掉可能存在的登记（自己的 / 残留的）；书架变动的广播由 handleBook 统一发
+    storage.releaseOpenBookPath(target);
+    return result;
+  }, { mutation: 'delete' });
 
   handle('shell:pick-folder', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    const { canceled, filePaths } = await showOpenDialog({
       title: '选择书架目录',
       properties: ['openDirectory', 'createDirectory']
     });
@@ -1274,11 +1565,32 @@ function registerIpc() {
 }
 
 // ---------- 窗口 ----------
-async function createWindow() {
+// 每个窗口一个会话；可选直接在第二窗口打开某本书（书卡右键「在新窗口打开」）。
+// 新窗口的书在 BrowserWindow 创建后立刻登记（同步），再加载页面 —— 连点两次也只会开一个。
+async function createWindow({ bookPath = null, cascade = false, runAutomationFlow = false } = {}) {
   const cfg = await getConfig();
-  const bounds = clampBounds(cfg.windowBounds);
+  let bounds = null;
+  if (windowSessions.size === 0) {
+    bounds = clampBounds(cfg.windowBounds);
+  } else if (cascade) {
+    const focused = BrowserWindow.getFocusedWindow();
+    const sourceBounds =
+      focused && !focused.isDestroyed()
+        ? focused.getBounds()
+        : mostRecentSession() && !mostRecentSession().win.isDestroyed()
+          ? mostRecentSession().win.getBounds()
+          : null;
+    if (sourceBounds) {
+      bounds = clampBounds({
+        x: sourceBounds.x + 32,
+        y: sourceBounds.y + 32,
+        width: sourceBounds.width,
+        height: sourceBounds.height
+      });
+    }
+  }
 
-  win = new BrowserWindow({
+  const browserWin = new BrowserWindow({
     ...(bounds || { width: 1200, height: 760 }),
     minWidth: 960,
     minHeight: 620,
@@ -1294,69 +1606,118 @@ async function createWindow() {
       spellcheck: false
     }
   });
+  const session = createSession(browserWin);
+  const webContentsId = browserWin.webContents.id;
+  if (runAutomationFlow && automation) automationWin = browserWin;
+
+  // 先在登记表里占住这本书（同步完成，加载页面前生效），失败就销毁这个刚建的窗口
+  if (bookPath) {
+    const registered = storage.registerOpenBook(session.id, bookPath);
+    if (!registered.ok) {
+      windowSessions.delete(session.id);
+      webContentsSessions.delete(webContentsId);
+      storage.openBookRegistry.unregisterWindow(session.id);
+      if (!browserWin.isDestroyed()) browserWin.destroy();
+      focusSession(sessionById(registered.ownerWindowId));
+      throw new storage.StorageError(registered.code, registered.message);
+    }
+  }
 
   Menu.setApplicationMenu(null);
-  win.once('ready-to-show', () => win.show());
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (event) => event.preventDefault());
+  browserWin.once('ready-to-show', () => {
+    if (!browserWin.isDestroyed()) browserWin.show();
+  });
+  browserWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  browserWin.webContents.on('will-navigate', (event) => event.preventDefault());
   // 能填文字的地方（正文 / 章节名 / 书名 / 搜索框 / 查找替换输入框）右键出中文菜单：剪切 / 复制 / 粘贴 / 全选
   // 章节列表、书架卡片有自带的 HTML 右键菜单，这里只认 isEditable，不会冲突
-  win.webContents.on('context-menu', (_event, params) => {
-    if (!textMenu.shouldShow(params) || !win || win.isDestroyed()) return;
-    Menu.buildFromTemplate(textMenu.buildTemplate(params)).popup({ window: win });
+  browserWin.webContents.on('context-menu', (_event, params) => {
+    if (!textMenu.shouldShow(params) || browserWin.isDestroyed()) return;
+    Menu.buildFromTemplate(textMenu.buildTemplate(params)).popup({ window: browserWin });
   });
-  win.webContents.on('before-input-event', (_event, input) => {
+  browserWin.webContents.on('before-input-event', (_event, input) => {
     if (input.type === 'keyDown' && input.control && input.shift && String(input.key).toLowerCase() === 'i') {
-      win.webContents.toggleDevTools();
+      browserWin.webContents.toggleDevTools();
     }
   });
-  win.on('closed', () => { win = null; });
-  setupCloseFlow();
+  browserWin.on('closed', () => {
+    clearTimeout(session.closeTimer);
+    clearTimeout(session.boundsTimer);
+    windowSessions.delete(session.id);
+    webContentsSessions.delete(webContentsId);
+    try {
+      storage.openBookRegistry.unregisterWindow(session.id);
+    } catch {
+      /* 登记表清理失败不影响退出 */
+    }
+    if (automationWin === browserWin) automationWin = null;
+  });
+  browserWin.on('focus', () => {
+    try {
+      storage.openBookRegistry.touch(session.id);
+    } catch {
+      /* 忽略 */
+    }
+  });
+  setupCloseFlow(session);
 
   // 渲染进程崩溃 / 窗口无响应也记一条（主进程的 uncaughtException 抓不到渲染层崩溃）
-  win.webContents.on('render-process-gone', (_event, details) => {
+  browserWin.webContents.on('render-process-gone', (_event, details) => {
     const reason = (details && details.reason) || 'unknown';
     logError('render-process-gone', {
       code: reason,
       message: `渲染进程退出：${reason}（exitCode ${details && details.exitCode}，appCrashed ${Boolean(details && details.appCrashed)}）`
     });
   });
-  win.on('unresponsive', () => logError('unresponsive', { message: '窗口无响应（界面可能卡住）' }));
+  browserWin.on('unresponsive', () => logError('unresponsive', { message: '窗口无响应（界面可能卡住）' }));
 
-  // Windows 关机/注销：尽力而为地拦住一次，提示先保存（系统不强等应用，不能保证）
-  win.on('query-session-end', (event) => {
-    if (rendererDirty) {
-      event.preventDefault();
-      win.focus();
-      win.webContents.send('app:close-requested');
-    }
+  // Windows 关机/注销：尽力而为地拦住一次，提示先保存（系统不强等应用，不能保证）。
+  // 多窗口：哪个窗口有未保存修改就拦一次并让它先问；其它窗口照常。
+  browserWin.on('query-session-end', (event) => {
+    if (!session.dirty || browserWin.isDestroyed()) return;
+    event.preventDefault();
+    focusSession(session);
+    sendToSession(session, 'app:close-requested');
   });
 
-  const loadOptions = automation || isE2E ? { query: { test: '1' } } : undefined;
-  await win.loadFile(path.join(__dirname, 'renderer', 'index.html'), loadOptions);
+  const query = {};
+  if (automation || isE2E) query.test = '1';
+  if (bookPath) query.open = bookPath;
+  const loadOptions = Object.keys(query).length ? { query } : undefined;
+  try {
+    await browserWin.loadFile(path.join(__dirname, 'renderer', 'index.html'), loadOptions);
+  } catch (err) {
+    // 页面都没加载出来：清掉登记，别把书锁在一个空窗口上
+    windowSessions.delete(session.id);
+    webContentsSessions.delete(webContentsId);
+    try {
+      storage.openBookRegistry.unregisterWindow(session.id);
+    } catch {
+      /* 忽略 */
+    }
+    if (!browserWin.isDestroyed()) browserWin.destroy();
+    throw err;
+  }
 
-  // 窗口位置保存（防抖，避免每次拖动都写盘）
-  let boundsTimer = null;
+  // 窗口位置保存（防抖，避免每次拖动都写盘）；只记最近使用的窗口
   const scheduleSaveBounds = () => {
-    clearTimeout(boundsTimer);
-    boundsTimer = setTimeout(async () => {
-      try {
-        if (!win || win.isDestroyed()) return;
-        await configStore.set({ windowBounds: win.getBounds() });
-      } catch { /* 忽略 */ }
+    clearTimeout(session.boundsTimer);
+    session.boundsTimer = setTimeout(() => {
+      saveRecentWindowBounds(session).catch(() => {});
     }, 900);
   };
-  win.on('resize', scheduleSaveBounds);
-  win.on('move', scheduleSaveBounds);
+  browserWin.on('resize', scheduleSaveBounds);
+  browserWin.on('move', scheduleSaveBounds);
 
-  if (automation) await runAutomation();
+  if (runAutomationFlow && automation) await runAutomation();
+  return session;
 }
 
 async function waitForRenderer(expr, timeout = 12000) {
   const startedAt = Date.now();
   for (;;) {
     try {
-      const value = await win.webContents.executeJavaScript(expr, true);
+      const value = await automationWin.webContents.executeJavaScript(expr, true);
       if (value) return value;
     } catch { /* 页面还没加载完，继续等 */ }
     if (Date.now() - startedAt > timeout) throw new Error(`等待超时：${expr}`);
@@ -1399,13 +1760,13 @@ async function runAutomation() {
     await waitForRenderer('Boolean(window.__cwTest && window.__cwTest.ready)', 15000);
     if (screenshotPath) {
       if (screenshotBook) {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openBookPath(${JSON.stringify(screenshotBook)})`,
           true
         );
         await sleep(500);
         if (screenshotChapter != null) {
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `window.__cwTest.switchTo(${Number(screenshotChapter)}, 'discard')`,
             true
           );
@@ -1413,7 +1774,7 @@ async function runAutomation() {
         }
       }
       if (screenshotDialog === 'unsaved') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.setText('（这是一段还没有保存的正文，演示关窗拦截）'); void window.__cwTest.handleCloseRequest();`,
           true
         );
@@ -1426,126 +1787,126 @@ async function runAutomation() {
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
       ) {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
           true
         );
         if (screenshotDialog === 'settings-snapshot') {
           // 开发截图用：设置弹层很长，滚到底展示「数据安全 / 每日快照」
           await sleep(300);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `const sc = document.querySelector('.settings-scroll'); if (sc) sc.scrollTop = sc.scrollHeight;`,
             true
           );
         } else if (screenshotDialog === 'settings-stats') {
           // 开发截图用：滚到「写作统计 / 近 30 天柱状图」
           await sleep(600);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-stats-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-sensitive') {
           // 开发截图用：滚到「敏感词预检」词表设置
           await sleep(600);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-sensitive-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-logs') {
           // 开发截图用：滚到「诊断日志」分组（打开日志文件夹按钮 / 日志份数）
           await sleep(700);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-logs-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-update') {
           // 开发截图用：滚到「检查更新」，用假网络演示「发现新版本」+ 下载页按钮（不真连 GitHub）
           await sleep(500);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `window.__cwTest.setUpdateMock({ type: 'json', body: { tag_name: 'v0.7.0', name: 'v0.7.0', html_url: 'https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/v0.7.0', published_at: '2026-11-01T00:00:00Z', prerelease: false, draft: false } })`,
             true
           );
-          await win.webContents.executeJavaScript('window.__cwTest.checkUpdateNow()', true);
+          await automationWin.webContents.executeJavaScript('window.__cwTest.checkUpdateNow()', true);
           await waitForRenderer(`window.__cwTest.updateStatus().status === 'update'`);
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-update-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         }
         await sleep(500);
       } else if (screenshotDialog === 'bookmenu') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `const more = document.querySelector('.book-card-more'); if (more) more.click();`,
           true
         );
         await sleep(500);
       } else if (screenshotDialog === 'exportmenu') {
         // 开发截图用：展开写作页「导出 ▾」菜单，展示 TXT / EPUB / 本书历史入口
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `document.getElementById('btn-export').click();`,
           true
         );
         await sleep(500);
       } else if (screenshotDialog === 'fragment') {
         // 开发截图用：书架「＋ 碎片」弹层 + 示例内容（只是界面演示，不会写盘）
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFragmentDialog(); window.__cwTest.setFragmentText('雨还在下。旧车站的钟停在 3:17，像在等一个不会再回来的人。');`,
           true
         );
         await sleep(400);
       } else if (screenshotDialog === 'fragments') {
         // 开发截图用：写作页「插入碎片…」弹层，等列表读出来再选第一条
-        await win.webContents.executeJavaScript(`window.__cwTest.openInsertFragmentDialog();`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.openInsertFragmentDialog();`, true);
         try {
           await waitForRenderer('window.__cwTest.fragmentRowCount() > 0', 8000);
-          await win.webContents.executeJavaScript(`window.__cwTest.clickFragmentRow(0);`, true);
+          await automationWin.webContents.executeJavaScript(`window.__cwTest.clickFragmentRow(0);`, true);
         } catch {
           console.log('[screenshot] 没有可展示的碎片（可在 _碎片 里先放一条）');
         }
         await sleep(600);
       } else if (screenshotDialog === 'splitter') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.setSidebarWidth(420);`,
           true
         );
         await sleep(400);
       } else if (screenshotDialog === 'format') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFormatDialog();`,
           true
         );
         await sleep(900);
       } else if (screenshotDialog === 'formatmenu') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFormatMenu();`,
           true
         );
         await sleep(400);
       } else if (screenshotDialog === 'find') {
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFindPanel(); window.__cwTest.setFindFields({ query: '风', scope: 'book' }); window.__cwTest.findRun();`,
           true
         );
         await sleep(900);
       } else if (screenshotDialog === 'proofread') {
         // 开发截图用：打开校对面板，等当前章自动检查完，再切整本跑一遍（只读）
-        await win.webContents.executeJavaScript(`window.__cwTest.openProofreadPanel();`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.openProofreadPanel();`, true);
         await sleep(800);
-        await win.webContents.executeJavaScript(`window.__cwTest.setProofreadScope('book');`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.setProofreadScope('book');`, true);
         await sleep(120);
-        await win.webContents.executeJavaScript(`window.__cwTest.proofreadRun();`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.proofreadRun();`, true);
         await sleep(800);
       } else if (screenshotDialog === 'sensitive') {
         // 开发截图用：打开敏感词预检面板（先等当前章自动预检完），再切整本跑一遍（只读）
-        await win.webContents.executeJavaScript(`window.__cwTest.openSensitivePanel();`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.openSensitivePanel();`, true);
         await sleep(900);
-        await win.webContents.executeJavaScript(`window.__cwTest.setSensitiveScope('book');`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.setSensitiveScope('book');`, true);
         await sleep(120);
-        await win.webContents.executeJavaScript(`window.__cwTest.sensitiveRun();`, true);
+        await automationWin.webContents.executeJavaScript(`window.__cwTest.sensitiveRun();`, true);
         await sleep(900);
       } else if (screenshotDialog === 'tts') {
         // 开发截图用：假语音引擎 + 朗读小条（真的出声在开发机上也会吵，这里只展示界面状态）
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.ttsInstallFakeSpeech(); document.getElementById('btn-tts').click();`,
           true
         );
@@ -1554,34 +1915,34 @@ async function runAutomation() {
             'window.__cwTest.ttsBarOpen() && window.__cwTest.ttsChunks().length > 0',
             8000
           );
-          await win.webContents.executeJavaScript('window.__cwTest.ttsFakeFinish();', true);
+          await automationWin.webContents.executeJavaScript('window.__cwTest.ttsFakeFinish();', true);
           await sleep(320);
-          await win.webContents.executeJavaScript('window.__cwTest.ttsPlay();', true);
+          await automationWin.webContents.executeJavaScript('window.__cwTest.ttsPlay();', true);
         } catch {
           console.log('[screenshot] 朗读条没能准备好');
         }
         await sleep(400);
       } else if (screenshotDialog === 'marks' || screenshotDialog === 'marks-menu') {
         // 开发截图用：编辑器小件——不可见字符 ␣ / 行尾空白 / 超长段落左侧黄线（只读显示层，不写盘）
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           "window.__cwTest.setMarksToggle('invisibles', true); window.__cwTest.setMarksToggle('longParagraphs', true);",
           true
         );
         await sleep(450);
         if (screenshotDialog === 'marks-menu') {
-          await win.webContents.executeJavaScript('window.__cwTest.openFormatMenu();', true);
+          await automationWin.webContents.executeJavaScript('window.__cwTest.openFormatMenu();', true);
         } else {
-          await win.webContents.executeJavaScript('window.__cwTest.selectRange(0, 42);', true);
+          await automationWin.webContents.executeJavaScript('window.__cwTest.selectRange(0, 42);', true);
         }
         await sleep(500);
       } else if (screenshotDialog === 'focus') {
         // 开发截图用：专注模式 + 打字机模式（隐藏左栏 / 顶栏，只改显示，不写盘、不写配置）
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           'window.__cwTest.focusToggle(true); window.__cwTest.focusTypewriter(true);',
           true
         );
         await sleep(500);
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           'const len = window.__cwTest.text().length; window.__cwTest.focusSetCaret(Math.floor(len * 0.6)); window.__cwTest.focusAlign();',
           true
         );
@@ -1589,18 +1950,18 @@ async function runAutomation() {
       } else if (screenshotDialog === 'shelf-search') {
         // 开发截图用：书架搜正文（真实走 userData 里的索引；只读，不碰书库）
         const query = argValue('search-query') || '青柠色';
-        await win.webContents.executeJavaScript(
+        await automationWin.webContents.executeJavaScript(
           `window.__cwTest.setShelfQuery(${JSON.stringify(query)});`,
           true
         );
         await sleep(1800);
       } else if (screenshotDialog === 'conflict') {
-        const folder = await win.webContents.executeJavaScript(
+        const folder = await automationWin.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',
           true
         );
         if (folder) {
-          await win.webContents.executeJavaScript(
+          await automationWin.webContents.executeJavaScript(
             `window.__cwTest.openConflictDialogFor(${JSON.stringify(folder)})`,
             true
           );
@@ -1608,16 +1969,16 @@ async function runAutomation() {
         await sleep(500);
       } else if (screenshotDialog === 'history') {
         const opened = screenshotBook
-          ? await win.webContents.executeJavaScript(
+          ? await automationWin.webContents.executeJavaScript(
               `window.__cwTest.openHistoryForPath(${JSON.stringify(screenshotBook)})`,
               true
             )
-          : await win.webContents.executeJavaScript('window.__cwTest.openHistoryForFirstBook()', true);
+          : await automationWin.webContents.executeJavaScript('window.__cwTest.openHistoryForFirstBook()', true);
         if (!opened) console.log('[screenshot] 没有可打开历史面板的书');
         await sleep(900);
       }
       await sleep(500);
-      const image = await win.webContents.capturePage();
+      const image = await automationWin.webContents.capturePage();
       await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
       await fs.writeFile(screenshotPath, image.toPNG());
       console.log(`[screenshot] ${screenshotPath}`);
@@ -1627,7 +1988,7 @@ async function runAutomation() {
       const e2eClipboard = await createE2EClipboard();
       activeClipboard = e2eClipboard.clipboard;
       const result = await scenario({
-        win,
+        win: automationWin,
         app,
         clipboard: e2eClipboard.clipboard,
         config: await getConfig(),
@@ -1636,9 +1997,62 @@ async function runAutomation() {
         repair,
         exporter,
         sleep,
-        exec: (code) => win.webContents.executeJavaScript(code, true),
-        getCloseReady: () => e2eCloseReady,
-        resetCloseReady: () => { e2eCloseReady = undefined; }
+        exec: (code) => automationWin.webContents.executeJavaScript(code, true),
+        // ---------- 多窗口 E2E 辅助 ----------
+        openWindow: async (bookPath = null) => {
+          const created = await createWindow({ bookPath: bookPath || null, cascade: true });
+          return created.id;
+        },
+        closeWindow: (windowId) => {
+          const session = sessionById(windowId);
+          if (!session) return false;
+          session.win.close();
+          return true;
+        },
+        destroyWindow: (windowId) => {
+          const session = sessionById(windowId);
+          if (!session) return false;
+          session.forceClose = true;
+          session.win.destroy();
+          return true;
+        },
+        execIn: (windowId, code) => {
+          const session = sessionById(windowId);
+          if (!session) throw new Error(`窗口不存在：${windowId}`);
+          return session.win.webContents.executeJavaScript(code, true);
+        },
+        focusWindow: (windowId) => focusSession(sessionById(windowId)),
+        windowsInfo: () =>
+          Array.from(windowSessions.values()).map((session) => ({
+            id: session.id,
+            bookPath: storage.openBookRegistry.getBook(session.id),
+            dirty: session.dirty,
+            closePending: session.closePending,
+            destroyed: session.win.isDestroyed(),
+            focused: !session.win.isDestroyed() && session.win.isFocused()
+          })),
+        openBookRegistry: () => storage.openBookRegistry.list(),
+        registryCounts: () => storage.openBookRegistry.counts(),
+        mostRecentWindowId: () => storage.openBookRegistry.mostRecentWindow(),
+        windowBounds: (windowId) => {
+          const session = sessionById(windowId);
+          return session ? session.win.getBounds() : null;
+        },
+        setRealClose: (on) => {
+          e2eRealClose = Boolean(on);
+          return e2eRealClose;
+        },
+        windowAllClosed: () => e2eWindowAllClosed,
+        getCloseReady: (windowId) =>
+          windowId == null ? e2eLastCloseReady : e2eCloseReadyByWindow.get(String(windowId)),
+        resetCloseReady: (windowId) => {
+          if (windowId == null) {
+            e2eLastCloseReady = undefined;
+            e2eCloseReadyByWindow.clear();
+          } else {
+            e2eCloseReadyByWindow.delete(String(windowId));
+          }
+        }
       });
       console.log(
         `E2E_RESULT ${JSON.stringify({ ...result, clipboardSynthetic: e2eClipboard.synthetic })}`
@@ -1660,13 +2074,18 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
+    const session = mostRecentSession();
+    if (session) {
+      focusSession(session);
+    } else {
+      createWindow({ runAutomationFlow: false }).catch((err) => {
+        console.error('[window] 第二次启动建窗失败:', err && err.stack ? err.stack : err);
+      });
     }
   });
 
   app.whenReady().then(async () => {
+    setupCloseIpc();
     registerIpc();
     try {
       await getConfig();
@@ -1676,12 +2095,19 @@ if (!gotLock) {
     // 每次启动记一条 info（版本 / 平台 / Electron 版本），排查反馈时先看这里
     logStartup();
     try {
-      await createWindow();
+      await createWindow({ runAutomationFlow: true });
     } catch (err) {
       console.error('[window] 创建失败:', err && err.stack ? err.stack : err);
       app.exit(1);
     }
   });
 
-  app.on('window-all-closed', () => app.quit());
+  // 只有最后一个窗口关闭时才退出（E2E 记一笔、由场景断言后自行收尾）
+  app.on('window-all-closed', () => {
+    if (isE2E) {
+      e2eWindowAllClosed = true;
+      return;
+    }
+    app.quit();
+  });
 }

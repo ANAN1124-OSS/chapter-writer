@@ -987,11 +987,34 @@
   // ---------- 打开书 / 修复 ----------
   // target 可选：{ chapterId, matchIndex, matchLength } —— 从书架「正文命中」点进来时
   // 直接打开那一章并选中命中位置（只移动光标 / 选区 + 滚动，不改正文、不写盘）
+  // 书卡右键「在新窗口打开」：主进程负责「同一本书只开一个窗口」；
+  // 书已经开在别的窗口时就聚焦那个窗口，本窗口不变。
+  async function openBookInNewWindow(book) {
+    if (!book || !book.path) return { ok: false };
+    try {
+      const result = await call(api.openBookInNewWindow, book.path);
+      if (result && result.focused) {
+        toast(result.message || '这本书已经在另一个窗口打开，已切换到那个窗口', 'warn');
+      } else {
+        toast(`已在新窗口打开「${book.title || '这本书'}」`);
+      }
+      return { ok: true, ...(result || {}) };
+    } catch (err) {
+      toast(`新窗口打开失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
   async function openBookByPath(bookPath, target = null) {
     let data;
     try {
       data = await call(api.openBook, bookPath);
     } catch (err) {
+      if (err.code === 'BOOK_OPEN_IN_OTHER_WINDOW') {
+        // 同一本书只允许一个窗口：主进程已经聚焦了那个窗口
+        toast(err.message || '这本书已经在另一个窗口打开，已切换到那个窗口', 'warn');
+        return;
+      }
       if (err.code === 'PARSE_ERROR' || err.code === 'INVALID_META' || err.code === 'NO_BOOK') {
         const known = (state.books || []).find((b) => b.path === bookPath);
         await openRepair(
@@ -3122,6 +3145,12 @@
         const saved = await saveCurrent();
         if (!saved.ok) return;
       }
+    }
+    // 释放「打开中的书」登记：关掉这个窗口 / 回书架后，别的窗口就能打开这本书
+    try {
+      await api.releaseBook();
+    } catch {
+      /* 释放失败由主进程在窗口销毁时兜底 */
     }
     state.view = 'shelf';
     state.bookPath = null;
@@ -6207,6 +6236,8 @@
       if (!book) return;
       if (btn.dataset.action === 'open') {
         await openBookByPath(book.path);
+      } else if (btn.dataset.action === 'open-new-window') {
+        await openBookInNewWindow(book);
       } else if (btn.dataset.action === 'folder') {
         try {
           await call(api.openBookFolder, book.path);
@@ -6456,6 +6487,13 @@
 
     // 主进程拦截到关窗/退出时，由这里决定「保存并退出 / 不保存退出 / 取消」
     api.onCloseRequested(handleCloseRequest);
+  // 别的窗口改了书架数据（新建 / 删除 / 保存 / 导入 / 整理）：停在书架就刷新；
+  // 写作页里的窗口不打断作者，回书架时会统一刷新（backToShelf 里本来就会刷新）。
+  api.onShelfChanged(() => {
+    if (state.view === 'shelf' && !state.importing && !state.formatBookRunning) {
+      refreshShelf().catch(() => {});
+    }
+  });
 
     // 主进程内部错误（崩溃 / 未处理的 Promise）：只弹一句固定提示，细节留在日志里。
     // 应用不退出，作者可以先 Ctrl+S 保存再重启。
@@ -6686,6 +6724,25 @@
       },
       async openBookPath(bookPath) {
         await openBookByPath(bookPath);
+      },
+      // 多窗口测试钩子：在新窗口打开 / 释放登记 / 这个窗口的会话信息
+      async openBookInNewWindow(bookPath) {
+        const book = (state.books || []).find((item) => item.path === bookPath) || { path: bookPath, title: '' };
+        return openBookInNewWindow(book);
+      },
+      async releaseBook() {
+        try {
+          return await call(api.releaseBook);
+        } catch (err) {
+          return { released: false, message: err.message };
+        }
+      },
+      async windowInfo() {
+        try {
+          return await call(api.windowInfo);
+        } catch (err) {
+          return { error: err.message };
+        }
       },
       async newChapter(name) {
         await createChapterAt(state.chapters.length, name);
@@ -7507,6 +7564,20 @@
       },
       closeHistory: () => closeHistoryDialog(),
       bookMenuTexts: () => Array.from(document.querySelectorAll('#book-menu button')).map((el) => el.textContent),
+      // 多窗口用例：真的走「书卡右键 → 在新窗口打开」这条界面路径
+      openBookMenuForPath(bookPath) {
+        const book = (state.books || []).find((item) => item.path === bookPath);
+        if (!book) return false;
+        showBookMenu(book, 120, 120);
+        return true;
+      },
+      bookMenuOpen: () => !$('book-menu').classList.contains('hidden'),
+      clickBookMenuAction(action) {
+        const btn = $('book-menu').querySelector(`button[data-action="${String(action)}"]`);
+        if (!btn) return false;
+        btn.click();
+        return true;
+      },
       exportMenuTexts: () =>
         Array.from(document.querySelectorAll('#export-menu button')).map((el) => el.textContent),
       findSummary: () => $('find-summary').textContent,
@@ -7661,6 +7732,9 @@
     }
     showView('shelf');
     await refreshShelf();
+    // 从「在新窗口打开」进来的窗口：启动后直接打开指定的书（由主进程在 URL 里传路径）
+    const openAtStart = new URLSearchParams(location.search).get('open');
+    if (openAtStart) await openBookByPath(openAtStart);
     if (state.testMode) {
       window.__cwTest = createTestHooks();
       window.__cwTest.ready = true;

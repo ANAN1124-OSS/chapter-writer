@@ -10,6 +10,7 @@ const schemaLib = require('./schema');
 const conflictLib = require('./conflict');
 const historyLib = require('./history');
 const snapshotLib = require('./snapshot');
+const openBooksLib = require('./open-books');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -109,14 +110,14 @@ async function readBookMeta(bookPath) {
   return chaptersLib.normalizeChapterOrder({ ...meta, volumes: chaptersLib.sanitizeVolumes(meta.volumes) });
 }
 
-async function writeBookMeta(bookPath, meta) {
-  await ensureDir(bookPath);
+async function writeBookMeta(bookPath, meta, { ensureDir: ensureDirectory = true } = {}) {
+  if (ensureDirectory) await ensureDir(bookPath);
   const metaPath = path.join(bookPath, BOOK_FILE);
   const bakPath = path.join(bookPath, BOOK_BAK);
   // 先备份上一版（只在存在时）
   try {
     const old = await fs.readFile(metaPath);
-    await atomicWriteFile(bakPath, old);
+    await atomicWriteFile(bakPath, old, 'utf8', { ensureDir: ensureDirectory });
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
@@ -126,7 +127,7 @@ async function writeBookMeta(bookPath, meta) {
     schemaVersion: schemaLib.normalizeSchemaVersion(meta.schemaVersion),
     updatedAt: nowIso()
   };
-  await writeJsonAtomic(metaPath, next);
+  await writeJsonAtomic(metaPath, next, { ensureDir: ensureDirectory });
   return next;
 }
 
@@ -387,11 +388,86 @@ async function statChapter(bookPath, file) {
   return { mtimeMs: stat.mtimeMs, size: stat.size };
 }
 
-async function saveChapterText(bookPath, file, text) {
+async function saveChapterText(bookPath, file, text, { ensureDir: ensureDirectory = true } = {}) {
   const p = assertInside(bookPath, file);
-  await atomicWriteFile(p, chaptersLib.toDiskNewlines(text));
+  await atomicWriteFile(p, chaptersLib.toDiskNewlines(text), 'utf8', { ensureDir: ensureDirectory });
   const stat = await fs.stat(p);
   return { mtimeMs: stat.mtimeMs, chars: chaptersLib.countChars(text) };
+}
+
+// ---------- 多窗口：打开中的书登记 / 跨窗口检查 / 保存前校验 ----------
+// 唯一事实来源：窗口 → 书的登记表（只存在内存里，不写配置、不写书库）。
+// 登记 / 释放在主进程里通过 storage 统一做；写盘前的保存校验也在这里，
+// 确保书文件夹或章节文件被另一个窗口（或应用外）删掉后，绝不会 mkdir 重建影子文件。
+const openBookRegistry = openBooksLib.createRegistry();
+
+function registerOpenBook(windowId, bookPath) {
+  return openBookRegistry.setBook(windowId, bookPath);
+}
+
+function releaseOpenBook(windowId) {
+  return openBookRegistry.clearBook(windowId);
+}
+
+function releaseOpenBookPath(bookPath) {
+  return openBookRegistry.clearPath(bookPath);
+}
+
+function findOpenBookWindow(bookPath) {
+  return openBookRegistry.findWindow(bookPath);
+}
+
+// 跨窗口删改拦截：抛出 CROSS_WINDOW_BUSY，由 IPC 统一转成界面提示。
+function assertBookNotBusy(bookPath, windowId, action = 'write') {
+  const result = openBooksLib.checkMutation({ registry: openBookRegistry, windowId, bookPath, action });
+  if (!result.ok) throw new StorageError(result.code, result.message);
+  return true;
+}
+
+// 保存前校验：书文件夹在 → 书目能读 → 章节还在书目里 → 章节文件也在。
+// 任一失效都抛错阻止写盘（saveChapterText 会带 ensureDir:false，atomic 不会重建目录）。
+async function prepareChapterSave(bookPath, chapterId, { windowId = null, file = null } = {}) {
+  assertBookNotBusy(bookPath, windowId, 'save');
+  let bookStat = null;
+  try {
+    bookStat = await fs.stat(bookPath);
+  } catch {
+    bookStat = null;
+  }
+  const bookExists = Boolean(bookStat && bookStat.isDirectory());
+  let meta = null;
+  let metaCode = null;
+  if (bookExists) {
+    try {
+      meta = await readBookMeta(bookPath);
+    } catch (err) {
+      metaCode = (err && err.code) || 'ERROR';
+    }
+  }
+  const chapter =
+    meta && Array.isArray(meta.chapters)
+      ? meta.chapters.find((item) => item && item.id === chapterId)
+      : null;
+  let chapterExists = false;
+  if (chapter) {
+    try {
+      const stat = await fs.stat(assertInside(bookPath, chapter.file));
+      chapterExists = stat.isFile();
+    } catch {
+      chapterExists = false;
+    }
+  }
+  const checked = openBooksLib.verifySaveTarget({
+    bookPath,
+    bookExists,
+    meta,
+    metaCode,
+    chapterId,
+    file: file || (chapter ? chapter.file : null),
+    chapterExists
+  });
+  if (!checked.ok) throw new StorageError(checked.code, checked.message);
+  return { meta, chapter: checked.chapter, index: checked.index };
 }
 
 async function createChapter(bookPath, insertIndex, name, volumeId = null) {
@@ -1228,6 +1304,13 @@ module.exports = {
   loadChapterText,
   statChapter,
   saveChapterText,
+  prepareChapterSave,
+  openBookRegistry,
+  registerOpenBook,
+  releaseOpenBook,
+  releaseOpenBookPath,
+  findOpenBookWindow,
+  assertBookNotBusy,
   createChapter: locked(createChapter),
   createVolume: locked(createVolume),
   renameVolume: locked(renameVolume),

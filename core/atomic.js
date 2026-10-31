@@ -25,7 +25,9 @@ async function renameWithRetry(from, to, { tries = 3, delay = 80 } = {}) {
   throw lastErr;
 }
 
-async function atomicWriteFile(filePath, data, encoding = 'utf8') {
+// ensureDir=false：只写「已经存在的目录」（保存章节用），目录被删时直接报错，
+// 绝不 mkdir 重建出一个只有一章 txt 的影子书文件夹。
+async function atomicWriteFile(filePath, data, encoding = 'utf8', { ensureDir = true } = {}) {
   const dir = path.dirname(filePath);
   const base = path.basename(filePath);
   const tmp = path.join(
@@ -34,7 +36,7 @@ async function atomicWriteFile(filePath, data, encoding = 'utf8') {
   );
   let handle = null;
   try {
-    await fs.mkdir(dir, { recursive: true });
+    if (ensureDir) await fs.mkdir(dir, { recursive: true });
     handle = await fs.open(tmp, 'w');
     await handle.writeFile(data, encoding);
     await handle.sync();
@@ -60,8 +62,8 @@ async function readJson(filePath) {
   return JSON.parse(stripBom(raw));
 }
 
-async function writeJsonAtomic(filePath, obj) {
-  await atomicWriteFile(filePath, `${JSON.stringify(obj, null, 2)}\n`);
+async function writeJsonAtomic(filePath, obj, options = {}) {
+  await atomicWriteFile(filePath, `${JSON.stringify(obj, null, 2)}\n`, 'utf8', options);
 }
 
 module.exports = {
