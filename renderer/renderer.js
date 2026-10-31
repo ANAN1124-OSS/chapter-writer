@@ -3867,10 +3867,17 @@
   // ---------- 导出范围对话框 ----------
   // 默认「全书」和以前完全一样；也可以只导某一卷 / 第 X–Y 章。
   // 章数、字数、默认文件名都由主进程算（book:export-plan 只读），避免界面和导出两套规则。
+  // v0.8 P0 N8：TXT / EPUB 共用这个范围对话框，exportFormat 记住这次是哪种格式。
   const EXPORT_UNVOLUMED = '__none__';
+  const EXPORT_MESSAGES = {
+    txt: '选择导出范围。格式和以前一样（标题行 + 空行 + 正文，UTF-8 带 BOM，CRLF）；当前章没保存的内容也会一起导出，但不会写盘。',
+    epub:
+      '选择导出范围。导出成 EPUB 3 电子书（分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行）；当前章没保存的内容也会一起导出，但不会写盘。'
+  };
   let exportPlanTimer = null;
   let exportPlanToken = 0;
   let lastExportPlan = null;
+  let exportFormat = 'txt';
 
   function readExportRange() {
     const checked = document.querySelector('input[name="export-scope"]:checked');
@@ -3966,7 +3973,9 @@
     lastExportPlan = res;
     const bits = [`将导出 ${res.chapterCount} 章`, `${res.chars} 字`];
     if (res.includedUnsaved) bits.push('含当前章未保存内容');
-    summaryEl.textContent = `${bits.join(' · ')}；默认文件名：${res.fileName}`;
+    // EPUB 与 TXT 的范围规则一样，只是默认文件名后缀不同（主进程统一算好）
+    const fileName = exportFormat === 'epub' ? res.epubFileName : res.fileName;
+    summaryEl.textContent = `${bits.join(' · ')}；默认文件名：${fileName}`;
     summaryEl.classList.remove('warn');
     confirmBtn.disabled = false;
   }
@@ -3979,14 +3988,18 @@
     }, delay);
   }
 
-  function openExportDialog() {
+  // format = 'txt'（默认）| 'epub'：两个入口共用同一套范围选择，标题 / 说明跟着换。
+  function openExportDialog(format = 'txt') {
     hideExportMenu();
     if (!state.bookPath) return;
     if (!state.chapters.length) {
       toast('这本书里还没有章节，没有可导出的内容', 'warn');
       return;
     }
+    exportFormat = format === 'epub' ? 'epub' : 'txt';
     const total = state.chapters.length;
+    $('export-title').textContent = exportFormat === 'epub' ? '导出 EPUB' : '导出 TXT';
+    $('export-message').textContent = EXPORT_MESSAGES[exportFormat];
     fillExportVolumeOptions();
     const allRadio = document.querySelector('input[name="export-scope"][value="all"]');
     if (allRadio) allRadio.checked = true;
@@ -4046,8 +4059,10 @@
       toast('所选范围里没有章节，换个范围试试', 'warn');
       return;
     }
+    const format = exportFormat;
     closeExportDialog();
-    await exportBookFlow(range);
+    if (format === 'epub') await exportEpubFlow(range);
+    else await exportBookFlow(range);
   }
 
   async function copyBookFlow() {
@@ -4103,14 +4118,16 @@
     return m ? `（已${s2tLib.modeLabel(m)}）` : '';
   }
 
-  // 导出 EPUB：整本书一本电子书（分卷 → 目录级、一章一个 XHTML、纯文字封面页）。
-  // 和 TXT 导出一样带上当前章未保存的内容（只参与这次导出，不写盘）。
-  async function exportEpubFlow() {
+  // 导出 EPUB：整本或选中的卷 / 章节一本电子书（分卷 → 目录级、一章一个 XHTML、纯文字封面页）。
+  // 和 TXT 导出一样带上当前章未保存的内容（只参与这次导出，不写盘）；range 不传 = 全书。
+  async function exportEpubFlow(range) {
     if (!state.bookPath) return;
     try {
-      const data = await call(api.exportEpub, state.bookPath, currentChapterOverride());
+      const data = await call(api.exportEpub, state.bookPath, currentChapterOverride(), range);
       if (data.canceled) return;
-      const parts = [`${data.chapterCount} 章`];
+      const parts = [];
+      if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
+      parts.push(`${data.chapterCount} 章`);
       if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
       parts.push(`${Number(data.chars) || 0} 字`);
       if (data.includedUnsaved) parts.push('含当前章未保存内容');
@@ -7731,8 +7748,8 @@
       if (!btn) return;
       hideExportMenu();
       if (btn.dataset.action === 'copy') await copyBookFlow();
-      else if (btn.dataset.action === 'txt') openExportDialog();
-      else if (btn.dataset.action === 'epub') await exportEpubFlow();
+      else if (btn.dataset.action === 'txt') openExportDialog('txt');
+      else if (btn.dataset.action === 'epub') openExportDialog('epub');
       else if (btn.dataset.action === 'sensitive') await openSensitivePanel();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
       else if (btn.dataset.action === 'history') await openHistoryForCurrentBook();
@@ -8179,6 +8196,8 @@
       exportSummary: () => $('export-summary').textContent,
       exportConfirmDisabled: () => $('btn-export-confirm').disabled,
       readExportRange: () => readExportRange(),
+      exportFormat: () => exportFormat,
+      exportTitle: () => $('export-title').textContent,
       // 导出简繁转换（v0.8 P0 N7）：设置里的档位 + 导出对话框里那行只读提示
       exportConversionValue: () => $('settings-export-conversion').value,
       exportConversionSettingsVisible: () => !$('settings-export-field').classList.contains('hidden'),

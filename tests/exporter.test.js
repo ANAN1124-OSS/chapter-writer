@@ -351,3 +351,19 @@ test('默认文件名：书名里的非法字符会被清掉（和书文件夹�
   assert.equal(exportFileName(meta, null), 'abc.txt');
   assert.equal(exportFileName({ chapters: [] }, null), '未命名.txt');
 });
+
+test('默认文件名：EPUB 复用同一套范围规则，只换后缀（v0.8 P0 N8）', () => {
+  const meta = volumeMeta();
+  assert.equal(exportFileName(meta, null, 'epub'), '测试书.epub');
+  assert.equal(exportFileName(meta, { mode: 'all' }, 'epub'), '测试书.epub');
+  assert.equal(
+    exportFileName(meta, { mode: 'volume', volumeId: 'v1' }, 'epub'),
+    '测试书-第1卷：单篇.epub'
+  );
+  assert.equal(exportFileName(meta, { mode: 'volume', volumeId: null }, 'epub'), '测试书-未分卷.epub');
+  assert.equal(exportFileName(meta, { mode: 'range', from: 2, to: 3 }, 'epub'), '测试书-第2-3章.epub');
+  // 不带扩展名 / 传空串 / 传带点的扩展名都兜底成 txt
+  assert.equal(exportFileName(meta, null, ''), '测试书.txt');
+  assert.equal(exportFileName(meta, null, '  '), '测试书.txt');
+  assert.equal(exportFileName(meta, null, '.txt'), '测试书.txt');
+});

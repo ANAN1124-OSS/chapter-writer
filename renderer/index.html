@@ -111,7 +111,7 @@
               <div class="dropdown-menu hidden" id="export-menu">
                 <button type="button" data-action="copy">复制整本到剪贴板</button>
                 <button type="button" data-action="txt">导出 TXT…</button>
-                <button type="button" data-action="epub" title="整本书导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
+                <button type="button" data-action="epub" title="整本或按卷 / 按章节范围导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
                 <button type="button" data-action="sensitive" title="按你自己的词表检查命中位置：只报告、不改正文、不写盘（应用不内置任何词表）">敏感词预检…</button>
                 <button type="button" data-action="folder">打开本书文件夹</button>
                 <div class="dropdown-sep"></div>
@@ -357,9 +357,9 @@
   <!-- ============ 导出范围 ============ -->
   <div id="export-backdrop" class="backdrop hidden">
     <div class="modal export-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">导出 TXT</h2>
+      <h2 class="modal-title" id="export-title">导出 TXT</h2>
       <div class="export-scroll">
-        <p class="modal-message">
+        <p class="modal-message" id="export-message">
           选择导出范围。格式和以前一样（标题行 + 空行 + 正文，UTF-8 带 BOM，CRLF）；当前章没保存的内容也会一起导出，但不会写盘。
         </p>
         <div class="export-scopes">
@@ -384,7 +384,7 @@
         <div class="export-summary" id="export-summary"></div>
         <div class="export-conversion-note muted small" id="export-conversion-note"></div>
         <p class="muted small">
-          按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的 txt 里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。
+          按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的文件里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。TXT 和 EPUB 都支持按卷 / 按范围导出。
         </p>
       </div>
       <div class="modal-buttons">

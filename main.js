@@ -1350,6 +1350,7 @@ function registerIpc() {
       volumeId: plan.volumeId,
       empty: plan.empty,
       fileName: exporter.exportFileName(meta, range),
+      epubFileName: epubLib.epubFileName(meta, range),
       includedUnsaved: overrideIndex >= 0 && plan.indexes.includes(overrideIndex)
     };
   });
@@ -1404,15 +1405,25 @@ function registerIpc() {
     };
   });
 
-  // 导出 EPUB（提案 6.3）：整本书 → 一本 EPUB 3（分卷做目录级、一章一个 XHTML、
-  // 没有封面图就生成纯文字封面页）。排版沿用「段首缩进 + 空一行」，由 EPUB 里的 CSS 控制，
-  // 不动任何 txt 字节。和 TXT 导出一样：当前章未保存的内容参与拼接、只读、原子写盘。
-  handleBook('book:export-epub', async (bookPath, override) => {
+  // 导出 EPUB（提案 6.3 / v0.8 P0 N8）：整本或按卷 / 按章节范围 → 一本 EPUB 3
+  // （分卷做目录级、一章一个 XHTML、没有封面图就生成纯文字封面页）。排版沿用「段首缩进 + 空一行」，
+  // 由 EPUB 里的 CSS 控制，不动任何 txt 字节。和 TXT 导出一样：当前章未保存的内容参与拼接、只读、原子写盘。
+  // range 不传 = 全书；只把选中的章节读出来打进包里，章号仍按全书顺序。
+  handleBook('book:export-epub', async (bookPath, override, range) => {
     const meta = await storage.readBookMeta(bookPath);
-    if (!meta.chapters.length) {
-      throw new storage.StorageError('EMPTY_BOOK', '这本书里还没有章节');
+    const plan = exporter.resolveExportRange(meta, range);
+    if (!plan.count) {
+      throw new storage.StorageError(
+        'EMPTY_EXPORT_RANGE',
+        plan.mode === 'all' ? '这本书里还没有章节' : '所选范围里没有章节'
+      );
     }
-    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
+    const { texts, chars, includedUnsaved } = await collectExportTexts(
+      bookPath,
+      meta,
+      override,
+      plan.indexes
+    );
     const cfg = await getConfig();
     // 目录记忆和 TXT 导出共用：上次导到哪，这次默认还开在哪
     const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
@@ -1422,7 +1433,7 @@ function registerIpc() {
         return false;
       }
     });
-    const defaultName = epubLib.epubFileName(meta);
+    const defaultName = epubLib.epubFileName(meta, range);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 EPUB',
       defaultPath: path.join(defaultDir, defaultName),
@@ -1436,7 +1447,7 @@ function registerIpc() {
     const exportTexts = conversion
       ? texts.map((text) => s2tLib.convertText(text, conversion))
       : texts;
-    const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts });
+    const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts, range });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
     return {
@@ -1447,7 +1458,8 @@ function registerIpc() {
       chars,
       includedUnsaved,
       bytes: built.bytes,
-      conversion
+      conversion,
+      rangeLabel: plan.label
     };
   });
 
@@ -2009,6 +2021,27 @@ async function runAutomation() {
         // 开发截图用：打开「导出 TXT」对话框，展示范围与简繁转换提示（只读，不导出）
         await automationWin.webContents.executeJavaScript(
           `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="txt"]').click();`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'export-epub') {
+        // 开发截图用：打开「导出 EPUB」范围对话框并选中「按卷导出」，展示 EPUB 也能按卷 / 按范围
+        // （只读，不导出、不写盘）
+        await automationWin.webContents.executeJavaScript(
+          `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="epub"]').click();`,
+          true
+        );
+        await sleep(700);
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+            const radio = document.querySelector('input[name="export-scope"][value="volume"]');
+            if (radio) radio.click();
+            const select = document.getElementById('export-volume');
+            if (select && select.options.length > 1) {
+              select.selectedIndex = 1;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          })()`,
           true
         );
         await sleep(900);

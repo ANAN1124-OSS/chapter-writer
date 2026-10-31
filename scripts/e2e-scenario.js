@@ -1916,9 +1916,10 @@ module.exports = async function runScenario(ctx) {
   const restoreSaveDialog = () => {
     dialog.showSaveDialog = originalShowSaveDialog;
   };
-  const openExportDialogFromMenu = async () => {
+  // action = 'txt'（默认）| 'epub'：两个入口现在都打开同一个范围对话框（v0.8 P0 N8）
+  const openExportDialogFromMenu = async (action = 'txt') => {
     await exec(
-      "document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action=\"txt\"]').click()"
+      `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="${action}"]').click()`
     );
     await waitFor('window.__cwTest.exportDialogOpen() === true');
   };
@@ -4594,9 +4595,15 @@ module.exports = async function runScenario(ctx) {
   const epubPath = path.join(epubDir, 'book.epub');
   withSavePath(epubPath);
   try {
-    await exec(
-      "document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action=\"epub\"]').click()"
+    await openExportDialogFromMenu('epub');
+    await waitForSummary('EPUB导出测试书.epub');
+    check(
+      'EPUB 导出：导出对话框标题是「导出 EPUB」、摘要给出 .epub 默认文件名',
+      (await exec('window.__cwTest.exportTitle()')) === '导出 EPUB' &&
+        (await exec('window.__cwTest.exportFormat()')) === 'epub' &&
+        (await exec('window.__cwTest.exportSummary()')).includes('EPUB导出测试书.epub')
     );
+    await exec("document.getElementById('btn-export-confirm').click()");
     await waitForFile(epubPath);
   } finally {
     restoreSaveDialog();
@@ -4707,7 +4714,9 @@ module.exports = async function runScenario(ctx) {
   const epubUnsavedPath = path.join(epubDir, 'unsaved.epub');
   withSavePath(epubUnsavedPath);
   try {
-    await exec("document.querySelector('#export-menu button[data-action=\"epub\"]').click()");
+    await openExportDialogFromMenu('epub');
+    await waitForSummary('含当前章未保存内容');
+    await exec("document.getElementById('btn-export-confirm').click()");
     await waitForFile(epubUnsavedPath);
   } finally {
     restoreSaveDialog();
@@ -4729,7 +4738,9 @@ module.exports = async function runScenario(ctx) {
   // 45c. 取消保存对话框：不写文件、仍停在编辑页
   dialog.showSaveDialog = async () => ({ canceled: true, filePath: null });
   try {
-    await exec("document.querySelector('#export-menu button[data-action=\"epub\"]').click()");
+    await openExportDialogFromMenu('epub');
+    await waitForSummary('EPUB导出测试书.epub');
+    await exec("document.getElementById('btn-export-confirm').click()");
     await sleep(500);
   } finally {
     restoreSaveDialog();
@@ -4794,7 +4805,9 @@ module.exports = async function runScenario(ctx) {
   const epubLegacyExportPath = path.join(epubDir, 'legacy.epub');
   withSavePath(epubLegacyExportPath);
   try {
-    await exec("document.querySelector('#export-menu button[data-action=\"epub\"]').click()");
+    await openExportDialogFromMenu('epub');
+    await waitForSummary('EPUB旧书.epub');
+    await exec("document.getElementById('btn-export-confirm').click()");
     await waitForFile(epubLegacyExportPath);
   } finally {
     restoreSaveDialog();
@@ -5454,9 +5467,9 @@ module.exports = async function runScenario(ctx) {
   const s2tEpubPath = path.join(s2tDir, 'book-s2t.epub');
   withSavePath(s2tEpubPath);
   try {
-    await exec(
-      "document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action=\"epub\"]').click()"
-    );
+    await openExportDialogFromMenu('epub');
+    await waitForSummary('简繁导出测试书.epub');
+    await exec("document.getElementById('btn-export-confirm').click()");
     await waitForFile(s2tEpubPath);
   } finally {
     restoreSaveDialog();
@@ -5590,6 +5603,382 @@ module.exports = async function runScenario(ctx) {
       s2tDirEntries.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')) &&
       s2tDirEntries.filter((name) => name.endsWith('.txt')).length === 2,
     s2tDirEntries
+  );
+
+  // 46k. EPUB 按卷 / 按范围导出（v0.8-8，提案 N8）：只读、只打选中的章；
+  // 章号仍按全书顺序，卷名页只生成选中章所在的卷，identifier 按范围区分。
+  await exec("window.__cwTest.newBook('EPUB范围导出测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const epubRangeBookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '楔子')");
+  await exec("window.__cwTest.newVolume('上卷')");
+  await exec("window.__cwTest.newChapterInVolume(0, '上卷一')");
+  await exec("window.__cwTest.newChapterInVolume(0, '上卷二')");
+  await exec("window.__cwTest.newVolume('下卷')");
+  await exec("window.__cwTest.newChapterInVolume(1, '下卷三')");
+  await exec("window.__cwTest.newChapterInVolume(1, '下卷四')");
+  await exec("window.__cwTest.newVolume('空卷')");
+  const epubRangeVolumeIds = await exec('window.__cwTest.volumeIds()');
+  const epubRangeTexts = ['楔子正文。', '上卷第一章正文。', '上卷第二章正文。', '下卷第一章正文。', '下卷第二章正文。'];
+  for (let i = 0; i < epubRangeTexts.length; i += 1) {
+    await exec(`window.__cwTest.switchTo(${i}, 'discard')`);
+    await exec(`window.__cwTest.setText(${JSON.stringify(epubRangeTexts[i])})`);
+    await exec('window.__cwTest.save()');
+  }
+  const epubRangeMeta = await storage.readBookMeta(epubRangeBookPath);
+  const epubRangeChaptersBefore = JSON.stringify(epubRangeMeta.chapters);
+  const epubRangeStatBefore = [];
+  for (const chapter of epubRangeMeta.chapters) {
+    const stat = await fs.stat(path.join(epubRangeBookPath, chapter.file));
+    epubRangeStatBefore.push({ file: chapter.file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  const epubRangeCfgBefore = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  const epubRangeDir = path.join(path.dirname(booksRoot), 'epub-range-exports');
+  await fs.mkdir(epubRangeDir, { recursive: true });
+  const readEpub = async (filePath) => {
+    const zip = readZip(await fs.readFile(filePath));
+    const entries = new Map(zip.entries.map((entry) => [entry.name, entry]));
+    return {
+      zip,
+      names: zip.names,
+      text: (name) => {
+        const entry = entries.get(name);
+        return entry ? entry.data.toString('utf8') : '';
+      }
+    };
+  };
+  const epubSpineOf = (opf) =>
+    [...opf.matchAll(/<itemref idref="([^"]+)"/g)].map((match) => match[1]);
+  const textFilesOf = (names) => names.filter((name) => name.startsWith('OEBPS/text/')).sort();
+
+  check(
+    'EPUB 范围导出：准备了一本 5 章 / 3 卷（其中一卷是空卷）的书',
+    epubRangeMeta.chapters.length === 5 &&
+      epubRangeVolumeIds.length === 3 &&
+      (await exec('window.__cwTest.volumeNames()')).join(',') === '上卷,下卷,空卷' &&
+      JSON.stringify(await exec('window.__cwTest.chapterTitles()')) ===
+        JSON.stringify(['楔子', '第2章：上卷一', '第3章：上卷二', '第4章：下卷三', '第5章：下卷四']),
+    await exec('window.__cwTest.chapterTitles()')
+  );
+
+  // 46k-1. 入口：EPUB 菜单打开的是同一个范围对话框，标题 / 格式 / 默认文件名都是 EPUB
+  await openExportDialogFromMenu('epub');
+  const epubRangeAllSummary = await waitForSummary('EPUB范围导出测试书.epub');
+  check(
+    'EPUB 范围导出：导出对话框是 EPUB 模式，默认全书 5 章',
+    (await exec('window.__cwTest.exportTitle()')) === '导出 EPUB' &&
+      (await exec('window.__cwTest.exportFormat()')) === 'epub' &&
+      epubRangeAllSummary.includes('将导出 5 章') &&
+      epubRangeAllSummary.includes('EPUB范围导出测试书.epub'),
+    epubRangeAllSummary
+  );
+  const epubRangeVolumeOptions = await exec(
+    "Array.from(document.getElementById('export-volume').options).map((option) => option.textContent)"
+  );
+  check(
+    'EPUB 范围导出：按卷下拉框列出未分卷和三个卷（含空卷 0 章）',
+    JSON.stringify(epubRangeVolumeOptions) ===
+      JSON.stringify(['未分卷（1 章）', '上卷（2 章）', '下卷（2 章）', '空卷（0 章）']),
+    epubRangeVolumeOptions
+  );
+
+  // 46k-2. 全书 EPUB：5 章 + 2 个卷名页，identifier 用作后面按卷 / 按范围的对照
+  const epubRangeFullPath = path.join(epubRangeDir, 'full.epub');
+  withSavePath(epubRangeFullPath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(epubRangeFullPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const epubRangeFull = await readEpub(epubRangeFullPath);
+  const epubRangeFullOpf = epubRangeFull.text('OEBPS/content.opf');
+  const epubRangeFullIdentifier = (
+    epubRangeFullOpf.match(/<dc:identifier id="pub-id">([^<]+)<\/dc:identifier>/) || []
+  )[1];
+  check(
+    'EPUB 范围导出：全书 EPUB 仍是 5 章 / 2 个卷名页，封面与以前一致',
+    textFilesOf(epubRangeFull.names).join(',') ===
+      [
+        'OEBPS/text/chapter-0001.xhtml',
+        'OEBPS/text/chapter-0002.xhtml',
+        'OEBPS/text/chapter-0003.xhtml',
+        'OEBPS/text/chapter-0004.xhtml',
+        'OEBPS/text/chapter-0005.xhtml',
+        'OEBPS/text/volume-0001.xhtml',
+        'OEBPS/text/volume-0002.xhtml'
+      ].join(',') &&
+      epubRangeFull.text('OEBPS/cover.xhtml').includes('共 5 章 · 2 卷') &&
+      Boolean(epubRangeFullIdentifier),
+    textFilesOf(epubRangeFull.names)
+  );
+
+  // 46k-3. 按卷导出「上卷」：只打第 2–3 章，文件名带卷名
+  await openExportDialogFromMenu('epub');
+  await exec("document.querySelector('input[name=\"export-scope\"][value=\"volume\"]').click()");
+  await exec(
+    `(() => { const select = document.getElementById('export-volume'); select.value = ${JSON.stringify(epubRangeVolumeIds[0])}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`
+  );
+  const epubRangeVolumeSummary = await waitForSummary('EPUB范围导出测试书-上卷.epub');
+  check(
+    'EPUB 范围导出：按卷摘要显示 2 章、文件名带卷名',
+    epubRangeVolumeSummary.includes('将导出 2 章') &&
+      epubRangeVolumeSummary.includes('EPUB范围导出测试书-上卷.epub'),
+    epubRangeVolumeSummary
+  );
+  const epubRangeVolumePath = path.join(epubRangeDir, 'volume.epub');
+  withSavePath(epubRangeVolumePath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(epubRangeVolumePath);
+  } finally {
+    restoreSaveDialog();
+  }
+  check(
+    'EPUB 范围导出：保存对话框默认文件名 = 书名-卷名.epub，类型带 epub',
+    Boolean(lastSaveOptions) &&
+      path.basename(lastSaveOptions.defaultPath) === 'EPUB范围导出测试书-上卷.epub' &&
+      lastSaveOptions.filters.some(
+        (filter) => Array.isArray(filter.extensions) && filter.extensions.includes('epub')
+      ),
+    lastSaveOptions && lastSaveOptions.defaultPath
+  );
+  const epubRangeVolume = await readEpub(epubRangeVolumePath);
+  const epubRangeVolumeOpf = epubRangeVolume.text('OEBPS/content.opf');
+  const epubRangeVolumeIdentifier = (
+    epubRangeVolumeOpf.match(/<dc:identifier id="pub-id">([^<]+)<\/dc:identifier>/) || []
+  )[1];
+  check(
+    'EPUB 范围导出：按卷只打这一卷的章 + 一个卷名页，spine / 目录同步',
+    textFilesOf(epubRangeVolume.names).join(',') ===
+      [
+        'OEBPS/text/chapter-0002.xhtml',
+        'OEBPS/text/chapter-0003.xhtml',
+        'OEBPS/text/volume-0001.xhtml'
+      ].join(',') &&
+      JSON.stringify(epubSpineOf(epubRangeVolumeOpf)) ===
+        JSON.stringify(['cover', 'vol1', 'ch2', 'ch3']) &&
+      epubRangeVolume.text('OEBPS/nav.xhtml').includes('上卷') &&
+      !epubRangeVolume.text('OEBPS/nav.xhtml').includes('楔子') &&
+      !epubRangeVolume.text('OEBPS/nav.xhtml').includes('下卷'),
+    textFilesOf(epubRangeVolume.names)
+  );
+  check(
+    'EPUB 范围导出：按卷副本章号仍按全书（第3章：上卷二），封面写「上卷 · 共 2 章 · 1 卷」',
+    epubRangeVolume.text('OEBPS/text/chapter-0003.xhtml').includes('第3章：上卷二') &&
+      epubRangeVolume.text('OEBPS/cover.xhtml').includes('上卷 · 共 2 章 · 1 卷')
+  );
+  check(
+    'EPUB 范围导出：按卷副本 identifier 与整本不同（阅读器不会当成同一本书）',
+    Boolean(epubRangeVolumeIdentifier) &&
+      Boolean(epubRangeFullIdentifier) &&
+      epubRangeVolumeIdentifier !== epubRangeFullIdentifier,
+    { volume: epubRangeVolumeIdentifier, full: epubRangeFullIdentifier }
+  );
+
+  // 46k-4. 章节范围 3–4（跨卷）：两卷卷名页都在，范围外一章都不进包
+  await openExportDialogFromMenu('epub');
+  await chooseExportRange(3, 4);
+  const epubRangeRangeSummary = await waitForSummary('EPUB范围导出测试书-第3-4章.epub');
+  check(
+    'EPUB 范围导出：章节范围摘要 2 章、文件名带第3-4章',
+    epubRangeRangeSummary.includes('将导出 2 章') &&
+      epubRangeRangeSummary.includes('EPUB范围导出测试书-第3-4章.epub'),
+    epubRangeRangeSummary
+  );
+  const epubRangeRangePath = path.join(epubRangeDir, 'range.epub');
+  withSavePath(epubRangeRangePath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(epubRangeRangePath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const epubRangeRange = await readEpub(epubRangeRangePath);
+  const epubRangeRangeOpf = epubRangeRange.text('OEBPS/content.opf');
+  check(
+    'EPUB 范围导出：第 3–4 章跨卷只打这两章 + 两个卷名页，spine 顺序正确',
+    textFilesOf(epubRangeRange.names).join(',') ===
+      [
+        'OEBPS/text/chapter-0003.xhtml',
+        'OEBPS/text/chapter-0004.xhtml',
+        'OEBPS/text/volume-0001.xhtml',
+        'OEBPS/text/volume-0002.xhtml'
+      ].join(',') &&
+      JSON.stringify(epubSpineOf(epubRangeRangeOpf)) ===
+        JSON.stringify(['cover', 'vol1', 'ch3', 'vol2', 'ch4']),
+    textFilesOf(epubRangeRange.names)
+  );
+  check(
+    'EPUB 范围导出：跨卷范围封面写「第3-4章 · 共 2 章 · 2 卷」，正文只含选中章',
+    epubRangeRange.text('OEBPS/cover.xhtml').includes('第3-4章 · 共 2 章 · 2 卷') &&
+      epubRangeRange.text('OEBPS/text/chapter-0003.xhtml').includes('上卷第二章正文。') &&
+      epubRangeRange.text('OEBPS/text/chapter-0004.xhtml').includes('下卷第一章正文。') &&
+      !epubRangeRange.text('OEBPS/text/chapter-0004.xhtml').includes('下卷第二章正文。')
+  );
+  check(
+    'EPUB 范围导出：按章节范围的 identifier 与整本 / 按卷都不同',
+    (() => {
+      const id = (
+        epubRangeRangeOpf.match(/<dc:identifier id="pub-id">([^<]+)<\/dc:identifier>/) || []
+      )[1];
+      return Boolean(id) && id !== epubRangeFullIdentifier && id !== epubRangeVolumeIdentifier;
+    })()
+  );
+
+  // 46k-5. 空卷：明确提示没有章节、导出按钮不可点（不写空文件）
+  await openExportDialogFromMenu('epub');
+  await exec("document.querySelector('input[name=\"export-scope\"][value=\"volume\"]').click()");
+  await exec(
+    `(() => { const select = document.getElementById('export-volume'); select.value = ${JSON.stringify(epubRangeVolumeIds[2])}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`
+  );
+  const epubRangeEmptySummary = await waitForSummary('所选范围里没有章节');
+  check(
+    'EPUB 范围导出：空卷提示「所选范围里没有章节」、导出按钮不可点',
+    epubRangeEmptySummary.includes('所选范围里没有章节') &&
+      (await exec('window.__cwTest.exportConfirmDisabled()')) === true,
+    epubRangeEmptySummary
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  check('EPUB 范围导出：Esc 关闭范围对话框', (await exec('window.__cwTest.exportDialogOpen()')) === false);
+
+  // 46k-6. 未分卷：只打第 1 章，不生成卷名页，文件名带「未分卷」
+  await openExportDialogFromMenu('epub');
+  await exec("document.querySelector('input[name=\"export-scope\"][value=\"volume\"]').click()");
+  await exec(
+    "(() => { const select = document.getElementById('export-volume'); select.value = '__none__'; select.dispatchEvent(new Event('change', { bubbles: true })); })()"
+  );
+  const epubRangeUnvolumedSummary = await waitForSummary('EPUB范围导出测试书-未分卷.epub');
+  check(
+    'EPUB 范围导出：未分卷摘要 1 章、文件名带未分卷',
+    epubRangeUnvolumedSummary.includes('将导出 1 章') &&
+      epubRangeUnvolumedSummary.includes('EPUB范围导出测试书-未分卷.epub'),
+    epubRangeUnvolumedSummary
+  );
+  const epubRangeUnvolumedPath = path.join(epubRangeDir, 'unvolumed.epub');
+  withSavePath(epubRangeUnvolumedPath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(epubRangeUnvolumedPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const epubRangeUnvolumed = await readEpub(epubRangeUnvolumedPath);
+  check(
+    'EPUB 范围导出：未分卷只打第 1 章、没有卷名页，封面写「未分卷 · 共 1 章」',
+    textFilesOf(epubRangeUnvolumed.names).join(',') === 'OEBPS/text/chapter-0001.xhtml' &&
+      epubRangeUnvolumed.text('OEBPS/cover.xhtml').includes('未分卷 · 共 1 章') &&
+      !epubRangeUnvolumed.text('OEBPS/nav.xhtml').includes('上卷')
+  );
+
+  // 46k-7. 当前章未保存内容：只在选中范围里参与，磁盘不变
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  const epubRangeUnsavedText = '未保存的上卷新内容。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(epubRangeUnsavedText)})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  await openExportDialogFromMenu('epub');
+  await chooseExportRange(2, 2);
+  // 先等范围专属文件名，否则会匹配到对话框刚打开时的「全书」摘要（它同样含未保存提示）
+  const epubRangeUnsavedSummary = await waitForSummary('EPUB范围导出测试书-第2章.epub');
+  check(
+    'EPUB 范围导出：摘要提示含当前章未保存内容',
+    epubRangeUnsavedSummary.includes('含当前章未保存内容') &&
+      epubRangeUnsavedSummary.includes('EPUB范围导出测试书-第2章.epub'),
+    epubRangeUnsavedSummary
+  );
+  const epubRangeUnsavedPath = path.join(epubRangeDir, 'unsaved.epub');
+  withSavePath(epubRangeUnsavedPath);
+  try {
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(epubRangeUnsavedPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const epubRangeUnsaved = await readEpub(epubRangeUnsavedPath);
+  check(
+    'EPUB 范围导出：未保存正文进了 EPUB、旧正文没进去、磁盘仍是旧正文',
+    epubRangeUnsaved.text('OEBPS/text/chapter-0002.xhtml').includes(epubRangeUnsavedText) &&
+      !epubRangeUnsaved.text('OEBPS/text/chapter-0002.xhtml').includes('上卷第一章正文。') &&
+      (await storage.loadChapterText(epubRangeBookPath, epubRangeMeta.chapters[1].file)).text ===
+        '上卷第一章正文。' &&
+      (await exec('window.__cwTest.dirty()')) === true
+  );
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+
+  // 46k-8. 全程只读：章节 txt 大小 + mtime、书目 chapters、书内文件、config 字段都没被导出改写
+  let epubRangeFilesUntouched = true;
+  for (const item of epubRangeStatBefore) {
+    const stat = await fs.stat(path.join(epubRangeBookPath, item.file));
+    if (stat.size !== item.size || stat.mtimeMs !== item.mtimeMs) epubRangeFilesUntouched = false;
+  }
+  const epubRangeMetaAfter = await storage.readBookMeta(epubRangeBookPath);
+  const epubRangeCfgAfter = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  let epubRangeCfgSame =
+    Object.keys(epubRangeCfgBefore).sort().join(',') === Object.keys(epubRangeCfgAfter).sort().join(',');
+  for (const key of Object.keys(epubRangeCfgBefore)) {
+    // lastExportDir = 导出目录记忆（导出动作本来就会写）；lastBook = 切章 / 打开书记的位置，与导出无关
+    if (key === 'lastExportDir' || key === 'lastBook') continue;
+    if (JSON.stringify(epubRangeCfgBefore[key]) !== JSON.stringify(epubRangeCfgAfter[key])) {
+      epubRangeCfgSame = false;
+    }
+  }
+  const epubRangeDirEntries = (await fs.readdir(epubRangeBookPath)).sort();
+  const epubRangeChaptersSame =
+    JSON.stringify(epubRangeMetaAfter.chapters) === epubRangeChaptersBefore;
+  check(
+    'EPUB 范围导出：全程只读——章节 txt / 书目 chapters / 书内文件 / config 都没被导出改写',
+    epubRangeFilesUntouched &&
+      epubRangeChaptersSame &&
+      epubRangeCfgSame &&
+      epubRangeDirEntries.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')) &&
+      epubRangeDirEntries.filter((name) => name.endsWith('.txt')).length === 5,
+    {
+      untouched: epubRangeFilesUntouched,
+      chaptersSame: epubRangeChaptersSame,
+      cfgSame: epubRangeCfgSame,
+      dir: epubRangeDirEntries
+    }
+  );
+
+  // 46k-9. 范围副本的 XML 全部合法，manifest 里的文件都在包里
+  let epubRangeXmlOk = true;
+  let epubRangeXmlChecked = 0;
+  let epubRangeXmlError = '';
+  for (const entry of epubRangeRange.zip.entries) {
+    if (!/\.(xhtml|opf|ncx|xml)$/.test(entry.name)) continue;
+    try {
+      assertWellFormedXml(entry.data.toString('utf8'), entry.name);
+      epubRangeXmlChecked += 1;
+    } catch (err) {
+      epubRangeXmlOk = false;
+      epubRangeXmlError = err.message;
+    }
+  }
+  const epubRangeRangeHrefs = [...epubRangeRangeOpf.matchAll(/<item [^>]*href="([^"]+)"/g)].map(
+    (match) => match[1]
+  );
+  check(
+    'EPUB 范围导出：范围副本的 XML 都合法、manifest 里每个文件都在包里',
+    epubRangeXmlOk &&
+      epubRangeXmlChecked >= 6 &&
+      epubRangeRangeHrefs.every((href) => epubRangeRange.names.includes(`OEBPS/${href}`)),
+    { checked: epubRangeXmlChecked, error: epubRangeXmlError }
+  );
+
+  // 46k-10. TXT 入口共用同一个对话框：切回 TXT 模式，摘要恢复 .txt
+  await openExportDialogFromMenu('txt');
+  const epubRangeTxtSummary = await waitForSummary('EPUB范围导出测试书.txt');
+  check(
+    'EPUB 范围导出：TXT 入口打开同一个对话框，标题 / 格式 / 文件名回到 TXT',
+    (await exec('window.__cwTest.exportTitle()')) === '导出 TXT' &&
+      (await exec('window.__cwTest.exportFormat()')) === 'txt' &&
+      epubRangeTxtSummary.includes('EPUB范围导出测试书.txt'),
+    epubRangeTxtSummary
+  );
+  await exec("document.getElementById('btn-export-cancel').click()");
+  check(
+    'EPUB 范围导出：取消按钮关闭对话框、不写文件',
+    (await exec('window.__cwTest.exportDialogOpen()')) === false
   );
 
   // 47. 灵感箱（v0.7-3，提案 3.4）：碎片是书架 _碎片 里的普通 txt；插入只改编辑区、不写盘

@@ -83,7 +83,7 @@ contextBridge.exposeInMainWorld('api', {
 
   exportPlan: (bookPath, override, range) => invoke('book:export-plan', bookPath, override, range),
   exportBook: (bookPath, override, range) => invoke('book:export', bookPath, override, range),
-  exportEpub: (bookPath, override) => invoke('book:export-epub', bookPath, override),
+  exportEpub: (bookPath, override, range) => invoke('book:export-epub', bookPath, override, range),
   copyBook: (bookPath, override) => invoke('book:copy', bookPath, override),
   copyChapterPlatform: (bookPath, ref) => invoke('chapter:copy-platform', bookPath, ref),
   repairBook: (bookPath, mode) => invoke('book:repair', bookPath, mode),

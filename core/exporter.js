@@ -101,11 +101,16 @@ function resolveExportRange(meta, range) {
 
 // 导出对话框默认文件名（不含目录）：
 //   全书 → 书名.txt；按卷 → 书名-卷名.txt；章节范围 → 书名-第X-Y章.txt（单章 书名-第X章.txt）
-function exportFileName(meta, range) {
+// extension 可选（默认 txt）：EPUB 导出传 'epub'，范围规则 / 非法字符清洗完全一样。
+function exportFileName(meta, range, extension) {
   const plan = resolveExportRange(meta, range);
   const bookName = chaptersLib.safeName(meta && meta.title);
-  if (plan.mode === 'all') return `${bookName}.txt`;
-  return `${bookName}-${chaptersLib.safeName(plan.label)}.txt`;
+  const ext =
+    typeof extension === 'string' && extension.trim()
+      ? extension.trim().replace(/^\./, '')
+      : 'txt';
+  if (plan.mode === 'all') return `${bookName}.${ext}`;
+  return `${bookName}-${chaptersLib.safeName(plan.label)}.${ext}`;
 }
 
 // meta.chapters 与 texts 一一对应（texts 顺序同 chapters）

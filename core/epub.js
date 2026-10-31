@@ -3,6 +3,10 @@
 // 这里全部是纯函数：不读盘、不依赖 Electron，zip 用 Node 内置 zlib 手拼，
 // 不引入任何第三方运行时依赖（项目只有 devDependencies）。
 //
+// 支持按卷 / 按章节范围导出（v0.8 P0 N8）：范围解析复用 core/exporter.resolveExportRange，
+// 只把选中的章节打进包里；章号、章名仍按全书顺序（和 TXT 范围导出同一规则），
+// 卷名页只生成选中章节所在的卷，封面章数 = 本次导出的章数。
+//
 // EPUB 结构（EPUB 3，另外带一份 EPUB 2 的 toc.ncx 兜底，老阅读器也能认出目录）：
 //   mimetype                        必须第一个、不压缩
 //   META-INF/container.xml          指向 OEBPS/content.opf
@@ -16,6 +20,7 @@
 const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const chaptersLib = require('./chapters');
+const exporter = require('./exporter');
 
 const EPUB_MIMETYPE = 'application/epub+zip';
 const EPUB_DIR = 'OEBPS';
@@ -247,8 +252,11 @@ function volumeDocument({ title, lang, cssHref }) {
   return xhtmlDocument({ title, lang, cssHref, body });
 }
 
-function coverDocument({ title, chapterCount, volumeCount, lang, cssHref }) {
-  const meta = [`共 ${chapterCount} 章`];
+// rangeLabel 只在「按卷 / 按章节范围」导出时传（全书导出为空，封面和以前完全一样）
+function coverDocument({ title, chapterCount, volumeCount, rangeLabel, lang, cssHref }) {
+  const meta = [];
+  if (rangeLabel) meta.push(rangeLabel);
+  meta.push(`共 ${chapterCount} 章`);
   if (volumeCount > 0) meta.push(`${volumeCount} 卷`);
   const body = [
     '<section epub:type="cover" class="cover">',
@@ -390,7 +398,8 @@ function pad4(n) {
 
 // 按书目顺序把章节分组成「卷」。顺序在 storage 读取时已经归一成
 // 「未分卷 → 第1卷 → 第2卷 …」，这里只按连续段切分；没有名字的卷当作未分卷平铺。
-function groupChapters(meta) {
+// indexes 可选：只对选中的章节下标分组（按卷 / 按范围导出用），不传 = 全书。
+function groupChapters(meta, indexes) {
   const chapters = chapterList(meta);
   const volumes = new Map();
   for (const volume of volumeList(meta)) {
@@ -398,8 +407,12 @@ function groupChapters(meta) {
       volumes.set(volume.id, String(volume.name == null ? '' : volume.name).trim());
     }
   }
+  const order = Array.isArray(indexes)
+    ? indexes.filter((index) => Number.isInteger(index) && index >= 0 && index < chapters.length)
+    : chapters.map((_, index) => index);
   const groups = [];
-  chapters.forEach((chapter, index) => {
+  for (const index of order) {
+    const chapter = chapters[index];
     const volumeId = chapter && chapter.volumeId ? String(chapter.volumeId) : null;
     const name = volumeId && volumes.has(volumeId) ? volumes.get(volumeId) : '';
     const last = groups[groups.length - 1];
@@ -408,7 +421,7 @@ function groupChapters(meta) {
     } else {
       last.indexes.push(index);
     }
-  });
+  }
   return groups;
 }
 
@@ -439,17 +452,28 @@ function normalizeInput(input) {
     typeof (input && input.language) === 'string' && input.language.trim()
       ? input.language.trim()
       : EPUB_LANGUAGE;
+  // 范围解析和 TXT 导出共用同一份纯逻辑：只读，不改 meta。
+  const plan = exporter.resolveExportRange(meta, input && input.range);
+  // 全书导出的 identifier 和以前完全一样（同一本书每次导出不变）；
+  // 按卷 / 按范围导出加上范围种子，免得阅读器把「一卷」当成整本书的另一个版本。
+  const rangeSeed =
+    plan.mode === 'all'
+      ? ''
+      : `#${plan.mode}:${
+          plan.mode === 'volume' ? plan.volumeId || 'none' : `${plan.from}-${plan.to}`
+        }`;
   const identifier =
     typeof (input && input.identifier) === 'string' && input.identifier.trim()
       ? input.identifier.trim()
-      : bookIdentifier(meta.id || title);
+      : bookIdentifier(`${meta.id || title}${rangeSeed}`);
   const stamp = isoTimestamp(input && input.modified);
-  return { meta, chapters, texts, title, lang, identifier, stamp };
+  return { meta, chapters, texts, title, lang, identifier, stamp, plan };
 }
 
 function buildBundle(input) {
-  const { meta, chapters, texts, title, lang, identifier, stamp } = normalizeInput(input);
-  const groups = groupChapters(meta);
+  const { meta, chapters, texts, title, lang, identifier, stamp, plan } = normalizeInput(input);
+  if (!plan.count) throw new Error('EMPTY_EXPORT_RANGE：所选范围里没有章节');
+  const groups = groupChapters(meta, plan.indexes);
   const files = [];
   const manifest = [];
   const spine = [];
@@ -485,7 +509,8 @@ function buildBundle(input) {
       const number = index + 1;
       const href = `text/chapter-${pad4(number)}.xhtml`;
       const id = `ch${number}`;
-      // 章名 / 章号规则和 TXT 导出完全一致（core/chapters.formatTitle）
+      // 章名 / 章号规则和 TXT 导出完全一致（core/chapters.formatTitle）：
+      // 范围导出时章号仍按全书顺序，不会从第 1 章重新编号。
       const chapterTitle = chaptersLib.formatTitle(meta, index, chapter && chapter.name);
       const text = texts[index] == null ? '' : texts[index];
       files.push({
@@ -514,8 +539,9 @@ function buildBundle(input) {
     name: `${EPUB_DIR}/cover.xhtml`,
     data: coverDocument({
       title,
-      chapterCount: chapters.length,
+      chapterCount: plan.count,
       volumeCount,
+      rangeLabel: plan.mode === 'all' ? '' : plan.label,
       lang,
       cssHref: 'style.css'
     })
@@ -534,12 +560,14 @@ function buildBundle(input) {
 
   return {
     files,
-    chapterCount: chapters.length,
+    chapterCount: plan.count,
     volumeCount,
     title,
     identifier,
     modified: stamp.iso,
-    date: stamp.date
+    date: stamp.date,
+    rangeMode: plan.mode,
+    rangeLabel: plan.label
   };
 }
 
@@ -549,8 +577,9 @@ function epubFiles(input) {
 }
 
 // 产出可写盘的 EPUB 字节。
-// input = { meta, texts, language?, identifier?, modified?, zipDate? }
+// input = { meta, texts, range?, language?, identifier?, modified?, zipDate? }
 //   meta / texts 就绪与 TXT 导出相同的「书目 + 各章正文（顺序对齐）」；
+//   range 可选（见 core/exporter.resolveExportRange）：只导出选中的卷 / 章节；
 //   modified 默认现在，传固定值可让同样的内容导出成完全一样的字节（单测用）。
 function buildEpub(input) {
   const bundle = buildBundle(input);
@@ -563,13 +592,16 @@ function buildEpub(input) {
     bytes: buffer.length,
     title: bundle.title,
     identifier: bundle.identifier,
-    modified: bundle.modified
+    modified: bundle.modified,
+    rangeMode: bundle.rangeMode,
+    rangeLabel: bundle.rangeLabel
   };
 }
 
-// 导出对话框默认文件名：书名.epub（书名照样清洗非法字符，规则同 TXT）
-function epubFileName(meta) {
-  return `${chaptersLib.safeName(meta && meta.title)}.epub`;
+// 导出对话框默认文件名：全书 = 书名.epub；按卷 / 按范围 = 书名-范围.epub
+// （范围规则和 TXT 导出完全一致，由 core/exporter.exportFileName 统一实现）
+function epubFileName(meta, range) {
+  return exporter.exportFileName(meta, range, 'epub');
 }
 
 module.exports = {

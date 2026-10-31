@@ -218,6 +218,163 @@ test('默认文件名：书名.epub，非法字符清洗，空书名兜底', () 
   assert.equal(epub.epubFileName(null), '未命名.epub');
 });
 
+// ---------- 按卷 / 按范围导出（v0.8 P0 N8） ----------
+function rangeMeta() {
+  return {
+    title: '范围书',
+    id: 'b_range',
+    titleTemplate: '第{num}章：{name}',
+    volumes: [
+      { id: 'v1', name: '上卷' },
+      { id: 'v2', name: '下卷' }
+    ],
+    chapters: [
+      { id: 'c1', file: '001.txt', name: '楔子' },
+      { id: 'c2', file: '002.txt', name: '上卷一', volumeId: 'v1' },
+      { id: 'c3', file: '003.txt', name: '上卷二', volumeId: 'v1' },
+      { id: 'c4', file: '004.txt', name: '下卷三', volumeId: 'v2' },
+      { id: 'c5', file: '005.txt', name: '下卷四', volumeId: 'v2' }
+    ]
+  };
+}
+
+function rangeTexts() {
+  return ['楔子正文。', '上卷第一章正文。', '上卷第二章正文。', '下卷第一章正文。', '下卷第二章正文。'];
+}
+
+function buildRange(range) {
+  return build({ meta: rangeMeta(), texts: rangeTexts(), range });
+}
+
+test('EPUB 按卷导出：只打这一卷的章节，卷名页 / 目录 / spine 都只含这一卷', () => {
+  const { res, zip, byName } = buildRange({ mode: 'volume', volumeId: 'v1' });
+  assert.equal(res.chapterCount, 2);
+  assert.equal(res.volumeCount, 1);
+  assert.equal(res.rangeMode, 'volume');
+  assert.equal(res.rangeLabel, '上卷');
+  assert.deepEqual(zip.names.filter((name) => name.startsWith('OEBPS/text/')).sort(), [
+    'OEBPS/text/chapter-0002.xhtml',
+    'OEBPS/text/chapter-0003.xhtml',
+    'OEBPS/text/volume-0001.xhtml'
+  ]);
+  const opf = textOf(byName, 'OEBPS/content.opf');
+  const spine = [...opf.matchAll(/<itemref idref="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(spine, ['cover', 'vol1', 'ch2', 'ch3']);
+  const nav = textOf(byName, 'OEBPS/nav.xhtml');
+  assert.ok(nav.includes('<a href="text/volume-0001.xhtml">上卷</a>'));
+  assert.ok(nav.includes('第2章：上卷一') && nav.includes('第3章：上卷二'));
+  assert.ok(!nav.includes('楔子') && !nav.includes('下卷'), nav);
+  assert.ok(textOf(byName, 'OEBPS/cover.xhtml').includes('上卷 · 共 2 章 · 1 卷'));
+  // 章号 / 章名仍按全书顺序（不重新从第 1 章开始）
+  assert.ok(
+    textOf(byName, 'OEBPS/text/chapter-0003.xhtml').includes('<h1 class="chapter-title">第3章：上卷二</h1>')
+  );
+  assertWellFormedXml(textOf(byName, 'OEBPS/text/chapter-0003.xhtml'), 'chapter-0003');
+});
+
+test('EPUB 按章节范围导出：跨卷时两卷的卷名页都在，范围外的章一个都不进包', () => {
+  const { res, zip, byName } = buildRange({ mode: 'range', from: 2, to: 4 });
+  assert.equal(res.chapterCount, 3);
+  assert.equal(res.volumeCount, 2);
+  assert.equal(res.rangeLabel, '第2-4章');
+  assert.deepEqual(zip.names.filter((name) => name.startsWith('OEBPS/text/')).sort(), [
+    'OEBPS/text/chapter-0002.xhtml',
+    'OEBPS/text/chapter-0003.xhtml',
+    'OEBPS/text/chapter-0004.xhtml',
+    'OEBPS/text/volume-0001.xhtml',
+    'OEBPS/text/volume-0002.xhtml'
+  ]);
+  const opf = textOf(byName, 'OEBPS/content.opf');
+  const spine = [...opf.matchAll(/<itemref idref="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(spine, ['cover', 'vol1', 'ch2', 'ch3', 'vol2', 'ch4']);
+  const nav = textOf(byName, 'OEBPS/nav.xhtml');
+  assert.equal((nav.match(/<ol>/g) || []).length, 3, '两卷 = 两个二级 ol + 一个顶层 ol');
+  assert.ok(nav.includes('上卷') && nav.includes('下卷'));
+  assert.ok(!nav.includes('楔子') && !nav.includes('下卷四'), nav);
+  const cover = textOf(byName, 'OEBPS/cover.xhtml');
+  assert.ok(cover.includes('第2-4章 · 共 3 章 · 2 卷'), cover);
+  // 正文只取选中章（texts 下标对齐，范围外传空串也不会混进来）
+  assert.ok(textOf(byName, 'OEBPS/text/chapter-0002.xhtml').includes('上卷第一章正文。'));
+  assert.ok(textOf(byName, 'OEBPS/text/chapter-0004.xhtml').includes('下卷第一章正文。'));
+});
+
+test('EPUB 按卷导出：未分卷（volumeId=null）只打未分卷章，不生成卷名页', () => {
+  const { res, zip, byName } = buildRange({ mode: 'volume', volumeId: null });
+  assert.equal(res.chapterCount, 1);
+  assert.equal(res.volumeCount, 0);
+  assert.equal(res.rangeLabel, '未分卷');
+  assert.deepEqual(zip.names.filter((name) => name.startsWith('OEBPS/text/')), [
+    'OEBPS/text/chapter-0001.xhtml'
+  ]);
+  const opf = textOf(byName, 'OEBPS/content.opf');
+  const spine = [...opf.matchAll(/<itemref idref="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(spine, ['cover', 'ch1']);
+  const nav = textOf(byName, 'OEBPS/nav.xhtml');
+  assert.equal((nav.match(/<ol>/g) || []).length, 1);
+  assert.ok(nav.includes('楔子') && !nav.includes('上卷'));
+  assert.ok(textOf(byName, 'OEBPS/cover.xhtml').includes('未分卷 · 共 1 章'));
+});
+
+test('EPUB 范围导出：没有章节的范围明确报错，不产出坏书（空书仍是 EMPTY_BOOK）', () => {
+  assert.throws(() => buildRange({ mode: 'range', from: 4, to: 2 }), /EMPTY_EXPORT_RANGE/);
+  assert.throws(() => buildRange({ mode: 'volume', volumeId: 'nope' }), /EMPTY_EXPORT_RANGE/);
+  assert.throws(
+    () => epub.buildEpub({ meta: { title: '空书', chapters: [] }, texts: [], range: { mode: 'all' } }),
+    /EMPTY_BOOK/
+  );
+});
+
+test('EPUB 范围导出：只读，不改 meta；同样范围导出的 identifier 稳定，不同范围不同', () => {
+  const meta = rangeMeta();
+  const before = JSON.stringify(meta);
+  const volume = epub.buildEpub({
+    meta,
+    texts: rangeTexts(),
+    range: { mode: 'volume', volumeId: 'v1' },
+    modified: FIXED
+  });
+  const range = epub.buildEpub({
+    meta,
+    texts: rangeTexts(),
+    range: { mode: 'range', from: 2, to: 3 },
+    modified: FIXED
+  });
+  const again = epub.buildEpub({
+    meta,
+    texts: rangeTexts(),
+    range: { mode: 'volume', volumeId: 'v1' },
+    modified: FIXED
+  });
+  const full = epub.buildEpub({ meta, texts: rangeTexts(), modified: FIXED });
+  assert.equal(JSON.stringify(meta), before, '范围解析 / 导出不能改 meta');
+  assert.equal(volume.identifier, again.identifier, '同样的范围每次导出 identifier 要一样');
+  assert.notEqual(volume.identifier, range.identifier);
+  assert.notEqual(volume.identifier, full.identifier, '按卷导出不能和整本书共用一个 identifier');
+  for (const id of [volume.identifier, range.identifier, full.identifier]) {
+    assert.match(id, /^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  }
+});
+
+test('EPUB 全书导出：不传范围与 {mode:"all"} 字节完全一样（旧调用不受影响）', () => {
+  const meta = rangeMeta();
+  const first = epub.buildEpub({ meta, texts: rangeTexts(), modified: FIXED });
+  const second = epub.buildEpub({ meta, texts: rangeTexts(), modified: FIXED, range: { mode: 'all' } });
+  assert.ok(first.buffer.equals(second.buffer), '全书导出的字节不该因为新增 range 参数而变化');
+  assert.equal(first.identifier, second.identifier);
+  assert.equal(first.rangeMode, 'all');
+});
+
+test('EPUB 默认文件名：按卷 / 按范围复用 TXT 的范围命名规则，只换后缀', () => {
+  const meta = rangeMeta();
+  assert.equal(epub.epubFileName(meta), '范围书.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'all' }), '范围书.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'volume', volumeId: 'v1' }), '范围书-上卷.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'volume', volumeId: null }), '范围书-未分卷.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'range', from: 2, to: 4 }), '范围书-第2-4章.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'range', from: 3, to: 3 }), '范围书-第3章.epub');
+  assert.equal(epub.epubFileName({ title: 'a/b:c*?', chapters: [] }), 'abc.epub');
+});
+
 test('同样内容 + 同样时间：导出的字节完全一样（便于校验与回归）', () => {
   const first = epub.buildEpub({ meta: metaOf(), texts: ['甲', '乙'], modified: FIXED });
   const second = epub.buildEpub({ meta: metaOf(), texts: ['甲', '乙'], modified: FIXED });
