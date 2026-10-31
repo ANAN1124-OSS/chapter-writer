@@ -382,6 +382,7 @@
           </label>
         </div>
         <div class="export-summary" id="export-summary"></div>
+        <div class="export-conversion-note muted small" id="export-conversion-note"></div>
         <p class="muted small">
           按卷 / 按章只导出选中的章节，章号仍按全书连续编号（导出的 txt 里不会重新从第 1 章开始）。保存对话框里的文件名默认带范围，可以自己改。
         </p>
@@ -790,6 +791,19 @@
         </div>
         <span id="settings-proofread-status" class="muted small"></span>
       </label>
+      <div class="field-group" id="settings-export-group">导出</div>
+      <label class="field" id="settings-export-field">
+        <span>导出 TXT / EPUB 时把副本转成简体或繁体（<strong>只改导出的文件</strong>，书库里的章节 txt 和 <code>书目.json</code> 一个字节都不动）</span>
+        <select id="settings-export-conversion" class="text-input">
+          <option value="">不转换（原样导出）</option>
+          <option value="s2t">简体 → 繁体</option>
+          <option value="t2s">繁体 → 简体</option>
+        </select>
+        <span class="muted small">
+          内置常用字表 + 常见歧义词（发 / 髮、干 / 乾 / 幹、后 / 後 …）；一简对多繁只取常用写法，
+          导出后请通读校对。找不到的字原样保留，不会猜着换。
+        </span>
+      </label>
       <div class="field-group" id="settings-logs-group">诊断日志</div>
       <div class="field" id="settings-logs-field">
         <span>
@@ -863,6 +877,7 @@
 
   <script src="../core/bookinfo.js"></script>
   <script src="../core/template.js"></script>
+  <script src="../core/s2t.js"></script>
   <script src="editor-logic.js"></script>
   <script src="focus-logic.js"></script>
   <script src="reading-logic.js"></script>

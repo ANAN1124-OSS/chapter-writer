@@ -21,6 +21,8 @@
   const bookInfoLib = window.CWBookInfo;
   // 章节模板的清洗与占位符展开，core/template.js 里、Node 单测覆盖
   const templateLib = window.CWTemplate;
+  // 导出简繁转换（v0.8 P0 N7）：core/s2t.js 里、Node 单测覆盖；只用于显示的档位文案
+  const s2tLib = window.CWS2T;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -3995,8 +3997,32 @@
     $('export-to').max = String(total);
     $('export-from').min = '1';
     $('export-to').min = '1';
+    // 重新打开时先清掉上一次的摘要 / 计划：否则「上次的 2 章」会先显示出来，
+    // 作者手快按「导出…」时计划还没回来，会误报「所选范围里没有章节」。
+    lastExportPlan = null;
+    exportPlanToken += 1;
+    $('export-summary').textContent = '正在读取导出信息…';
+    $('export-summary').classList.remove('warn');
+    $('btn-export-confirm').disabled = true;
+    renderExportConversionNote();
     $('export-backdrop').classList.remove('hidden');
     refreshExportSummary();
+  }
+
+  // 导出简繁转换（v0.8 P0 N7）：档位在「设置 → 导出」里选，这里只读地告诉作者这次会怎么导，
+  // 免得导完才发现字形被换掉。真正转换在主进程做（只作用于导出副本）。
+  function exportConversionMode() {
+    return s2tLib.normalizeMode((state.config || {}).exportConversion);
+  }
+
+  function renderExportConversionNote() {
+    const el = $('export-conversion-note');
+    if (!el) return;
+    const mode = exportConversionMode();
+    el.textContent = mode
+      ? `简繁转换：${s2tLib.modeLabel(mode)}（只改导出的文件，原稿和书库不变；要改请去「设置 → 导出」）`
+      : '简繁转换：不转换（要转简 / 繁体可在「设置 → 导出」里选；只作用于导出的副本）';
+    el.classList.toggle('is-on', Boolean(mode));
   }
 
   function closeExportDialog() {
@@ -4065,10 +4091,16 @@
     try {
       const data = await call(api.exportBook, state.bookPath, currentChapterOverride(), range);
       if (data.canceled) return;
-      toast(`已导出：${data.filePath}${outputSummary(data)}`);
+      toast(`已导出：${data.filePath}${outputSummary(data)}${conversionTag(data.conversion)}`);
     } catch (err) {
       toast(`导出失败：${err.message}`, 'error');
     }
+  }
+
+  // 导出时的简繁转换提示：只有真的转了才在提示里说一声（原稿没动）
+  function conversionTag(mode) {
+    const m = s2tLib.normalizeMode(mode);
+    return m ? `（已${s2tLib.modeLabel(m)}）` : '';
   }
 
   // 导出 EPUB：整本书一本电子书（分卷 → 目录级、一章一个 XHTML、纯文字封面页）。
@@ -4082,7 +4114,7 @@
       if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
       parts.push(`${Number(data.chars) || 0} 字`);
       if (data.includedUnsaved) parts.push('含当前章未保存内容');
-      toast(`已导出 EPUB：${data.filePath}（${parts.join(' · ')}）`);
+      toast(`已导出 EPUB：${data.filePath}（${parts.join(' · ')}）${conversionTag(data.conversion)}`);
     } catch (err) {
       toast(`导出 EPUB 失败：${err.message}`, 'error');
     }
@@ -6952,6 +6984,8 @@
     // 章节模板：全局设置，留空 = 不套用（旧配置没有这个键也回空）
     $('settings-chapter-template').value = templateLib.sanitizeTemplate(cfg.chapterTemplate);
     renderChapterTemplatePreview();
+    // 导出简繁转换（全局设置）：旧配置没有这个键 = 不转换
+    setSelectValue('settings-export-conversion', s2tLib.normalizeMode(cfg.exportConversion), '');
     // 敏感词表：只记路径，词表本身只读；具体状态在 openSettings 里异步读一次
     state.sensitiveWordsDraft = typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath : '';
     state.sensitiveWordsInfo = null;
@@ -7227,6 +7261,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 导出简繁转换也是全局设置（导出格式对所有书一样），写作页的按书设置里不显示
+    for (const id of ['settings-export-group', 'settings-export-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     // 诊断日志也是全局的（一个应用一份日志），写作页的按书设置里不显示
     for (const id of ['settings-logs-group', 'settings-logs-field']) {
       const el = $(id);
@@ -7328,6 +7367,7 @@
         ...readSnapshotForm(),
         ...readStatsForm(),
         chapterTemplate: $('settings-chapter-template').value,
+        exportConversion: $('settings-export-conversion').value,
         sensitiveWordsPath: (state.sensitiveWordsDraft || '').trim(),
         proofreadWordsPath: (state.proofreadWordsDraft || '').trim()
       });
@@ -8139,6 +8179,18 @@
       exportSummary: () => $('export-summary').textContent,
       exportConfirmDisabled: () => $('btn-export-confirm').disabled,
       readExportRange: () => readExportRange(),
+      // 导出简繁转换（v0.8 P0 N7）：设置里的档位 + 导出对话框里那行只读提示
+      exportConversionValue: () => $('settings-export-conversion').value,
+      exportConversionSettingsVisible: () => !$('settings-export-field').classList.contains('hidden'),
+      exportConversionNote: () => $('export-conversion-note').textContent,
+      // 测试用：直接把档位写进配置（正常流程走设置弹层里的下拉框 + 保存设置）
+      async setExportConversion(mode) {
+        const cfg = await call(api.setConfig, { exportConversion: String(mode == null ? '' : mode) });
+        state.globalConfig = cfg;
+        state.config = effectiveConfig();
+        setSelectValue('settings-export-conversion', s2tLib.normalizeMode(cfg.exportConversion), '');
+        return cfg.exportConversion;
+      },
       contextMenuItems: () =>
         Array.from(document.querySelectorAll('#context-menu button')).map((el) => el.textContent),
       // 分卷

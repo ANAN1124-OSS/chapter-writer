@@ -1285,6 +1285,12 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   user-select: text;
 }
 .export-summary.warn { color: var(--danger); }
+/* 导出简繁转换提示（v0.8 P0 N7）：只读一行，说明这次导出会不会换字形 */
+.export-conversion-note {
+  margin-top: 8px;
+  line-height: 1.6;
+}
+.export-conversion-note.is-on { color: var(--accent); }
 
 /* ---------- 跳章（Ctrl+G） ---------- */
 .jump-modal {

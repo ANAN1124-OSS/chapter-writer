@@ -549,3 +549,45 @@ test('写作时长配置：开关写盘 / 读回，只影响这个字段', async
   await store.set({ writeDurationEnabled: false });
   assert.equal((await createConfigStore(dir).get()).writeDurationEnabled, false);
 });
+
+test('导出简繁转换配置：默认不转换、旧配置缺字段照常启动、脏值当不转换', async () => {
+  const dir = await mkTmp();
+  assert.equal((await createConfigStore(dir).get()).exportConversion, '', '默认不转换');
+  // 模拟旧配置：完全没有 exportConversion（v0.8 N6 及以前）
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 800, chapterTemplate: '第{n}章：' }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.exportConversion, '', '旧配置缺字段 = 不转换');
+  assert.equal(cfg.chapterTemplate, '第{n}章：', '旧配置其它字段不受影响');
+
+  assert.equal(sanitize({ exportConversion: 's2t' }).exportConversion, 's2t');
+  assert.equal(sanitize({ exportConversion: 't2s' }).exportConversion, 't2s');
+  assert.equal(sanitize({ exportConversion: 'S2T' }).exportConversion, '', '大小写不同不认');
+  assert.equal(sanitize({ exportConversion: 'zh-tw' }).exportConversion, '');
+  assert.equal(sanitize({ exportConversion: 123 }).exportConversion, '');
+  assert.equal(sanitize({ exportConversion: null }).exportConversion, '');
+  assert.equal(sanitize({ exportConversion: '  s2t  ' }).exportConversion, '', '不做 trim 猜测');
+});
+
+test('导出简繁转换配置：写盘 / 读回，切回不转换后落盘为空', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ exportConversion: 's2t', editorFont: 'kai' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.exportConversion, 's2t');
+  assert.equal(reopened.editorFont, 'kai');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.exportConversion, 's2t');
+
+  await store.set({ exportConversion: 't2s' });
+  assert.equal((await createConfigStore(dir).get()).exportConversion, 't2s');
+
+  // 切回「不转换」= 空串（不是删字段，旧版本读也安全）
+  await store.set({ exportConversion: '' });
+  assert.equal((await createConfigStore(dir).get()).exportConversion, '');
+  const cleared = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(cleared.exportConversion, '');
+});

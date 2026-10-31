@@ -44,6 +44,7 @@ const epubLib = require('./core/epub');
 const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
 const glossaryLib = require('./core/glossary');
+const s2tLib = require('./core/s2t');
 const ttsLib = require('./core/tts');
 const logsLib = require('./core/logs');
 const searchIndexLib = require('./core/search-index');
@@ -1385,7 +1386,10 @@ function registerIpc() {
       filters: [{ name: '文本文件', extensions: ['txt'] }]
     });
     if (canceled || !filePath) return { canceled: true };
-    const text = exporter.composeBook(meta, texts, range);
+    const composed = exporter.composeBook(meta, texts, range);
+    // 简繁转换只作用于这份导出副本：字数仍按原稿算，磁盘上的章节 txt / 书目一个字节都不动
+    const conversion = s2tLib.normalizeMode(cfg.exportConversion);
+    const text = s2tLib.convertText(composed, conversion);
     await atomicWriteFile(filePath, exporter.exportBufferFromText(text));
     // 记住这次导出的目录，下次导出默认还开在这里（记不住也不影响导出结果）
     await rememberExportDir(path.dirname(filePath));
@@ -1395,7 +1399,8 @@ function registerIpc() {
       chapterCount: plan.count,
       chars,
       includedUnsaved,
-      rangeLabel: plan.label
+      rangeLabel: plan.label,
+      conversion
     };
   });
 
@@ -1424,7 +1429,14 @@ function registerIpc() {
       filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }]
     });
     if (canceled || !filePath) return { canceled: true };
-    const built = epubLib.buildEpub({ meta, texts });
+    // 简繁转换：书名 / 卷名 / 章名 / 正文都换成导出用的副本，目录和正文才一致；
+    // 书目与章节 txt 一概不动（chars 仍按原稿字数算）。
+    const conversion = s2tLib.normalizeMode(cfg.exportConversion);
+    const exportMeta = s2tLib.convertMeta(meta, conversion);
+    const exportTexts = conversion
+      ? texts.map((text) => s2tLib.convertText(text, conversion))
+      : texts;
+    const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
     return {
@@ -1434,7 +1446,8 @@ function registerIpc() {
       volumeCount: built.volumeCount,
       chars,
       includedUnsaved,
-      bytes: built.bytes
+      bytes: built.bytes,
+      conversion
     };
   });
 
@@ -1883,6 +1896,7 @@ async function runAutomation() {
         screenshotDialog === 'settings-template' ||
         screenshotDialog === 'settings-sensitive' ||
         screenshotDialog === 'settings-proofread' ||
+        screenshotDialog === 'settings-export' ||
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
       ) {
@@ -1931,6 +1945,13 @@ async function runAutomation() {
           await sleep(700);
           await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-proofread-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-export') {
+          // 开发截图用：滚到「导出」简繁转换设置（只改界面、不保存）
+          await sleep(600);
+          await automationWin.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-export-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-logs') {
@@ -1984,6 +2005,13 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'export') {
+        // 开发截图用：打开「导出 TXT」对话框，展示范围与简繁转换提示（只读，不导出）
+        await automationWin.webContents.executeJavaScript(
+          `document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action="txt"]').click();`,
+          true
+        );
+        await sleep(900);
       } else if (screenshotDialog === 'fragment') {
         // 开发截图用：书架「＋ 碎片」弹层 + 示例内容（只是界面演示，不会写盘）
         await automationWin.webContents.executeJavaScript(

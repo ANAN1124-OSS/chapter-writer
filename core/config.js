@@ -8,6 +8,7 @@ const formatLib = require('./format');
 const snapshotLib = require('./snapshot');
 const statsLib = require('./stats');
 const templateLib = require('./template');
+const s2tLib = require('./s2t');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -71,7 +72,10 @@ const DEFAULTS = Object.freeze({
   sensitiveWordsPath: '',
   // 校对面板用的词表（v0.8 P0 N6）：作者自己的错别字 / 禁用词 txt，每行一个词，
   // 也可以写「错词 → 建议」。和敏感词表分开两份，互不覆盖；没设置 = ''。
-  proofreadWordsPath: ''
+  proofreadWordsPath: '',
+  // 导出时的简繁转换（v0.8 P0 N7）：'' = 不转换（默认）/ 's2t' = 简→繁 / 't2s' = 繁→简。
+  // 只作用于导出的副本（TXT / EPUB），原稿与书库一个字节都不改；旧配置没有这个键 = 不转换。
+  exportConversion: ''
 });
 
 function clampInt(value, min, max, fallback) {
@@ -212,6 +216,9 @@ function sanitize(raw) {
   const proofreadWordsPath =
     typeof cfg.proofreadWordsPath === 'string' ? cfg.proofreadWordsPath.trim() : '';
   cfg.proofreadWordsPath = proofreadWordsPath.length > 1000 ? '' : proofreadWordsPath;
+  // 导出简繁转换：只认 '', 's2t', 't2s'；旧配置没有这个键 / 手改坏了都按「不转换」，
+  // 不会因为一个脏值让导出变成另一种字形。
+  cfg.exportConversion = s2tLib.normalizeMode(cfg.exportConversion);
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

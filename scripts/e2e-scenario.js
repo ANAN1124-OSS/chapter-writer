@@ -5337,6 +5337,261 @@ module.exports = async function runScenario(ctx) {
         'proofreadWordsPath'
   );
 
+  // 46j. 导出简繁转换（v0.8-7，提案 N7）：只改导出的副本（TXT / EPUB），
+  // 书库里的章节 txt / 书目一个字节都不动；默认「不转换」，档位是全局设置。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
+  // 46j-1. 设置里选「简体 → 繁体」并保存（全局设置；旧配置没有这个键 = 不转换）
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '简繁导出：设置里有「导出」档位，默认不转换',
+    (await exec('window.__cwTest.exportConversionSettingsVisible()')) === true &&
+      (await exec('window.__cwTest.exportConversionValue()')) === ''
+  );
+  await exec(
+    "(() => { const el = document.getElementById('settings-export-conversion'); el.value = 's2t'; el.dispatchEvent(new Event('change', { bubbles: true })); })()"
+  );
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === false');
+  const s2tCfgAfterSet = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check(
+    '简繁导出：档位落进 config.json（只多一个 exportConversion 字段）',
+    s2tCfgAfterSet.exportConversion === 's2t' &&
+      Object.keys(s2tCfgAfterSet).filter((key) => /conversion/i.test(key)).join(',') ===
+        'exportConversion',
+    s2tCfgAfterSet.exportConversion
+  );
+
+  // 46j-2. 造一本两章的简体书：第 1 章含发 / 干 / 后 / 里 / 面 等歧义字，第 2 章章名也带字
+  await exec("window.__cwTest.newBook('简繁导出测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const s2tBookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '开端')");
+  const s2tCh1 = '后来他发现，门后说话的人头发干净。\n\n什么也没有。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(s2tCh1)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.newChapter('说话')");
+  await waitFor("window.__cwTest.currentTitle().includes('说话')");
+  const s2tCh2 = '计划着怎么收获。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(s2tCh2)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor("window.__cwTest.currentTitle().includes('开端')");
+
+  const s2tMetaBefore = await storage.readBookMeta(s2tBookPath);
+  const s2tMetaBytesBefore = await fs.readFile(path.join(s2tBookPath, '书目.json'));
+  const s2tChaptersBefore = JSON.stringify(s2tMetaBefore.chapters);
+  const s2tStatBefore = [];
+  for (const chapter of s2tMetaBefore.chapters) {
+    const stat = await fs.stat(path.join(s2tBookPath, chapter.file));
+    s2tStatBefore.push({ file: chapter.file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  const s2tTitles = await exec('window.__cwTest.chapterTitles()');
+  check(
+    '简繁导出：准备了一本两章的书（简体正文 / 章名）',
+    s2tMetaBefore.chapters.length === 2 &&
+      JSON.stringify(s2tTitles).includes('开端') &&
+      JSON.stringify(s2tTitles).includes('说话'),
+    s2tTitles
+  );
+
+  // 46j-3. 导出 TXT：对话框说明会转成繁体，生成的副本是繁体，书库不动
+  const s2tDir = path.join(path.dirname(booksRoot), 'conversion-exports');
+  await fs.mkdir(s2tDir, { recursive: true });
+  const s2tTxtPath = path.join(s2tDir, 'book-s2t.txt');
+  withSavePath(s2tTxtPath);
+  try {
+    await openExportDialogFromMenu();
+    await waitForSummary('将导出 2 章');
+    const s2tDialogNote = await exec('window.__cwTest.exportConversionNote()');
+    check(
+      '简繁导出：导出对话框说明这次是「简体 → 繁体」',
+      s2tDialogNote.includes('简体 → 繁体') &&
+        (await exec('window.__cwTest.exportSummary()')).includes('将导出 2 章'),
+      s2tDialogNote
+    );
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(s2tTxtPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const s2tTxt = await fs.readFile(s2tTxtPath, 'utf8');
+  check(
+    '简繁导出：TXT 副本的标题行和正文都转成繁体，BOM / CRLF 保留',
+    s2tTxt.startsWith('\uFEFF') &&
+      s2tTxt.includes('\r\n') &&
+      s2tTxt.includes('第1章：開端') &&
+      s2tTxt.includes('第2章：說話') &&
+      s2tTxt.includes('後來他發現，門後說話的人頭髮乾淨。') &&
+      s2tTxt.includes('什麼也沒有。') &&
+      s2tTxt.includes('計劃著怎麼收穫。') &&
+      !/后来|门后|说话|头发|干净|计划|收获|什么/.test(s2tTxt),
+    s2tTxt
+  );
+
+  let s2tFilesUntouched = true;
+  for (const item of s2tStatBefore) {
+    const stat = await fs.stat(path.join(s2tBookPath, item.file));
+    if (stat.size !== item.size || stat.mtimeMs !== item.mtimeMs) s2tFilesUntouched = false;
+  }
+  const s2tMetaBytesAfter = await fs.readFile(path.join(s2tBookPath, '书目.json'));
+  const s2tCfgAfterExport = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check(
+    '简繁导出：导出只读——章节 txt / 书目一个字节没改，配置只多了导出目录记忆',
+    s2tFilesUntouched &&
+      s2tMetaBytesAfter.equals(s2tMetaBytesBefore) &&
+      JSON.stringify((await storage.readBookMeta(s2tBookPath)).chapters) === s2tChaptersBefore &&
+      s2tCfgAfterExport.exportConversion === 's2t' &&
+      !(await fileExists(path.join(s2tBookPath, '_trash'))),
+    { untouched: s2tFilesUntouched, exportConversion: s2tCfgAfterExport.exportConversion }
+  );
+
+  // 46j-4. 导出 EPUB：书名 / 目录 / 正文也一起转，xml 仍合法
+  const s2tEpubPath = path.join(s2tDir, 'book-s2t.epub');
+  withSavePath(s2tEpubPath);
+  try {
+    await exec(
+      "document.getElementById('btn-export').click(); document.querySelector('#export-menu button[data-action=\"epub\"]').click()"
+    );
+    await waitForFile(s2tEpubPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const s2tEpubZip = readZip(await fs.readFile(s2tEpubPath));
+  const s2tEpubText = (name) => {
+    const entry = s2tEpubZip.entries.find((item) => item.name === name);
+    return entry ? entry.data.toString('utf8') : '';
+  };
+  const s2tEpubCh1 = s2tEpubText('OEBPS/text/chapter-0001.xhtml');
+  const s2tEpubNav = s2tEpubText('OEBPS/nav.xhtml');
+  const s2tEpubOpf = s2tEpubText('OEBPS/content.opf');
+  check(
+    '简繁导出：EPUB 副本的书名 / 目录 / 正文也转成繁体',
+    s2tEpubCh1.includes('後來他發現，門後說話的人頭髮乾淨。') &&
+      s2tEpubCh1.includes('什麼也沒有。') &&
+      s2tEpubNav.includes('第1章：開端') &&
+      s2tEpubNav.includes('第2章：說話') &&
+      s2tEpubOpf.includes('<dc:title>簡繁導出測試書</dc:title>'),
+    { nav: s2tEpubNav.slice(0, 240) }
+  );
+  check(
+    '简繁导出：EPUB 导出后书库仍然一个字节没改',
+    JSON.stringify((await storage.readBookMeta(s2tBookPath)).chapters) === s2tChaptersBefore &&
+      (await storage.loadChapterText(s2tBookPath, s2tMetaBefore.chapters[0].file)).text === s2tCh1 &&
+      !(await fileExists(path.join(s2tBookPath, '_trash')))
+  );
+
+  // 46j-5. 档位是全局设置：写作页的按书设置里不显示
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '简繁导出：写作页的按书设置里不显示（全局设置）',
+    (await exec('window.__cwTest.exportConversionSettingsVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === false');
+
+  // 46j-6. 当前章未保存的内容也参与转换（只参与这次导出，不写盘）
+  const s2tUnsavedText = '未保存的后来。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(s2tUnsavedText)})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  const s2tUnsavedPath = path.join(s2tDir, 'book-s2t-unsaved.txt');
+  withSavePath(s2tUnsavedPath);
+  try {
+    await openExportDialogFromMenu();
+    await waitForSummary('将导出 2 章');
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(s2tUnsavedPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const s2tUnsavedTxt = await fs.readFile(s2tUnsavedPath, 'utf8');
+  check(
+    '简繁导出：当前章未保存内容也一起转，磁盘仍是旧正文',
+    s2tUnsavedTxt.includes('未保存的後來。') &&
+      (await storage.loadChapterText(s2tBookPath, s2tMetaBefore.chapters[0].file)).text === s2tCh1 &&
+      (await exec('window.__cwTest.dirty()')) === true
+  );
+
+  // 46j-7. 繁体 → 简体：换一本繁体正文验证反向转换（改盘前先确认真的写进去了）
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await waitFor("window.__cwTest.currentTitle().includes('说话')");
+  const s2tTradText = '後來他發現門後說話的人頭髮乾淨。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(s2tTradText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  const s2tT2sMode = await exec("window.__cwTest.setExportConversion('t2s')");
+  const s2tT2sPath = path.join(s2tDir, 'book-t2s.txt');
+  withSavePath(s2tT2sPath);
+  try {
+    await openExportDialogFromMenu();
+    await waitForSummary('将导出 2 章');
+    const s2tT2sNote = await exec('window.__cwTest.exportConversionNote()');
+    check(
+      '简繁导出：切到「繁体 → 简体」后对话框跟着变',
+      s2tT2sMode === 't2s' && s2tT2sNote.includes('繁体 → 简体'),
+      s2tT2sNote
+    );
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(s2tT2sPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const s2tT2sTxt = await fs.readFile(s2tT2sPath, 'utf8');
+  check(
+    '简繁导出：繁体副本转成简体，原稿仍是繁体',
+    s2tT2sTxt.includes('后来他发现门后说话的人头发干净。') &&
+      !s2tT2sTxt.includes('後來') &&
+      (await storage.loadChapterText(s2tBookPath, s2tMetaBefore.chapters[1].file)).text === s2tTradText
+  );
+
+  // 46j-8. 切回「不转换」：导出结果和导出的拼接规则逐字节一致（默认行为完全没变）
+  const s2tNoMode = await exec("window.__cwTest.setExportConversion('')");
+  const s2tNoConvPath = path.join(s2tDir, 'book-none.txt');
+  withSavePath(s2tNoConvPath);
+  try {
+    await openExportDialogFromMenu();
+    await waitForSummary('将导出 2 章');
+    const s2tNoConvNote = await exec('window.__cwTest.exportConversionNote()');
+    check(
+      '简繁导出：档位回到「不转换」时对话框也说明不转换',
+      s2tNoMode === '' && s2tNoConvNote.includes('不转换'),
+      s2tNoConvNote
+    );
+    await exec("document.getElementById('btn-export-confirm').click()");
+    await waitForFile(s2tNoConvPath);
+  } finally {
+    restoreSaveDialog();
+  }
+  const s2tMetaNow = await storage.readBookMeta(s2tBookPath);
+  const s2tTextsNow = [];
+  for (const chapter of s2tMetaNow.chapters) {
+    s2tTextsNow.push((await storage.loadChapterText(s2tBookPath, chapter.file)).text);
+  }
+  const s2tExpectedNoConv = `\uFEFF${exporter.composeBook(s2tMetaNow, s2tTextsNow)}`;
+  const s2tNoConvTxt = await fs.readFile(s2tNoConvPath, 'utf8');
+  check(
+    '简繁导出：不转换时导出内容与导出拼接规则逐字节一致（默认行为不变）',
+    s2tNoConvTxt === s2tExpectedNoConv &&
+      s2tNoConvTxt.includes('後來他發現門後說話的人頭髮乾淨。'),
+    { bytes: s2tNoConvTxt.length, expected: s2tExpectedNoConv.length }
+  );
+
+  // 46j-9. 收尾：档位回到默认空串、书里没有 _trash / 临时文件
+  const s2tCfgFinal = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  const s2tDirEntries = (await fs.readdir(s2tBookPath)).sort();
+  check(
+    '简繁导出：收尾档位为「不转换」，书文件夹没有 _trash / 临时文件',
+    s2tCfgFinal.exportConversion === '' &&
+      s2tDirEntries.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')) &&
+      s2tDirEntries.filter((name) => name.endsWith('.txt')).length === 2,
+    s2tDirEntries
+  );
+
   // 47. 灵感箱（v0.7-3，提案 3.4）：碎片是书架 _碎片 里的普通 txt；插入只改编辑区、不写盘
   const fragDir = path.join(booksRoot, '_碎片');
   const fragStamp = fragmentsLib.formatDateStamp();
