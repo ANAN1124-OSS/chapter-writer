@@ -167,6 +167,12 @@
     sensitiveWordsInfo: null, // 设置弹层里显示的词表状态（读取当前草稿对应的词表）
     logInfo: null, // 设置弹层「诊断日志」显示的日志目录清单（只读；不含正文）
     lastInternalError: null, // 主进程最近一次内部错误的固定提示（只用于提示 + 自检断言）
+    appVersion: '', // package.json 的版本号（主进程回报；设置 →「检查更新」显示用）
+    // 检查更新（提案 7.1）：只在点按钮时联网；不下载、不安装、不写配置，结果只记在内存里
+    update: {
+      busy: false, // 正在检查
+      result: null // 主进程回报：{ status: 'update'|'latest'|'error', currentVersion, latestVersion, ... }
+    },
     tts: {
       open: false, // 朗读小条是否显示
       status: 'idle', // idle | playing | paused | done | error
@@ -5821,6 +5827,90 @@
     return state.logInfo;
   }
 
+  // 检查更新（提案 7.1）：只在作者点「检查更新」时访问 GitHub；不下载、不安装、不写配置。
+  // 网络失败 / 超时 / 限流都只显示一句提示，设置弹层照常能用，写作不受影响。
+  function formatUpdateDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '';
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  }
+
+  function renderUpdateSettings() {
+    const versionEl = $('settings-update-version');
+    if (versionEl) versionEl.textContent = state.appVersion ? `v${state.appVersion}` : '未知';
+    const statusEl = $('settings-update-status');
+    const checkBtn = $('btn-check-update');
+    const openBtn = $('btn-open-update');
+    const update = state.update || {};
+    const result = update.result;
+    if (checkBtn) {
+      checkBtn.disabled = update.busy === true;
+      checkBtn.textContent = update.busy ? '正在检查…' : '检查更新';
+    }
+    let text = '尚未检查（只在点按钮时联网，不会自动检查）';
+    let tone = 'muted small';
+    if (update.busy) {
+      text = '正在检查…（只读版本号，不会下载或安装任何东西）';
+    } else if (result && result.status === 'update') {
+      const date = formatUpdateDate(result.publishedAt);
+      text = `发现新版本 v${result.latestVersion}（当前 v${result.currentVersion}）${date ? ` · 发布于 ${date}` : ''}`;
+    } else if (result && result.status === 'latest') {
+      text = `已是最新版本（v${result.currentVersion || state.appVersion || '?'}）`;
+    } else if (result && result.status === 'error') {
+      text = `检查失败：${result.message || '未知错误'}`;
+      tone = 'muted small warn';
+    }
+    if (statusEl) {
+      statusEl.textContent = text;
+      statusEl.className = tone;
+    }
+    if (openBtn) openBtn.classList.toggle('hidden', !(result && result.status === 'update'));
+  }
+
+  async function checkUpdate() {
+    if (state.update.busy) return state.update.result;
+    state.update.busy = true;
+    state.update.result = null;
+    renderUpdateSettings();
+    let result;
+    try {
+      result = await call(api.checkUpdate);
+    } catch (err) {
+      result = {
+        status: 'error',
+        code: 'IPC_ERROR',
+        message: `检查更新失败：${err.message}（不影响写作）`,
+        currentVersion: state.appVersion || ''
+      };
+    }
+    state.update.busy = false;
+    state.update.result = result;
+    renderUpdateSettings();
+    if (result && result.status === 'update') {
+      toast(`发现新版本 v${result.latestVersion}（当前 v${result.currentVersion}）`);
+    }
+    return result;
+  }
+
+  async function openUpdateDownload() {
+    try {
+      const data = await call(api.openUpdateDownload);
+      if (data && data.opened) {
+        toast('已用浏览器打开 GitHub 下载页（应用不会自动下载或安装）');
+      } else if (data && data.url) {
+        // 自检 / 截图环境不打开浏览器，只回报地址
+        toast(`下载页：${data.url}`);
+      } else {
+        toast((data && data.message) || '还没有可用的下载页，请先点「检查更新」', 'warn');
+      }
+      return data;
+    } catch (err) {
+      toast(`打开下载页失败：${err.message}`, 'error');
+      return null;
+    }
+  }
+
   function readSnapshotForm() {
     return {
       snapshotEnabled: $('settings-snapshot-enabled').checked === true,
@@ -5863,6 +5953,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 检查更新也是全局的（一个应用一个版本），写作页的按书设置里不显示
+    for (const id of ['settings-update-group', 'settings-update-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -5892,6 +5987,8 @@
     if (state.settingsScope === 'global') await refreshSensitiveSettingsInfo();
     // 诊断日志也只在全局设置里显示：顺手读一次日志目录（只读，不写任何文件）
     if (state.settingsScope === 'global') await refreshLogInfo();
+    // 检查更新：只显示当前版本和上次检查结果（不自动联网；点按钮才检查）
+    if (state.settingsScope === 'global') renderUpdateSettings();
   }
 
   function closeSettings({ restore = true } = {}) {
@@ -6001,6 +6098,12 @@
         }
       });
     }
+
+    // 自动更新轻量版：检查更新只读版本号；「打开下载页」交给系统浏览器，应用不下载、不安装
+    const checkUpdateBtn = $('btn-check-update');
+    if (checkUpdateBtn) checkUpdateBtn.addEventListener('click', () => checkUpdate());
+    const openUpdateBtn = $('btn-open-update');
+    if (openUpdateBtn) openUpdateBtn.addEventListener('click', () => openUpdateDownload());
 
     // 自定义字体：选择 → 主进程读文件 → FontFace 注册 → 实时预览（点「保存设置」才记住）
     $('btn-pick-font').addEventListener('click', async () => {
@@ -7473,6 +7576,19 @@
       logInfo: () => (state.logInfo ? JSON.parse(JSON.stringify(state.logInfo)) : null),
       lastInternalError: () =>
         state.lastInternalError ? JSON.parse(JSON.stringify(state.lastInternalError)) : null,
+      // 检查更新（提案 7.1）：设置里的分组 / 状态文案 / 下载页按钮 / 当前版本
+      updateGroupVisible: () => !$('settings-update-group').classList.contains('hidden'),
+      updateStatus: () => ({
+        status: state.update.busy ? 'checking' : state.update.result ? state.update.result.status : 'idle',
+        busy: state.update.busy,
+        text: $('settings-update-status').textContent,
+        downloadVisible: !$('btn-open-update').classList.contains('hidden'),
+        version: $('settings-update-version').textContent,
+        result: state.update.result ? JSON.parse(JSON.stringify(state.update.result)) : null
+      }),
+      setUpdateMock: (mock) => api.setUpdateMock(mock),
+      checkUpdateNow: () => checkUpdate(),
+      openUpdateDownload: () => openUpdateDownload(),
       // 每日字数统计 / 目标（v0.6-3）
       async refreshStats() {
         return refreshStats();
@@ -7522,6 +7638,7 @@
       const appInfo = await call(api.appVersion);
       const versionEl = $('app-version');
       if (versionEl && appInfo && appInfo.version) versionEl.textContent = `v${appInfo.version}`;
+      state.appVersion = (appInfo && appInfo.version) || '';
     } catch {
       /* 拿不到就保留 index.html 里的静态版本号 */
     }

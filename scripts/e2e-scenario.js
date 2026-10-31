@@ -5846,5 +5846,220 @@ module.exports = async function runScenario(ctx) {
       (await fs.readdir(booksRoot)).every((name) => !/search-index|search_cache/i.test(name))
   );
 
+  // 54. 检查更新（提案 7.1）：手动检查 GitHub Release → 提示有新版本 → 打开下载页。
+  //     网络全部走主进程的假响应（update:test-mock），E2E 不真连 GitHub；
+  //     不下载、不安装、不写配置、不写书库。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const updateConfigPath = path.join(userData, 'config.json');
+  const updateConfigBefore = await fs.readFile(updateConfigPath, 'utf8');
+  const updateBookMetaPath = path.join(focusBookPath, '书目.json');
+  const updateBookMetaBefore = await fs.readFile(updateBookMetaPath, 'utf8');
+  const updateBookMetaJson = JSON.parse(updateBookMetaBefore);
+  const updateChapterPath = path.join(focusBookPath, updateBookMetaJson.chapters[0].file);
+  const updateTxtBefore = await fs.readFile(updateChapterPath, 'utf8');
+  const updateBookFilesBefore = (await fs.readdir(focusBookPath)).sort().join('|');
+  const updateUserDataBefore = (await fs.readdir(userData)).sort().join('|');
+  const pkgVersion = require('../package.json').version;
+  const setUpdateMock = (mock) =>
+    exec(`window.__cwTest.setUpdateMock(${JSON.stringify(mock)})`);
+  const releaseBody = (tag, extra = {}) => ({
+    tag_name: tag,
+    name: `${tag} · 自检`,
+    html_url: `https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/${tag}`,
+    published_at: '2026-11-01T00:00:00Z',
+    prerelease: false,
+    draft: false,
+    ...extra
+  });
+
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  const initialUpdate = await exec('window.__cwTest.updateStatus()');
+  check(
+    '检查更新：设置里有「检查更新」分组，显示当前版本，初始没有下载按钮',
+    (await exec('window.__cwTest.updateGroupVisible()')) === true &&
+      initialUpdate.version === `v${pkgVersion}` &&
+      initialUpdate.status === 'idle' &&
+      initialUpdate.downloadVisible === false &&
+      initialUpdate.text.includes('尚未检查'),
+    initialUpdate
+  );
+
+  // 还没检查就点下载页：只给提示，绝不打开任意地址
+  const beforeCheckOpen = await exec('window.api.openUpdateDownload()');
+  check(
+    '检查更新：还没检查就点「打开下载页」只给提示，不打开任何地址',
+    beforeCheckOpen.ok === true &&
+      beforeCheckOpen.data.opened === false &&
+      beforeCheckOpen.data.url === '' &&
+      /先/.test(beforeCheckOpen.data.message || ''),
+    beforeCheckOpen
+  );
+
+  // 54a. 发现新版本：显示版本号 + 下载页按钮，地址只能是本仓库 Release
+  await setUpdateMock({ type: 'json', body: releaseBody('v9.9.9') });
+  const newerResult = await exec('window.__cwTest.checkUpdateNow()');
+  const newerStatus = await exec('window.__cwTest.updateStatus()');
+  check(
+    '检查更新：发现新版本时显示「新版本 + 当前版本」，并出现「打开下载页」',
+    newerResult.status === 'update' &&
+      newerResult.latestVersion === '9.9.9' &&
+      newerResult.currentVersion === pkgVersion &&
+      newerStatus.status === 'update' &&
+      newerStatus.text.includes('发现新版本 v9.9.9') &&
+      newerStatus.text.includes(`当前 v${pkgVersion}`) &&
+      newerStatus.downloadVisible === true,
+    { newerResult, newerStatus }
+  );
+  const downloadResult = await exec('window.api.openUpdateDownload()');
+  check(
+    '检查更新：下载页是本仓库的 GitHub Release 地址（自检环境只回报、不弹浏览器）',
+    downloadResult.ok === true &&
+      downloadResult.data.opened === false &&
+      downloadResult.data.url ===
+        'https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/v9.9.9' &&
+      /自检/.test(downloadResult.data.note || ''),
+    downloadResult
+  );
+
+  // 54b. 已是最新：下载按钮收起，上一轮的地址也不能再被打开
+  await setUpdateMock({ type: 'json', body: releaseBody(`v${pkgVersion}`) });
+  const latestResult = await exec('window.__cwTest.checkUpdateNow()');
+  const latestStatus = await exec('window.__cwTest.updateStatus()');
+  const staleOpen = await exec('window.api.openUpdateDownload()');
+  check(
+    '检查更新：同版本时显示「已是最新版本」，下载按钮收起',
+    latestResult.status === 'latest' &&
+      latestStatus.text.includes('已是最新版本') &&
+      latestStatus.downloadVisible === false,
+    { latestResult, latestStatus }
+  );
+  check(
+    '检查更新：检查到「已是最新」后不能再用上一轮的地址打开下载页',
+    staleOpen.ok === true && staleOpen.data.opened === false && staleOpen.data.url === '',
+    staleOpen
+  );
+
+  // 54c. 更旧的版本（例如本机是开发版）不提示降级
+  await setUpdateMock({ type: 'json', body: releaseBody('v0.1.0') });
+  const olderResult = await exec('window.__cwTest.checkUpdateNow()');
+  check(
+    '检查更新：GitHub 上版本更旧时仍显示「已是最新版本」，不会提示降级',
+    olderResult.status === 'latest' && olderResult.latestVersion === '0.1.0',
+    olderResult
+  );
+
+  // 54d. 网络失败 / 超时 / HTTP 错误 / 限流 / 坏 JSON：都只给一句提示，设置弹层照常可用
+  await setUpdateMock({ type: 'network-error' });
+  const networkResult = await exec('window.__cwTest.checkUpdateNow()');
+  const networkStatus = await exec('window.__cwTest.updateStatus()');
+  check(
+    '检查更新：没网时给友好提示（连不上 GitHub），不影响写作',
+    networkResult.status === 'error' &&
+      networkResult.code === 'NETWORK' &&
+      networkStatus.text.includes('连不上 GitHub') &&
+      networkStatus.downloadVisible === false,
+    networkResult
+  );
+
+  await setUpdateMock({ type: 'timeout' });
+  const timeoutResult = await exec('window.__cwTest.checkUpdateNow()');
+  const timeoutStatus = await exec('window.__cwTest.updateStatus()');
+  check(
+    '检查更新：超时给友好提示，不卡住设置弹层',
+    timeoutResult.status === 'error' &&
+      timeoutResult.code === 'TIMEOUT' &&
+      timeoutStatus.text.includes('超时'),
+    timeoutResult
+  );
+
+  await setUpdateMock({ type: 'http', status: 500, text: '' });
+  const serverResult = await exec('window.__cwTest.checkUpdateNow()');
+  check(
+    '检查更新：GitHub 返回 5xx 时说明「暂时不可用」，不是假装没更新',
+    serverResult.status === 'error' &&
+      serverResult.code === 'HTTP_ERROR' &&
+      serverResult.message.includes('HTTP 500'),
+    serverResult
+  );
+
+  await setUpdateMock({ type: 'http', status: 403, text: '' });
+  const limitedResult = await exec('window.__cwTest.checkUpdateNow()');
+  check(
+    '检查更新：GitHub 限流时提示「请求太频繁」',
+    limitedResult.status === 'error' &&
+      limitedResult.code === 'RATE_LIMIT' &&
+      limitedResult.message.includes('频繁'),
+    limitedResult
+  );
+
+  await setUpdateMock({ type: 'http', status: 200, text: '{not json' });
+  const badJsonResult = await exec('window.__cwTest.checkUpdateNow()');
+  check(
+    '检查更新：返回的不是 JSON 时提示「格式不对」，不崩',
+    badJsonResult.status === 'error' &&
+      badJsonResult.code === 'BAD_JSON' &&
+      badJsonResult.message.includes('格式不对'),
+    badJsonResult
+  );
+
+  // 54e. 恶意 / 坏的 html_url 不能把作者带到别的网站：退回按 tag 拼的官方下载页
+  await setUpdateMock({
+    type: 'json',
+    body: releaseBody('v9.9.9', { html_url: 'http://evil.example/steal' })
+  });
+  const unsafeResult = await exec('window.__cwTest.checkUpdateNow()');
+  const unsafeOpen = await exec('window.api.openUpdateDownload()');
+  check(
+    '检查更新：Release 里的坏链接被丢掉，只使用本仓库的官方下载页',
+    unsafeResult.status === 'update' &&
+      unsafeResult.releaseUrl ===
+        'https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/v9.9.9' &&
+      unsafeOpen.data.url === unsafeResult.releaseUrl,
+    { unsafeResult, unsafeOpen }
+  );
+
+  // 54f. 只读：检查更新不写配置 / 不写书目 / 不改正文 / 不多出文件
+  check(
+    '检查更新：全程只读（config / 书目 / 章节 txt 一个字节都没变）',
+    (await fs.readFile(updateConfigPath, 'utf8')) === updateConfigBefore &&
+      (await fs.readFile(updateBookMetaPath, 'utf8')) === updateBookMetaBefore &&
+      (await fs.readFile(updateChapterPath, 'utf8')) === updateTxtBefore
+  );
+  check(
+    '检查更新：书库和 userData 没有多出任何文件（不下载、不缓存更新包）',
+    (await fs.readdir(focusBookPath)).sort().join('|') === updateBookFilesBefore &&
+      (await fs.readdir(userData)).sort().join('|') === updateUserDataBefore
+  );
+  const updateConfigJson = JSON.parse(await fs.readFile(updateConfigPath, 'utf8'));
+  const updateConfigKeys = [
+    'updateCheckOnStartup',
+    'updateFeed',
+    'updateFeedUrl',
+    'lastUpdateCheck',
+    'autoUpdate',
+    'updateChannel'
+  ].filter((key) => key in updateConfigJson);
+  check(
+    '检查更新：配置不新增任何更新字段（检查只存在内存里，不需要作者配置）',
+    updateConfigKeys.length === 0,
+    updateConfigKeys
+  );
+
+  // 54g. 按书设置里不显示「检查更新」（一个应用一个版本，和诊断日志同一处理）
+  await exec('window.__cwTest.closeSettings()');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(focusBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '检查更新：按书设置里不显示更新分组（更新是整个应用的事）',
+    (await exec('window.__cwTest.updateGroupVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
   return { ok: true, checks: checks.length, details: checks };
 };

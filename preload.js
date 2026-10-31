@@ -103,6 +103,11 @@ contextBridge.exposeInMainWorld('api', {
   searchIndexStatus: () => invoke('search:index-status'),
   ensureSearchIndex: (options) => invoke('search:ensure-index', options),
   searchContent: (query, options) => invoke('search:content', query, options),
+  // 自动更新轻量版（提案 7.1）：只检查版本 + 打开 GitHub Release 下载页；不下载、不安装、不写配置
+  checkUpdate: () => invoke('update:check'),
+  openUpdateDownload: () => invoke('update:open-download'),
+  // 仅自检 / 截图用：注入假网络，生产环境主进程不会注册这个频道
+  setUpdateMock: (mock) => invoke('update:test-mock', mock),
 
   onCloseRequested: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());

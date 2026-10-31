@@ -953,6 +953,10 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   overflow: auto;
   padding-right: 4px;
 }
+/* 检查更新：状态文字经常是一整句（版本号 / 失败原因），单独占一行，失败时用警示色 */
+#settings-update-field .field-row { flex-wrap: wrap; align-items: center; }
+#settings-update-status { flex: 1 1 100%; line-height: 1.6; }
+#settings-update-status.warn { color: var(--danger); }
 .settings-modal .modal-buttons {
   flex: 0 0 auto;
   margin-top: 16px;

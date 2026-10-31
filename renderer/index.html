@@ -655,6 +655,20 @@
           <span id="settings-logs-status" class="muted small"></span>
         </div>
       </div>
+      <div class="field-group" id="settings-update-group">检查更新</div>
+      <div class="field" id="settings-update-field">
+        <span>
+          当前版本 <strong id="settings-update-version">v0.4.1</strong>。
+          只在点「检查更新」时访问 GitHub 查一下最新版本（<strong>不会自动联网、不会下载、不会安装</strong>）；
+          发现新版本会给出一个 GitHub Release 下载页，升级仍由你自己下载安装包完成。
+          网络失败 / 超时只显示一句提示，不影响写作。
+        </span>
+        <div class="field-row">
+          <button id="btn-check-update" class="btn ghost" type="button">检查更新</button>
+          <button id="btn-open-update" class="btn ghost hidden" type="button">打开下载页</button>
+          <span id="settings-update-status" class="muted small"></span>
+        </div>
+      </div>
       </div>
       <div class="modal-buttons">
         <button id="btn-reset-book-display" class="btn ghost hidden" type="button" title="忘掉这本书的单独显示设置，恢复用全局默认">恢复本书默认</button>

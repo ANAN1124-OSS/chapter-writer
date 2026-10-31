@@ -3,7 +3,7 @@
 const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen, net } = require('electron');
 
 // ---------- 启动参数（自动化/隔离用，正常用户启动不受影响） ----------
 function argValue(name) {
@@ -45,6 +45,7 @@ const sensitiveLib = require('./core/sensitive');
 const ttsLib = require('./core/tts');
 const logsLib = require('./core/logs');
 const searchIndexLib = require('./core/search-index');
+const updateLib = require('./core/update');
 
 let win = null;
 let configStore = null;
@@ -176,6 +177,51 @@ function sendSearchProgress(info) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------- 自动更新轻量版（提案 7.1） ----------
+// 只在作者点「检查更新」时访问一次 GitHub Release API，用 Electron 内置 net.fetch；
+// 不下载、不安装、不写配置、不写书库。网络失败 / 超时由 core/update 转成一句提示，绝不抛错。
+// E2E / 截图自检可以注入假网络（update:test-mock 只在 automation 下注册），不会真连 GitHub。
+let updateMock = null;
+let lastUpdateLaunch = null;
+
+async function fetchReleaseResponse({ url, timeoutMs }) {
+  if (automation && updateMock) {
+    const mock = updateMock;
+    if (mock.type === 'network-error') {
+      throw Object.assign(new Error('mock network error'), { code: 'ENOTFOUND' });
+    }
+    if (mock.type === 'timeout') {
+      throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    }
+    if (mock.type === 'http') {
+      return {
+        status: Number(mock.status) || 500,
+        text: typeof mock.text === 'string' ? mock.text : ''
+      };
+    }
+    return { status: 200, text: JSON.stringify(mock.body == null ? {} : mock.body) };
+  }
+  const controller = new AbortController();
+  const waitMs = Math.max(1500, Math.min(30000, Number(timeoutMs) || updateLib.DEFAULT_TIMEOUT_MS));
+  const timer = setTimeout(() => controller.abort(), waitMs);
+  try {
+    const res = await net.fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `chapter-writer/${app.getVersion()}`
+      },
+      signal: controller.signal
+    });
+    const length = Number(res.headers.get('content-length') || 0);
+    if (length > updateLib.MAX_RESPONSE_CHARS) return { status: res.status, text: '' };
+    const text = await res.text();
+    return { status: res.status, text: text.slice(0, updateLib.MAX_RESPONSE_CHARS + 1) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function ok(data) {
@@ -1185,6 +1231,46 @@ function registerIpc() {
       onProgress: sendSearchProgress
     });
   });
+
+  // 自动更新轻量版（提案 7.1）：手动检查 GitHub Release → 提示有新版本 → 打开下载页。
+  // 不自动下载 / 安装；检查结果只在内存里（lastUpdateLaunch），渲染层不能传任意 URL 进来。
+  handle('update:check', async () => {
+    const result = await updateLib.checkForUpdates({
+      currentVersion: app.getVersion(),
+      fetchText: fetchReleaseResponse
+    });
+    const releaseUrl = result && result.status === 'update' ? updateLib.safeReleaseUrl(result.releaseUrl) : '';
+    lastUpdateLaunch = releaseUrl
+      ? { url: releaseUrl, latestVersion: result.latestVersion, at: Date.now() }
+      : null;
+    return result;
+  });
+
+  handle('update:open-download', async () => {
+    if (!lastUpdateLaunch) {
+      return { opened: false, url: '', message: '还没有检查到新版本，请先点「检查更新」' };
+    }
+    const url = updateLib.safeReleaseUrl(lastUpdateLaunch.url);
+    if (!url) {
+      return { opened: false, url: '', message: '下载页地址不可用，请到 GitHub Releases 手动查看' };
+    }
+    // 自检环境不要真的在作者桌面上打开浏览器，只回报地址
+    if (automation) return { opened: false, url, note: '自检环境不打开浏览器' };
+    try {
+      await shell.openExternal(url);
+    } catch (err) {
+      return { opened: false, url, message: `打不开浏览器：${(err && err.message) || err}` };
+    }
+    return { opened: true, url };
+  });
+
+  if (automation) {
+    // 仅自检 / 截图：注入假网络响应（E2E 绝不真连 GitHub；生产环境这个频道不会注册）
+    handle('update:test-mock', async (mock) => {
+      updateMock = mock && typeof mock === 'object' ? mock : null;
+      return true;
+    });
+  }
 }
 
 // ---------- 窗口 ----------
@@ -1337,7 +1423,8 @@ async function runAutomation() {
         screenshotDialog === 'settings-snapshot' ||
         screenshotDialog === 'settings-stats' ||
         screenshotDialog === 'settings-sensitive' ||
-        screenshotDialog === 'settings-logs'
+        screenshotDialog === 'settings-logs' ||
+        screenshotDialog === 'settings-update'
       ) {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
@@ -1369,6 +1456,19 @@ async function runAutomation() {
           await sleep(700);
           await win.webContents.executeJavaScript(
             `const el = document.getElementById('settings-logs-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-update') {
+          // 开发截图用：滚到「检查更新」，用假网络演示「发现新版本」+ 下载页按钮（不真连 GitHub）
+          await sleep(500);
+          await win.webContents.executeJavaScript(
+            `window.__cwTest.setUpdateMock({ type: 'json', body: { tag_name: 'v0.7.0', name: 'v0.7.0', html_url: 'https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/v0.7.0', published_at: '2026-11-01T00:00:00Z', prerelease: false, draft: false } })`,
+            true
+          );
+          await win.webContents.executeJavaScript('window.__cwTest.checkUpdateNow()', true);
+          await waitForRenderer(`window.__cwTest.updateStatus().status === 'update'`);
+          await win.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-update-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         }
