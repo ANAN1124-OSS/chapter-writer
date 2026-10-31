@@ -1,6 +1,6 @@
 {
   "name": "chapter-writer",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "章节写作器 - 整本保存、自动编号的 Windows 桌面写作工具",
   "main": "main.js",
@@ -38,6 +38,12 @@
     ],
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true
     },
     "win": {
       "icon": "build/icon.ico",

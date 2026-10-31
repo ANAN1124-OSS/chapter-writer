@@ -457,3 +457,164 @@ test('整本排版：缺文件的章节跳过，不中断整本整理', async ()
   assert.equal(res.chaptersChanged, 1);
   assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '　　第一段');
 });
+
+test('字数缓存合并：只补缺 chars 的章，别人新增的章不被覆盖、已删的章跳过', () => {
+  const fresh = {
+    chapters: [
+      { id: 'ch_a', file: '001-a.txt', chars: 5 },
+      { id: 'ch_c', file: '003-c.txt' } // 读缓存之后才新建的章
+    ]
+  };
+  const cached = [
+    { id: 'ch_a', file: '001-a.txt', chars: 999 }, // 已有缓存，不覆盖
+    { id: 'ch_b', file: '002-b.txt', chars: 7 },   // 已经被删掉了，跳过
+    { id: 'ch_c', file: '003-c.txt', chars: 11 }   // 补上
+  ];
+  const merged = storage.mergeCharsCache(fresh, cached);
+  assert.equal(merged.changed, true);
+  assert.equal(merged.meta.chapters.length, 2, '不能因为合并把新章挤掉');
+  assert.equal(merged.meta.chapters[0].chars, 5);
+  assert.equal(merged.meta.chapters[1].chars, 11);
+});
+
+test('字数缓存合并：没有需要补的章时不算改动', () => {
+  const fresh = { chapters: [{ id: 'ch_a', file: '001-a.txt', chars: 5 }] };
+  const merged = storage.mergeCharsCache(fresh, [{ id: 'ch_a', file: '001-a.txt', chars: 5 }]);
+  assert.equal(merged.changed, false);
+});
+
+test('书架扫描补字数不会丢掉同时新建的章节（锁内重读 + 合并）', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '并发测试');
+  // 造一本「老版本」书：书目里没有 chars 缓存，扫描时才会触发写回
+  const meta0 = await storage.readBookMeta(bookPath);
+  const legacy = {
+    ...meta0,
+    chapters: meta0.chapters.map((chapter) => ({ id: chapter.id, file: chapter.file, name: chapter.name }))
+  };
+  await storage.writeBookMeta(bookPath, legacy);
+
+  for (let i = 1; i <= 8; i += 1) {
+    await Promise.all([
+      storage.listBooks(root),
+      storage.createChapter(bookPath, 999, `并发新章${i}`)
+    ]);
+  }
+  await storage.listBooks(root); // 再扫一次，把最后一轮新建章的字数补上
+  const meta = await storage.readBookMeta(bookPath);
+  assert.equal(meta.chapters.length, 9, '每轮新建的章都必须还在');
+  assert.ok(meta.chapters.every((chapter) => Number.isFinite(chapter.chars)), '扫描后字数缓存应已补齐');
+});
+
+test('分卷：新建 / 改名 / 删除卷；删卷不删章、章节文件不动', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '分卷测试');
+  // 加两章，并把它们放进新建的卷
+  const created1 = await storage.createVolume(bookPath, '第1卷：单篇');
+  assert.equal(created1.volume.name, '第1卷：单篇');
+  assert.equal(created1.meta.volumes.length, 1);
+  const chapter2 = await storage.createChapter(bookPath, 999, '第二篇', created1.volume.id);
+  assert.equal(chapter2.chapter.volumeId, created1.volume.id);
+
+  const renamed = await storage.renameVolume(bookPath, created1.volume.id, '第1卷：改名');
+  assert.equal(renamed.meta.volumes[0].name, '第1卷：改名');
+
+  const filesBefore = (await fs.readdir(bookPath)).filter((f) => f.endsWith('.txt')).sort();
+  const deleted = await storage.deleteVolume(bookPath, created1.volume.id);
+  assert.equal(deleted.meta.volumes.length, 0);
+  assert.ok(deleted.meta.chapters.every((c) => !c.volumeId), '卷里的章应该回落到未分卷');
+  assert.equal(deleted.meta.chapters.length, chapter2.meta.chapters.length, '删卷不能删章');
+  const filesAfter = (await fs.readdir(bookPath)).filter((f) => f.endsWith('.txt')).sort();
+  assert.deepEqual(filesAfter, filesBefore, '删卷不能动章节文件');
+});
+
+test('分卷：新建章节可以直接放进指定卷，并排在该卷末尾', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '分卷排序');
+  const v1 = (await storage.createVolume(bookPath, '卷A')).volume;
+  const v2 = (await storage.createVolume(bookPath, '卷B')).volume;
+  await storage.createChapter(bookPath, 999, 'A1', v1.id);
+  await storage.createChapter(bookPath, 999, 'B1', v2.id);
+  await storage.createChapter(bookPath, 999, 'A2', v1.id); // 即便传 999，也应插到卷 A 末尾
+  const meta = await storage.readBookMeta(bookPath);
+  assert.deepEqual(meta.chapters.map((c) => c.name), ['', 'A1', 'A2', 'B1']);
+  assert.deepEqual(meta.chapters.map((c) => c.volumeId || null), [null, v1.id, v1.id, v2.id]);
+});
+
+test('分卷：把章移到别的卷后按卷重排，章文件不变', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '移卷');
+  const v1 = (await storage.createVolume(bookPath, '卷A')).volume;
+  const v2 = (await storage.createVolume(bookPath, '卷B')).volume;
+  await storage.createChapter(bookPath, 999, 'A1', v1.id);
+  const b1 = await storage.createChapter(bookPath, 999, 'B1', v2.id);
+  const moved = await storage.moveChapterToVolume(bookPath, b1.chapter.id, v1.id);
+  assert.equal(moved.meta.chapters.filter((c) => c.volumeId === v1.id).length, 2);
+  assert.equal(moved.meta.chapters.filter((c) => c.volumeId === v2.id).length, 0);
+  const back = await storage.moveChapterToVolume(bookPath, b1.chapter.id, null);
+  // 移回未分卷后，未分卷组排在最前面（组内保持相对顺序）
+  const orphanIds = back.meta.chapters.filter((c) => !c.volumeId).map((c) => c.id);
+  assert.ok(orphanIds.includes(b1.chapter.id), '移回未分卷的章应在未分卷组里');
+  assert.deepEqual(back.meta.chapters.slice(0, orphanIds.length).map((c) => c.id), orphanIds);
+  const files = (await fs.readdir(bookPath)).filter((f) => f.endsWith('.txt'));
+  assert.ok(files.includes(b1.chapter.file), '移卷不重命名章节文件');
+});
+
+test('分卷：书目里章节乱序或指向不存在的卷，读取时会归一', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '归一');
+  const metaPath = path.join(bookPath, '书目.json');
+  const raw = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+  raw.volumes = [{ id: 'v_001', name: '卷A' }];
+  raw.chapters = [
+    { id: 'c1', file: raw.chapters[0].file, name: '卷一', volumeId: 'v_001' },
+    { id: 'c2', file: raw.chapters[0].file, name: '孤儿', volumeId: 'v_404' }
+  ];
+  await fs.writeFile(metaPath, JSON.stringify(raw), 'utf8');
+  const meta = await storage.readBookMeta(bookPath);
+  assert.deepEqual(meta.chapters.map((c) => c.name), ['孤儿', '卷一']);
+  assert.equal(meta.chapters[0].volumeId, null);
+  assert.equal(meta.chapters[1].volumeId, 'v_001');
+});
+
+test('分卷：卷上下移动会落盘，章节跟着卷重排', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '卷排序');
+  const v1 = (await storage.createVolume(bookPath, '卷A')).volume;
+  const v2 = (await storage.createVolume(bookPath, '卷B')).volume;
+  await storage.createChapter(bookPath, 999, 'A1', v1.id);
+  await storage.createChapter(bookPath, 999, 'B1', v2.id);
+  const moved = await storage.moveVolume(bookPath, v2.id, 0);
+  assert.equal(moved.moved, true);
+  const meta = await storage.readBookMeta(bookPath);
+  assert.deepEqual(meta.volumes.map((v) => v.name), ['卷B', '卷A']);
+  assert.deepEqual(meta.chapters.map((c) => c.name), ['', 'B1', 'A1']);
+});
+
+test('分卷：moveChapterTo 可以跨卷插到指定章节之前，也可以落到卷末', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '跨卷拖拽');
+  const v1 = (await storage.createVolume(bookPath, '卷A')).volume;
+  const v2 = (await storage.createVolume(bookPath, '卷B')).volume;
+  const a1 = await storage.createChapter(bookPath, 999, 'A1', v1.id);
+  const a2 = await storage.createChapter(bookPath, 999, 'A2', v1.id);
+  const b1 = await storage.createChapter(bookPath, 999, 'B1', v2.id);
+
+  // 把 A2 插到 B1 之前（跨卷）
+  const beforeB1 = await storage.moveChapterTo(bookPath, a2.chapter.id, v2.id, b1.chapter.id);
+  let meta = await storage.readBookMeta(bookPath);
+  assert.deepEqual(meta.chapters.map((c) => c.name), ['', 'A1', 'A2', 'B1']);
+  assert.equal(meta.chapters.find((c) => c.id === a2.chapter.id).volumeId, v2.id);
+  assert.ok(beforeB1.meta.chapters.findIndex((c) => c.id === a2.chapter.id) < beforeB1.meta.chapters.findIndex((c) => c.id === b1.chapter.id));
+
+  // 把 A1 落到卷 B 末尾
+  await storage.moveChapterTo(bookPath, a1.chapter.id, v2.id, null);
+  meta = await storage.readBookMeta(bookPath);
+  assert.deepEqual(meta.chapters.map((c) => c.name), ['', 'A2', 'B1', 'A1']);
+  assert.equal(meta.chapters.filter((c) => c.volumeId === v2.id).length, 3);
+
+  // 移回未分卷
+  await storage.moveChapterTo(bookPath, a1.chapter.id, null, null);
+  meta = await storage.readBookMeta(bookPath);
+  assert.equal(meta.chapters.filter((c) => !c.volumeId).length, 2, '移回未分卷后应该有两章在未分卷组');
+});

@@ -54,6 +54,20 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.versionText()')) === `v${require('../package.json').version}`
   );
 
+  // 0b. IPC 只接受书架目录下的书：越界路径必须被拒（不给渲染层任意读盘的能力）
+  const badOpen = await exec("window.api.openBook('C:\\\\Windows')");
+  check(
+    '打开书架以外的路径被拒绝',
+    Boolean(badOpen && badOpen.ok === false && badOpen.code === 'BAD_PATH'),
+    badOpen
+  );
+  const badLoad = await exec("window.api.loadChapter('C:\\\\Windows', 'win.ini')");
+  check(
+    '读取书架以外的章节被拒绝',
+    Boolean(badLoad && badLoad.ok === false && badLoad.code === 'BAD_PATH'),
+    badLoad
+  );
+
   // 1. 新建书 → 自动打开、自动带一个空章
   await exec("window.__cwTest.newBook('测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");
@@ -1428,6 +1442,94 @@ module.exports = async function runScenario(ctx) {
     '导出目录记忆：真的落进 config.json',
     Boolean(savedConfig && savedConfig.lastExportDir === wantedDir),
     savedConfig && savedConfig.lastExportDir
+  );
+
+  // 分卷：新建卷 / 卷内建章 / 侧栏分组 / 移卷 / 改名 / 导出带卷名 / 删卷
+  const bookPathForVol = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  const newVol = await exec("window.__cwTest.newVolume('第1卷：单篇')");
+  check('分卷：新建卷成功', Boolean(newVol && newVol.ok === true), newVol);
+  check(
+    '分卷：卷出现在侧栏',
+    JSON.stringify(await exec('window.__cwTest.volumeNames()')) === JSON.stringify(['第1卷：单篇'])
+  );
+  const volIds = await exec('window.__cwTest.volumeIds()');
+  await exec("window.__cwTest.newChapterInVolume(0, '卷内章')");
+  const namesAfterVol = await exec('window.__cwTest.chapterNames()');
+  const volumesAfterVol = await exec('window.__cwTest.chapterVolumeIds()');
+  const lastVolIndex = namesAfterVol.length - 1;
+  check(
+    '分卷：卷内新建的章被放进卷里',
+    namesAfterVol[lastVolIndex] === '卷内章' && volumesAfterVol[lastVolIndex] === volIds[0],
+    { namesAfterVol, volumesAfterVol }
+  );
+  check(
+    '分卷：侧栏出现卷分组',
+    (await exec('window.__cwTest.volumeHeaders()')).includes('第1卷：单篇')
+  );
+
+  const orphanIndex = volumesAfterVol.findIndex((v) => v === null);
+  if (orphanIndex >= 0) {
+    await exec(`window.__cwTest.moveChapterToVolumeAt(${orphanIndex}, 0)`);
+    const movedVolumes = await exec('window.__cwTest.chapterVolumeIds()');
+    check(
+      '分卷：把章移到卷里',
+      movedVolumes.filter((v) => v === volIds[0]).length >= 2,
+      movedVolumes
+    );
+  }
+
+  await exec("window.__cwTest.renameVolumeAt(0, '第1卷：改名')");
+  check(
+    '分卷：卷改名',
+    JSON.stringify(await exec('window.__cwTest.volumeNames()')) === JSON.stringify(['第1卷：改名'])
+  );
+
+  const volClip = await exec(`window.api.copyBook(${JSON.stringify(bookPathForVol)})`);
+  check('分卷：复制整本成功', Boolean(volClip && volClip.ok === true), volClip);
+  const clipWithVolume = await clipboard.readText();
+  check(
+    '分卷：导出内容带卷名一行',
+    typeof clipWithVolume === 'string' && clipWithVolume.includes('第1卷：改名'),
+    typeof clipWithVolume === 'string' ? clipWithVolume.slice(0, 80) : String(clipWithVolume)
+  );
+
+  const chaptersBeforeDeleteVolume = (await exec('window.__cwTest.chapterTitles()')).length;
+  await exec('window.__cwTest.deleteVolumeAt(0, true)');
+  check('分卷：删卷后卷没了', (await exec('window.__cwTest.volumeNames()')).length === 0);
+  check(
+    '分卷：删卷不删章',
+    (await exec('window.__cwTest.chapterTitles()')).length === chaptersBeforeDeleteVolume
+  );
+  check(
+    '分卷：删卷后章节都回未分卷',
+    (await exec('window.__cwTest.chapterVolumeIds()')).every((v) => v === null)
+  );
+
+  // 分卷：卷上下移动 + 跨卷拖拽
+  await exec("window.__cwTest.newVolume('甲卷')");
+  await exec("window.__cwTest.newVolume('乙卷')");
+  await exec("window.__cwTest.newChapterInVolume(0, '甲一')");
+  await exec("window.__cwTest.newChapterInVolume(1, '乙一')");
+  check(
+    '分卷：两个卷都在',
+    JSON.stringify(await exec('window.__cwTest.volumeNames()')) === JSON.stringify(['甲卷', '乙卷'])
+  );
+  await exec('window.__cwTest.moveVolumeAt(1, 0)');
+  check(
+    '分卷：卷可以上下移动',
+    JSON.stringify(await exec('window.__cwTest.volumeNames()')) === JSON.stringify(['乙卷', '甲卷'])
+  );
+  const volIdsOrdered = await exec('window.__cwTest.volumeIds()');
+  const chapterVolsBeforeDrag = await exec('window.__cwTest.chapterVolumeIds()');
+  const chapterInJia = chapterVolsBeforeDrag.findIndex((v) => v === volIdsOrdered[1]);
+  check('分卷：找得到甲卷里的章', chapterInJia >= 0, chapterVolsBeforeDrag);
+  await exec(`window.__cwTest.dragChapterTo(${chapterInJia}, 0, null)`);
+  const chapterVolsAfterDrag = await exec('window.__cwTest.chapterVolumeIds()');
+  check(
+    '分卷：跨卷拖拽把章放进目标卷',
+    chapterVolsAfterDrag.filter((v) => v === volIdsOrdered[0]).length >= 2,
+    chapterVolsAfterDrag
   );
 
   return { ok: true, checks: checks.length, details: checks };

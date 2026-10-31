@@ -11,6 +11,7 @@ async function invoke(channel, ...args) {
 
 contextBridge.exposeInMainWorld('api', {
   appVersion: () => invoke('app:version'),
+  appWarning: () => invoke('app:warning'),
   listBooks: () => invoke('books:list'),
   createBook: (title) => invoke('book:create', title),
   openBook: (bookPath) => invoke('book:open', bookPath),
@@ -27,10 +28,19 @@ contextBridge.exposeInMainWorld('api', {
     invoke('text:find-next', text, query, fromIndex, options),
   replaceInText: (text, query, replacement, options) =>
     invoke('text:replace', text, query, replacement, options),
-  createChapter: (bookPath, insertIndex, name) => invoke('chapter:create', bookPath, insertIndex, name),
+  createChapter: (bookPath, insertIndex, name, volumeId) =>
+    invoke('chapter:create', bookPath, insertIndex, name, volumeId),
   renameChapter: (bookPath, chapterId, name) => invoke('chapter:rename', bookPath, chapterId, name),
   deleteChapter: (bookPath, chapterId) => invoke('chapter:delete', bookPath, chapterId),
   moveChapter: (bookPath, chapterId, toIndex) => invoke('chapter:move', bookPath, chapterId, toIndex),
+  createVolume: (bookPath, name) => invoke('volume:create', bookPath, name),
+  renameVolume: (bookPath, volumeId, name) => invoke('volume:rename', bookPath, volumeId, name),
+  deleteVolume: (bookPath, volumeId) => invoke('volume:delete', bookPath, volumeId),
+  moveChapterToVolume: (bookPath, chapterId, volumeId) =>
+    invoke('chapter:move-to-volume', bookPath, chapterId, volumeId),
+  moveVolume: (bookPath, volumeId, toIndex) => invoke('volume:move', bookPath, volumeId, toIndex),
+  moveChapterTo: (bookPath, chapterId, volumeId, beforeChapterId) =>
+    invoke('chapter:move-to', bookPath, chapterId, volumeId, beforeChapterId),
   searchBook: (bookPath, options) => invoke('book:search', bookPath, options),
   replaceBook: (bookPath, options) => invoke('book:replace', bookPath, options),
   listReplaceBackups: (bookPath) => invoke('book:list-replace-backups', bookPath),

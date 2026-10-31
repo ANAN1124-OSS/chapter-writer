@@ -96,7 +96,8 @@ async function readBookMeta(bookPath) {
   }
   if (!Number.isFinite(Number(meta.fileSeq))) meta.fileSeq = meta.chapters.length;
   if (typeof meta.title !== 'string') meta.title = path.basename(bookPath);
-  return meta;
+  // 分卷：清掉非法卷、把指向不存在卷的章归为「未分卷」，并把章节顺序归一成「未分卷 → 第1卷 → …」
+  return chaptersLib.normalizeChapterOrder({ ...meta, volumes: chaptersLib.sanitizeVolumes(meta.volumes) });
 }
 
 async function writeBookMeta(bookPath, meta) {
@@ -148,6 +149,26 @@ async function mapLimit(items, limit, mapper) {
   return results;
 }
 
+// 把「刚读出来的章节字数」合并进「锁里重新读到的 meta」：
+// 只补仍然缺 chars 的章，别人在这期间新建/改名/删除的章节原样保留，不会被旧 meta 覆盖。
+function mergeCharsCache(freshMeta, cachedChapters) {
+  let changed = false;
+  const byId = new Map();
+  const byFile = new Map();
+  for (const chapter of freshMeta.chapters) {
+    if (chapter.id) byId.set(chapter.id, chapter);
+    if (chapter.file) byFile.set(chapter.file, chapter);
+  }
+  for (const cached of cachedChapters) {
+    if (!Number.isFinite(cached.chars)) continue;
+    const target = (cached.id && byId.get(cached.id)) || (cached.file && byFile.get(cached.file));
+    if (!target || Number.isFinite(target.chars)) continue;
+    target.chars = cached.chars;
+    changed = true;
+  }
+  return { meta: freshMeta, changed };
+}
+
 // 书架扫描用的统计：字数走 书目.json 缓存，不再每次重读整本书；
 // 缓存缺失时只读缺的那几章并把缓存写回（老书首次扫描慢一点，之后秒开）。
 async function bookStats(bookPath, meta) {
@@ -170,8 +191,14 @@ async function bookStats(bookPath, meta) {
       }
     }
     if (changed) {
+      // 写缓存必须走书锁，而且要锁内重读 meta 再合并：
+      // 否则「扫描读到的旧 meta + 补字数」会覆盖掉同时发生的建章/改名/删除（真实丢操作路径）。
       try {
-        await writeBookMeta(bookPath, meta);
+        await withBookLock(bookPath, async () => {
+          const fresh = await readBookMeta(bookPath);
+          const merged = mergeCharsCache(fresh, needRead);
+          if (merged.changed) await writeBookMeta(bookPath, merged.meta);
+        });
       } catch { /* 缓存写不进去不影响书架显示 */ }
     }
   }
@@ -329,21 +356,27 @@ async function saveChapterText(bookPath, file, text) {
   return { mtimeMs: stat.mtimeMs, chars: chaptersLib.countChars(text) };
 }
 
-async function createChapter(bookPath, insertIndex, name) {
+async function createChapter(bookPath, insertIndex, name, volumeId = null) {
   const meta = await readBookMeta(bookPath);
   const seq = chaptersLib.nextFileSeq(meta);
   const existing = await listTxtFiles(bookPath);
   const file = chaptersLib.uniqueFileName(seq, name, existing);
   await atomicWriteFile(path.join(bookPath, file), '');
+  const wantedVolume = chaptersLib.sanitizeVolumes(meta.volumes).some((v) => v.id === volumeId) ? volumeId : null;
   const chapter = {
     id: `ch_${Date.now().toString(36)}_${seq}`,
     file,
     name: String(name == null ? '' : name).trim(),
+    volumeId: wantedVolume,
     createdAt: nowIso()
   };
   try {
-    const updated = chaptersLib.insertChapter({ ...meta, fileSeq: seq }, insertIndex, chapter);
-    const saved = await writeBookMeta(bookPath, updated);
+    // 指定了卷：插到那一卷的末尾（不按调用方传的下标，避免新章跑到别的卷中间）
+    const at = wantedVolume
+      ? chaptersLib.insertIndexForVolume(meta, wantedVolume)
+      : insertIndex;
+    const updated = chaptersLib.insertChapter({ ...meta, fileSeq: seq }, at, chapter);
+    const saved = await writeBookMeta(bookPath, chaptersLib.normalizeChapterOrder(updated));
     return {
       meta: saved,
       chapter,
@@ -353,6 +386,84 @@ async function createChapter(bookPath, insertIndex, name) {
     try { await fs.unlink(path.join(bookPath, file)); } catch { /* 忽略 */ }
     throw err;
   }
+}
+
+// ---------- 分卷操作（同一本书的写操作都要持锁，走 locked()） ----------
+async function createVolume(bookPath, name) {
+  const meta = await readBookMeta(bookPath);
+  const volume = { id: chaptersLib.nextVolumeId(meta), name: String(name == null ? '' : name).trim() };
+  const updated = chaptersLib.normalizeChapterOrder({ ...meta, volumes: [...meta.volumes, volume] });
+  const saved = await writeBookMeta(bookPath, updated);
+  return { meta: saved, volume };
+}
+
+async function renameVolume(bookPath, volumeId, name) {
+  const meta = await readBookMeta(bookPath);
+  const volumes = meta.volumes.map((v) =>
+    v.id === volumeId ? { ...v, name: String(name == null ? '' : name).trim() } : v
+  );
+  if (!volumes.some((v) => v.id === volumeId)) {
+    throw new StorageError('VOLUME_NOT_FOUND', '卷不存在（可能已被删除）');
+  }
+  const saved = await writeBookMeta(bookPath, { ...meta, volumes });
+  return { meta: saved };
+}
+
+// 删卷不删章：卷里的章节回到「未分卷」，章节文件一个都不动
+async function deleteVolume(bookPath, volumeId) {
+  const meta = await readBookMeta(bookPath);
+  if (!meta.volumes.some((v) => v.id === volumeId)) {
+    throw new StorageError('VOLUME_NOT_FOUND', '卷不存在（可能已被删除）');
+  }
+  const updated = chaptersLib.normalizeChapterOrder({
+    ...meta,
+    volumes: meta.volumes.filter((v) => v.id !== volumeId)
+  });
+  const saved = await writeBookMeta(bookPath, updated);
+  return { meta: saved, movedChapters: saved.chapters.filter((c) => !c.volumeId).length };
+}
+
+// 把一章移到某卷（volumeId 传 null = 移回「未分卷」）；移完按卷重新归一顺序
+async function moveChapterToVolume(bookPath, chapterId, volumeId = null) {
+  const meta = await readBookMeta(bookPath);
+  const index = chaptersLib.findChapterIndex(meta, chapterId);
+  if (index < 0) throw new StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+  const wanted = chaptersLib.sanitizeVolumes(meta.volumes).some((v) => v.id === volumeId) ? volumeId : null;
+  const chapters = meta.chapters.map((c) => (c.id === chapterId ? { ...c, volumeId: wanted } : c));
+  const saved = await writeBookMeta(bookPath, chaptersLib.normalizeChapterOrder({ ...meta, chapters }));
+  return { meta: saved, index: saved.chapters.findIndex((c) => c.id === chapterId) };
+}
+
+// 拖拽用：把一章放到「某卷的某个位置」——volumeId 为目标卷（null = 未分卷），
+// beforeChapterId 为插到哪一章之前（null = 该卷末尾）。可以跨卷。
+async function moveChapterTo(bookPath, chapterId, volumeId = null, beforeChapterId = null) {
+  const meta = await readBookMeta(bookPath);
+  const index = chaptersLib.findChapterIndex(meta, chapterId);
+  if (index < 0) throw new StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+  const wanted = chaptersLib.sanitizeVolumes(meta.volumes).some((v) => v.id === volumeId) ? volumeId : null;
+  const chapter = { ...meta.chapters[index], volumeId: wanted };
+  const rest = meta.chapters.filter((c) => c.id !== chapterId);
+  const restMeta = { ...meta, chapters: rest };
+  let at;
+  if (beforeChapterId) {
+    const beforeIndex = rest.findIndex((c) => c.id === beforeChapterId);
+    at = beforeIndex >= 0 ? beforeIndex : chaptersLib.insertIndexForVolume(restMeta, wanted);
+  } else {
+    at = chaptersLib.insertIndexForVolume(restMeta, wanted);
+  }
+  const chapters = rest.slice();
+  chapters.splice(Math.max(0, Math.min(at, chapters.length)), 0, chapter);
+  const saved = await writeBookMeta(bookPath, chaptersLib.normalizeChapterOrder({ ...meta, chapters }));
+  return { meta: saved, index: saved.chapters.findIndex((c) => c.id === chapterId) };
+}
+
+// 调整卷的先后顺序（章节跟着卷走，组内顺序不变；章节文件不动）
+async function moveVolume(bookPath, volumeId, toIndex) {
+  const meta = await readBookMeta(bookPath);
+  const result = chaptersLib.moveVolume(meta, volumeId, toIndex);
+  if (!result.moved) return { meta, moved: false, from: result.from, to: result.to };
+  const saved = await writeBookMeta(bookPath, result.meta);
+  return { meta: saved, moved: true, from: result.from, to: result.to };
 }
 
 async function renameChapter(bookPath, chapterId, name) {
@@ -757,7 +868,8 @@ async function setLastOpenChapter(bookPath, chapterId) {
 const bookLocks = new Map();
 
 function withBookLock(bookPath, task) {
-  const key = path.resolve(String(bookPath));
+  // Windows 路径不分大小写，key 统一小写，免得 C:\Books\A 与 c:\books\a 变成两把锁
+  const key = path.resolve(String(bookPath)).toLowerCase();
   const previous = bookLocks.get(key) || Promise.resolve();
   const run = previous.then(task, task);
   bookLocks.set(key, run.then(() => undefined, () => undefined));
@@ -779,6 +891,7 @@ module.exports = {
   nowIso,
   exists,
   assertInside,
+  mergeCharsCache,
   listTxtFiles,
   readBookMeta,
   writeBookMeta,
@@ -790,6 +903,12 @@ module.exports = {
   statChapter,
   saveChapterText,
   createChapter: locked(createChapter),
+  createVolume: locked(createVolume),
+  renameVolume: locked(renameVolume),
+  deleteVolume: locked(deleteVolume),
+  moveChapterToVolume: locked(moveChapterToVolume),
+  moveChapterTo: locked(moveChapterTo),
+  moveVolume: locked(moveVolume),
   renameChapter: locked(renameChapter),
   deleteChapter: locked(deleteChapter),
   moveChapter: locked(moveChapter),

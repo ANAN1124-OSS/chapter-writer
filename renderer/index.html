@@ -47,6 +47,7 @@
         <div class="chapter-list" id="chapter-list"></div>
         <div class="sidebar-actions">
           <button id="btn-new-chapter" class="btn" type="button">＋ 新建章节</button>
+          <button id="btn-new-volume" class="btn ghost" type="button" title="新建卷（侧栏按卷分组，章号不变）">＋ 新建卷</button>
         </div>
       </aside>
       <div id="sidebar-resizer" class="sidebar-resizer" title="拖动调整章节栏宽度（双击恢复默认）"></div>
@@ -302,9 +303,19 @@
   <!-- ============ 章节右键菜单 ============ -->
   <div id="context-menu" class="context-menu hidden">
     <button type="button" data-action="rename">重命名</button>
+    <button type="button" data-action="move-volume">移到卷…</button>
     <button type="button" data-action="insert-before">在此章之前插入</button>
     <button type="button" data-action="insert-after">在此章之后插入</button>
     <button type="button" data-action="delete" class="danger-text">删除（移到 _trash）</button>
+  </div>
+
+  <!-- ============ 卷右键菜单 ============ -->
+  <div id="volume-menu" class="context-menu hidden">
+    <button type="button" data-action="new-chapter">在此卷末尾新建章节</button>
+    <button type="button" data-action="move-up">上移卷</button>
+    <button type="button" data-action="move-down">下移卷</button>
+    <button type="button" data-action="rename">重命名卷…</button>
+    <button type="button" data-action="delete" class="danger-text">删除卷（章节回「未分卷」）</button>
   </div>
 
   <!-- ============ 书卡右键菜单 ============ -->

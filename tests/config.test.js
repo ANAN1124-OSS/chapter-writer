@@ -206,3 +206,36 @@ test('导出目录记忆：默认空、去首尾空白、坏值回空', () => {
   assert.equal(sanitize({ lastExportDir: null }).lastExportDir, '');
   assert.equal(sanitize({ lastExportDir: 'x'.repeat(2000) }).lastExportDir, '');
 });
+
+test('配置损坏：归档坏文件、回默认值，并给出一次提示', async () => {
+  const dir = await mkTmp();
+  await fs.writeFile(path.join(dir, 'config.json'), '{ 这不是合法 JSON ', 'utf8');
+  const store = createConfigStore(dir);
+  const cfg = await store.get();
+  assert.equal(cfg.booksRoot, DEFAULTS.booksRoot);
+  const warning = store.takeLoadWarning();
+  assert.ok(warning && warning.code === 'CONFIG_CORRUPT');
+  assert.equal(store.takeLoadWarning(), null, '提示只给一次');
+  const files = await fs.readdir(dir);
+  assert.ok(files.some((f) => f.startsWith('config.json.corrupt-')), '坏配置要归档，不能直接删');
+  assert.ok(!files.includes('config.json'), '坏文件应已改名归档');
+});
+
+test('首次启动（没有配置文件）不算损坏，不提示', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.get();
+  assert.equal(store.takeLoadWarning(), null);
+});
+
+test('配置并发写入：两个 set 的 patch 都不会被吞掉', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await Promise.all([
+    store.set({ editorPaper: 'night' }),
+    store.set({ editorFontSize: 22 })
+  ]);
+  const cfg = await store.get();
+  assert.equal(cfg.editorPaper, 'night');
+  assert.equal(cfg.editorFontSize, 22);
+});

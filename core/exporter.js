@@ -14,11 +14,24 @@ function blockFor(title, text) {
 }
 
 // meta.chapters 与 texts 一一对应（texts 顺序同 chapters）
+// 有分卷的书：每卷第一段前面多输出一行卷名（卷名照抄原文，不加「第N卷」前缀）
 function composeBook(meta, texts) {
-  const blocks = meta.chapters.map((chapter, index) => {
+  const volumes = new Map(
+    (meta && Array.isArray(meta.volumes) ? meta.volumes : []).map((volume) => [volume.id, volume])
+  );
+  const blocks = [];
+  let currentVolumeId = null;
+  meta.chapters.forEach((chapter, index) => {
+    const volumeId = (chapter && chapter.volumeId) || null;
+    if (volumeId !== currentVolumeId) {
+      currentVolumeId = volumeId;
+      const volume = volumeId ? volumes.get(volumeId) : null;
+      const volumeName = volume ? String(volume.name || '').trim() : '';
+      if (volumeName) blocks.push(volumeName);
+    }
     const title = chaptersLib.formatTitle(meta, index, chapter.name);
     const text = Array.isArray(texts) ? texts[index] : '';
-    return blockFor(title, text);
+    blocks.push(blockFor(title, text));
   });
   return `${blocks.join('\r\n\r\n')}\r\n`;
 }

@@ -73,9 +73,6 @@ async function restoreFromBak(bookPath) {
   } catch {
     throw new storage.StorageError('BAK_INVALID', '备份的 书目.json.bak 也无法解析，只能从目录重建');
   }
-  try {
-    storage.assertInside(bookPath, storage.BOOK_FILE);
-  } catch { /* 忽略 */ }
   // 校验结构，不合法就直接抛错
   if (!meta || !Array.isArray(meta.chapters)) {
     throw new storage.StorageError('BAK_INVALID', '备份的 书目.json.bak 结构不完整，只能从目录重建');

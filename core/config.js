@@ -161,15 +161,56 @@ function sanitize(raw) {
 function createConfigStore(userDataDir) {
   const file = path.join(userDataDir, 'config.json');
   let cache = null;
+  let loadWarning = null; // 配置损坏被归档时，给界面提示一次
+  let queue = Promise.resolve();
+
+  // 配置写入串行化：并发 set 时各自拿旧 cache 合并会吞掉对方的 patch（例如拖完分隔条同时点保存设置）
+  function enqueue(task) {
+    const run = queue.then(task, task);
+    queue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  function defaults() {
+    return { ...DEFAULTS, windowBounds: { ...DEFAULTS.windowBounds }, bookDisplay: {} };
+  }
 
   async function load() {
+    let raw;
     try {
-      const raw = await fs.readFile(file, 'utf8');
+      raw = await fs.readFile(file, 'utf8');
+    } catch {
+      // 没有配置文件 = 首次启动，用默认值（这不算损坏，不提示）
+      cache = defaults();
+      return { ...cache };
+    }
+    try {
       cache = sanitize(JSON.parse(stripBom(raw)));
     } catch {
-      cache = { ...DEFAULTS, windowBounds: { ...DEFAULTS.windowBounds }, bookDisplay: {} };
+      // 配置坏了：先归档损坏文件（不直接删），再回默认值，并让界面提示一次，
+      // 否则书架路径会悄悄变回「文档\我的小说」，用户会以为书全没了。
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+      const archived = `${file}.corrupt-${stamp}`;
+      try {
+        await fs.rename(file, archived);
+      } catch {
+        /* 归档失败也不能阻塞启动 */
+      }
+      cache = defaults();
+      loadWarning = {
+        code: 'CONFIG_CORRUPT',
+        archived,
+        message: `配置文件损坏，已归档为 ${path.basename(archived)} 并恢复默认设置；书架目录请在「设置」里重新指定。`
+      };
     }
     return { ...cache };
+  }
+
+  // 取出「配置损坏」提示（只给一次）
+  function takeLoadWarning() {
+    const warning = loadWarning;
+    loadWarning = null;
+    return warning;
   }
 
   async function get() {
@@ -177,11 +218,13 @@ function createConfigStore(userDataDir) {
     return { ...cache };
   }
 
-  async function set(patch) {
-    const current = await get();
-    cache = sanitize({ ...current, ...(patch || {}) });
-    await writeJsonAtomic(file, cache);
-    return { ...cache };
+  function set(patch) {
+    return enqueue(async () => {
+      const current = await get();
+      cache = sanitize({ ...current, ...(patch || {}) });
+      await writeJsonAtomic(file, cache);
+      return { ...cache };
+    });
   }
 
   // ---------- 每本书的显示设置覆盖 ----------
@@ -193,27 +236,31 @@ function createConfigStore(userDataDir) {
   }
 
   async function setBookDisplay(bookId, patch) {
-    const cfg = await get();
-    const key = String(bookId == null ? '' : bookId).trim();
-    if (!key) throw new Error('缺少书籍 id');
-    const merged = sanitizeBookDisplayEntry({ ...(cfg.bookDisplay[key] || {}), ...(patch || {}) });
-    const bookDisplay = { ...cfg.bookDisplay };
-    if (Object.keys(merged).length) bookDisplay[key] = merged;
-    else delete bookDisplay[key];
-    cache = sanitize({ ...cfg, bookDisplay });
-    await writeJsonAtomic(file, cache);
-    return { ...(cache.bookDisplay[key] || {}) };
+    return enqueue(async () => {
+      const cfg = await get();
+      const key = String(bookId == null ? '' : bookId).trim();
+      if (!key) throw new Error('缺少书籍 id');
+      const merged = sanitizeBookDisplayEntry({ ...(cfg.bookDisplay[key] || {}), ...(patch || {}) });
+      const bookDisplay = { ...cfg.bookDisplay };
+      if (Object.keys(merged).length) bookDisplay[key] = merged;
+      else delete bookDisplay[key];
+      cache = sanitize({ ...cfg, bookDisplay });
+      await writeJsonAtomic(file, cache);
+      return { ...(cache.bookDisplay[key] || {}) };
+    });
   }
 
   async function resetBookDisplay(bookId) {
-    const cfg = await get();
-    const key = String(bookId == null ? '' : bookId).trim();
-    if (!key || !cfg.bookDisplay[key]) return false;
-    const bookDisplay = { ...cfg.bookDisplay };
-    delete bookDisplay[key];
-    cache = sanitize({ ...cfg, bookDisplay });
-    await writeJsonAtomic(file, cache);
-    return true;
+    return enqueue(async () => {
+      const cfg = await get();
+      const key = String(bookId == null ? '' : bookId).trim();
+      if (!key || !cfg.bookDisplay[key]) return false;
+      const bookDisplay = { ...cfg.bookDisplay };
+      delete bookDisplay[key];
+      cache = sanitize({ ...cfg, bookDisplay });
+      await writeJsonAtomic(file, cache);
+      return true;
+    });
   }
 
   return {
@@ -221,6 +268,7 @@ function createConfigStore(userDataDir) {
     load,
     get,
     set,
+    takeLoadWarning,
     getBookDisplay,
     setBookDisplay,
     resetBookDisplay,

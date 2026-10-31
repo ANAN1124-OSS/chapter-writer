@@ -98,6 +98,8 @@
     modal: null,
     contextIndex: -1,
     contextBook: null,
+    contextVolumeId: null, // 当前右键的卷（卷菜单用）
+    collapsedVolumes: new Set(), // 折叠起来的卷（'' = 未分卷组；只记在内存里，换书重置）
     importing: false,
     sidebarWidth: 250,
     sidebarDragging: false,
@@ -585,6 +587,7 @@
     state.meta = data.meta;
     state.bookId = data.meta.id;
     state.chapters = data.meta.chapters;
+    state.collapsedVolumes = new Set(); // 换书重置折叠状态
     state.dirty = false;
     state.saveError = null;
     state.baseText = '';
@@ -640,9 +643,11 @@
     if (state.chapters.length < 2) return;
     chapterDrag = {
       index,
+      volumeId: chapterVolumeId(state.chapters[index]),
       startY: event.clientY,
       active: false,
       targetIndex: index,
+      drop: null,
       item: event.currentTarget
     };
   }
@@ -650,9 +655,82 @@
   function clearDragMarks() {
     const list = $('chapter-list');
     if (!list) return;
-    list.querySelectorAll('.chapter-item.dragging, .chapter-item.drop-before, .chapter-item.drop-after')
-      .forEach((el) => el.classList.remove('dragging', 'drop-before', 'drop-after'));
+    list.querySelectorAll('.chapter-item.dragging, .chapter-item.drop-before, .chapter-item.drop-after, .volume-item.drop-into')
+      .forEach((el) => el.classList.remove('dragging', 'drop-before', 'drop-after', 'drop-into'));
     document.body.classList.remove('chapter-dragging');
+  }
+
+  // 拖拽落点：可以落在章节条目上（插到它前/后），也可以落在卷标题上（放进这一卷）
+  function computeDropTarget(event) {
+    const list = $('chapter-list');
+    const children = Array.from(list.children);
+    if (!children.length) return null;
+    const y = event.clientY;
+    let hovered = null;
+    for (const el of children) {
+      const rect = el.getBoundingClientRect();
+      if (y >= rect.top && y <= rect.bottom) {
+        hovered = el;
+        break;
+      }
+    }
+    const chapterOf = (el) => (el && el.classList.contains('chapter-item') ? state.chapters[Number(el.dataset.index)] : null);
+    if (!hovered) {
+      // 指针在列表末尾之后：落到最后一组的末尾
+      for (let i = children.length - 1; i >= 0; i -= 1) {
+        const el = children[i];
+        const chapter = chapterOf(el);
+        if (chapter) return { volumeId: chapterVolumeId(chapter), beforeChapterId: null, el, mode: 'after' };
+        if (el.classList.contains('volume-item')) {
+          return { volumeId: el.dataset.volumeId || null, beforeChapterId: null, el, mode: 'header' };
+        }
+      }
+      return null;
+    }
+    if (hovered.classList.contains('volume-item')) {
+      const volumeId = hovered.dataset.volumeId || null;
+      const start = children.indexOf(hovered);
+      let before = null;
+      for (let i = start + 1; i < children.length; i += 1) {
+        const el = children[i];
+        if (el.classList.contains('volume-item')) break;
+        const chapter = chapterOf(el);
+        if (chapter) {
+          before = chapter;
+          break;
+        }
+      }
+      return { volumeId, beforeChapterId: before ? before.id : null, el: hovered, mode: 'header' };
+    }
+    const chapter = chapterOf(hovered);
+    if (!chapter) return null;
+    const volumeId = chapterVolumeId(chapter);
+    const rect = hovered.getBoundingClientRect();
+    if (y < rect.top + rect.height / 2) {
+      return { volumeId, beforeChapterId: chapter.id, el: hovered, mode: 'before' };
+    }
+    const start = children.indexOf(hovered);
+    let next = null;
+    for (let i = start + 1; i < children.length; i += 1) {
+      const el = children[i];
+      if (el.classList.contains('volume-item')) break;
+      const candidate = chapterOf(el);
+      if (candidate) {
+        if (chapterVolumeId(candidate) === volumeId) next = candidate;
+        break;
+      }
+    }
+    return { volumeId, beforeChapterId: next ? next.id : null, el: hovered, mode: 'after' };
+  }
+
+  function nextChapterIdInVolume(chapter) {
+    const volumeId = chapterVolumeId(chapter);
+    const index = state.chapters.findIndex((c) => c.id === chapter.id);
+    for (let i = index + 1; i < state.chapters.length; i += 1) {
+      if (chapterVolumeId(state.chapters[i]) !== volumeId) return null;
+      return state.chapters[i].id;
+    }
+    return null;
   }
 
   function updateChapterDrag(event) {
@@ -664,22 +742,16 @@
       document.body.classList.add('chapter-dragging');
     }
     const list = $('chapter-list');
-    const items = Array.from(list.querySelectorAll('.chapter-item'));
-    items.forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+    list.querySelectorAll('.chapter-item.drop-before, .chapter-item.drop-after, .volume-item.drop-into')
+      .forEach((el) => el.classList.remove('drop-before', 'drop-after', 'drop-into'));
 
-    // 计算插入槽位：指针落在哪个条目上半部分 = 插到它前面
-    let slot = items.length;
-    for (let i = 0; i < items.length; i += 1) {
-      const rect = items[i].getBoundingClientRect();
-      if (event.clientY < rect.top + rect.height / 2) {
-        slot = i;
-        break;
-      }
+    const target = computeDropTarget(event);
+    chapterDrag.drop = target;
+    if (target && target.el) {
+      if (target.mode === 'header') target.el.classList.add('drop-into');
+      else if (target.mode === 'before') target.el.classList.add('drop-before');
+      else target.el.classList.add('drop-after');
     }
-    const targetIndex = slot > chapterDrag.index ? slot - 1 : slot;
-    chapterDrag.targetIndex = targetIndex;
-    if (targetIndex < chapterDrag.index) items[targetIndex].classList.add('drop-before');
-    else if (targetIndex > chapterDrag.index) items[targetIndex].classList.add('drop-after');
 
     // 拖动到列表顶部/底部附近时自动滚动
     const listRect = list.getBoundingClientRect();
@@ -694,8 +766,47 @@
     clearDragMarks();
     if (!drag.active) return; // 普通点击，交给 click 处理
     state.suppressChapterClick = Date.now() + 300;
-    if (drag.targetIndex === drag.index) return;
-    await moveChapterByDrag(drag.index, drag.targetIndex);
+    const chapter = state.chapters[drag.index];
+    const target = drag.drop;
+    if (!chapter || !target) return;
+    // 原地不动就不写盘：落在自己身上、或落回自己原来的位置
+    if (target.beforeChapterId === chapter.id) return;
+    if (target.volumeId === chapterVolumeId(chapter) && target.beforeChapterId === nextChapterIdInVolume(chapter)) return;
+    await moveChapterByDrop(chapter, target);
+  }
+
+  async function moveChapterByDrop(chapter, target) {
+    const currentId = (state.chapters[state.index] || {}).id;
+    try {
+      const data = await call(
+        api.moveChapterTo,
+        state.bookPath,
+        chapter.id,
+        target.volumeId || null,
+        target.beforeChapterId || null
+      );
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      if (currentId) {
+        const at = state.chapters.findIndex((c) => c.id === currentId);
+        if (at >= 0) state.index = at;
+      }
+      renderChapterList();
+      renderEditorHeader();
+      updateStatus();
+      toast(`已移动章节（${target.volumeId ? volumeDisplayName(target.volumeId) : '未分卷'}）`);
+      if (currentId) {
+        try {
+          await api.setLastOpenChapter(state.bookPath, currentId);
+        } catch {
+          /* 记不住也无所谓 */
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      toast(`移动章节失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
   }
 
   async function moveChapterByDrag(fromIndex, toIndex) {
@@ -731,41 +842,120 @@
   }
 
   // ---------- 章节列表 ----------
+  function volumeList() {
+    return state.meta && Array.isArray(state.meta.volumes) ? state.meta.volumes : [];
+  }
+
+  function volumeById(volumeId) {
+    return volumeList().find((v) => v.id === volumeId) || null;
+  }
+
+  function volumeDisplayName(volumeId) {
+    if (!volumeId) return '未分卷';
+    const volume = volumeById(volumeId);
+    return (volume && String(volume.name || '').trim()) || '未命名卷';
+  }
+
+  function chapterVolumeId(chapter) {
+    return (chapter && chapter.volumeId) || null;
+  }
+
+  function toggleVolumeCollapse(volumeId) {
+    const key = volumeId || '';
+    if (state.collapsedVolumes.has(key)) state.collapsedVolumes.delete(key);
+    else state.collapsedVolumes.add(key);
+    renderChapterList();
+  }
+
+  function makeVolumeHeader(volumeId, name, count) {
+    const key = volumeId || '';
+    const collapsed = state.collapsedVolumes.has(key);
+    const row = document.createElement('div');
+    row.className = 'volume-item' + (collapsed ? ' collapsed' : '') + (volumeId ? '' : ' orphan-volume');
+    row.dataset.volumeId = key;
+    const arrow = document.createElement('span');
+    arrow.className = 'volume-arrow';
+    arrow.textContent = collapsed ? '▸' : '▾';
+    const label = document.createElement('span');
+    label.className = 'volume-name';
+    label.textContent = name;
+    const num = document.createElement('span');
+    num.className = 'volume-count';
+    num.textContent = `${count} 章`;
+    row.appendChild(arrow);
+    row.appendChild(label);
+    row.appendChild(num);
+    row.title = '单击折叠 / 展开；右键更多（重命名卷 / 在此卷新建章节 / 删除卷）';
+    row.addEventListener('click', () => toggleVolumeCollapse(volumeId));
+    row.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      showVolumeMenu(event, volumeId);
+    });
+    return row;
+  }
+
+  function makeChapterItem(chapter, index) {
+    const item = document.createElement('div');
+    item.className = 'chapter-item' + (index === state.index ? ' active' : '');
+    if (index === state.index && state.dirty) item.classList.add('dirty');
+    item.dataset.index = String(index);
+    item.title = '单击切换；双击重命名；右键更多';
+
+    const num = document.createElement('span');
+    num.className = 'chapter-num';
+    num.textContent = `第${index + 1}章`;
+
+    const name = document.createElement('span');
+    name.className = 'chapter-name';
+    name.textContent = String(chapter.name || '').trim() || '未命名';
+
+    item.appendChild(num);
+    item.appendChild(name);
+    item.addEventListener('click', () => {
+      if (state.suppressChapterClick && Date.now() < state.suppressChapterClick) {
+        state.suppressChapterClick = 0;
+        return; // 刚拖拽完，别把这次点击当成切章
+      }
+      switchChapter(index);
+    });
+    item.addEventListener('pointerdown', (event) => startChapterDrag(event, index));
+    item.addEventListener('dblclick', () => renameChapterAt(index));
+    item.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      showContextMenu(event, index);
+    });
+    return item;
+  }
+
   function renderChapterList() {
     const list = $('chapter-list');
     list.innerHTML = '';
-    state.chapters.forEach((chapter, index) => {
-      const item = document.createElement('div');
-      item.className = 'chapter-item' + (index === state.index ? ' active' : '');
-      if (index === state.index && state.dirty) item.classList.add('dirty');
-      item.dataset.index = String(index);
-      item.title = '单击切换；双击重命名；右键更多';
-
-      const num = document.createElement('span');
-      num.className = 'chapter-num';
-      num.textContent = `第${index + 1}章`;
-
-      const name = document.createElement('span');
-      name.className = 'chapter-name';
-      name.textContent = String(chapter.name || '').trim() || '未命名';
-
-      item.appendChild(num);
-      item.appendChild(name);
-      item.addEventListener('click', () => {
-        if (state.suppressChapterClick && Date.now() < state.suppressChapterClick) {
-          state.suppressChapterClick = 0;
-          return; // 刚拖拽完，别把这次点击当成切章
+    const volumes = volumeList();
+    if (!volumes.length) {
+      // 没分卷的书：和以前完全一样，平铺章节
+      state.chapters.forEach((chapter, index) => list.appendChild(makeChapterItem(chapter, index)));
+    } else {
+      const buckets = new Map(volumes.map((v) => [v.id, []]));
+      const orphans = [];
+      state.chapters.forEach((chapter, index) => {
+        const volumeId = chapterVolumeId(chapter);
+        if (volumeId && buckets.has(volumeId)) buckets.get(volumeId).push({ chapter, index });
+        else orphans.push({ chapter, index });
+      });
+      if (orphans.length) {
+        list.appendChild(makeVolumeHeader(null, '未分卷', orphans.length));
+        if (!state.collapsedVolumes.has('')) {
+          orphans.forEach(({ chapter, index }) => list.appendChild(makeChapterItem(chapter, index)));
         }
-        switchChapter(index);
-      });
-      item.addEventListener('pointerdown', (event) => startChapterDrag(event, index));
-      item.addEventListener('dblclick', () => renameChapterAt(index));
-      item.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        showContextMenu(event, index);
-      });
-      list.appendChild(item);
-    });
+      }
+      for (const volume of volumes) {
+        const items = buckets.get(volume.id) || [];
+        list.appendChild(makeVolumeHeader(volume.id, volumeDisplayName(volume.id), items.length));
+        if (!state.collapsedVolumes.has(volume.id)) {
+          items.forEach(({ chapter, index }) => list.appendChild(makeChapterItem(chapter, index)));
+        }
+      }
+    }
     const active = list.querySelector('.chapter-item.active');
     if (active) active.scrollIntoView({ block: 'nearest' });
   }
@@ -779,6 +969,30 @@
   }
 
   // ---------- 状态栏 ----------
+  // 本章字数：正常章节即时算；MB 级的超大单章（「整本一章」导入）每个字都全文正则统计会卡，
+  // 超过 20 万字符改成 400ms 防抖，多打几个字只算最后一次。
+  let charCountTimer = null;
+  const CHAR_COUNT_DEFER_ABOVE = 200000;
+  function renderCharCount() {
+    const el = $('char-count');
+    if (!state.bookPath || state.index < 0) {
+      clearTimeout(charCountTimer);
+      el.textContent = '';
+      return;
+    }
+    const text = editorEl.value;
+    if (text.length <= CHAR_COUNT_DEFER_ABOVE) {
+      clearTimeout(charCountTimer);
+      el.textContent = `本章 ${formatChars(countChars(text))}`;
+      return;
+    }
+    clearTimeout(charCountTimer);
+    charCountTimer = setTimeout(() => {
+      if (!state.bookPath || state.index < 0) return;
+      el.textContent = `本章 ${formatChars(countChars(editorEl.value))}`;
+    }, 400);
+  }
+
   function updateStatus() {
     const dot = $('status-dot');
     dot.className = 'dot';
@@ -799,8 +1013,7 @@
     }
 
     $('status-text').textContent = text;
-    $('char-count').textContent =
-      state.bookPath && state.index >= 0 ? `本章 ${formatChars(countChars(editorEl.value))}` : '';
+    renderCharCount();
     $('btn-save').disabled = !state.dirty || state.saving;
     // 把未保存状态同步给主进程，供 Windows 关机拦截使用
     if (state.dirty !== state.reportedDirty) {
@@ -852,8 +1065,11 @@
   }
 
   async function saveCurrent({ silent = false } = {}) {
-    if (!state.bookPath || state.index < 0 || state.saving) {
-      return { ok: false, code: 'BUSY', message: '当前没有可保存的章节' };
+    if (!state.bookPath || state.index < 0) {
+      return { ok: false, code: 'NO_CHAPTER', message: '当前没有可保存的章节' };
+    }
+    if (state.saving) {
+      return { ok: false, code: 'BUSY', message: '正在保存中，请稍候再试' };
     }
     if (!state.dirty) {
       if (!silent) toast('当前章节没有改动');
@@ -921,7 +1137,7 @@
     return { ok: true };
   }
 
-  async function createChapterAt(insertIndex, nameOverride) {
+  async function createChapterAt(insertIndex, nameOverride, volumeIdOverride) {
     if (!state.bookPath) return { ok: false };
     // 作者要求（2026-10-31）：新建 / 插入章节前，当前章有未保存修改就自动保存，不再弹窗
     if (state.dirty) {
@@ -929,24 +1145,188 @@
       if (!saved.ok) return saved; // 保存失败会弹错误提示并停在这里，不建新章
     }
     const appending = insertIndex >= state.chapters.length;
+    // 新章默认落在「当前章所在的卷」；从卷菜单进来时用指定的卷
+    const currentChapter = state.chapters[state.index];
+    const volumeId =
+      volumeIdOverride !== undefined ? volumeIdOverride : chapterVolumeId(currentChapter);
     let name = nameOverride;
     if (name === undefined) {
       name = await promptText({
         title: appending ? '新建章节' : '插入章节',
-        message: '输入章节名，可留空（显示为「未命名」）。章号由顺序自动生成，不用自己写。',
+        message:
+          '输入章节名，可留空（显示为「未命名」）。章号由顺序自动生成，不用自己写。' +
+          (volumeId ? `\n新章会放进「${volumeDisplayName(volumeId)}」。` : ''),
         placeholder: '例如：夜雨'
       });
       if (name === null) return { ok: false, canceled: true };
     }
     try {
-      const data = await call(api.createChapter, state.bookPath, insertIndex, name);
+      const data = await call(api.createChapter, state.bookPath, insertIndex, name, volumeId || null);
       state.meta = data.meta;
       state.chapters = data.meta.chapters;
       await loadChapterAt(data.index);
-      toast(`${appending ? '已新建' : '已插入'}：${chapterTitle(data.index, data.chapter.name)}`);
+      const where = volumeId ? `（${volumeDisplayName(volumeId)}）` : '';
+      toast(`${appending ? '已新建' : '已插入'}：${chapterTitle(data.index, data.chapter.name)}${where}`);
       return { ok: true, index: data.index };
     } catch (err) {
       toast(`新建章节失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  // ---------- 分卷操作 ----------
+  async function createVolumeFlow(nameOverride) {
+    if (!state.bookPath) return { ok: false };
+    let name = nameOverride;
+    if (name === undefined) {
+      name = await promptText({
+        title: '新建卷',
+        message: '输入卷名（原文自带「第N卷」的书照抄原文即可）。卷只影响侧栏分组和导出，不改章号。',
+        placeholder: '例如：第1卷：单篇'
+      });
+      if (name === null) return { ok: false, canceled: true };
+    }
+    try {
+      const data = await call(api.createVolume, state.bookPath, name);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      const index = state.chapters.findIndex((c) => c.id === (state.chapters[state.index] || {}).id);
+      if (index >= 0) state.index = index;
+      renderChapterList();
+      updateStatus();
+      toast(`已新建卷：${volumeDisplayName(data.volume.id)}`);
+      return { ok: true, volume: data.volume };
+    } catch (err) {
+      toast(`新建卷失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  async function renameVolumeFlow(volumeId, nameOverride) {
+    if (!state.bookPath || !volumeId) return { ok: false };
+    let name = nameOverride;
+    if (name === undefined) {
+      name = await promptText({
+        title: '重命名卷',
+        message: '只改卷名，不影响里面的章节。',
+        value: volumeDisplayName(volumeId),
+        placeholder: '卷名'
+      });
+      if (name === null) return { ok: false, canceled: true };
+    }
+    try {
+      const data = await call(api.renameVolume, state.bookPath, volumeId, name);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      renderChapterList();
+      toast('已重命名卷');
+      return { ok: true };
+    } catch (err) {
+      toast(`重命名卷失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  // 卷上下移动（只改卷序，章节跟着卷走）
+  async function moveVolumeFlow(volumeId, delta) {
+    if (!state.bookPath || !volumeId) return { ok: false };
+    const volumes = volumeList();
+    const from = volumes.findIndex((v) => v.id === volumeId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= volumes.length) return { ok: false };
+    try {
+      const data = await call(api.moveVolume, state.bookPath, volumeId, to);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      const currentId = (state.chapters[state.index] || {}).id;
+      const at = currentId ? state.chapters.findIndex((c) => c.id === currentId) : -1;
+      if (at >= 0) state.index = at;
+      renderChapterList();
+      renderEditorHeader();
+      updateStatus();
+      toast(`已${delta < 0 ? '上移' : '下移'}卷：${volumeDisplayName(volumeId)}`);
+      return { ok: true };
+    } catch (err) {
+      toast(`移动卷失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  async function deleteVolumeFlow(volumeId, skipConfirm = false) {
+    if (!state.bookPath || !volumeId) return { ok: false };
+    const count = state.chapters.filter((c) => chapterVolumeId(c) === volumeId).length;
+    if (!skipConfirm) {
+      const res = await openModal({
+        title: '删除卷',
+        message: `确定删除「${volumeDisplayName(volumeId)}」吗？\n卷里的 ${count} 章不会删，会回到「未分卷」，章节文件一个都不动。`,
+        buttons: [
+          { label: '删除卷', value: 'delete', kind: 'danger' },
+          { label: '取消', value: 'cancel', kind: 'primary' }
+        ]
+      });
+      if (res.action !== 'delete') return { ok: false, canceled: true };
+    }
+    try {
+      const data = await call(api.deleteVolume, state.bookPath, volumeId);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      const currentId = (state.chapters[state.index] || {}).id;
+      const index = currentId ? state.chapters.findIndex((c) => c.id === currentId) : 0;
+      state.index = index >= 0 ? index : 0;
+      renderChapterList();
+      renderEditorHeader();
+      updateStatus();
+      toast(`已删除卷，${count} 章回到「未分卷」（章节文件未动）`);
+      return { ok: true };
+    } catch (err) {
+      toast(`删除卷失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  async function moveChapterToVolumeFlow(index) {
+    const chapter = state.chapters[index];
+    if (!chapter || !state.bookPath) return { ok: false };
+    const volumes = volumeList();
+    if (!volumes.length) {
+      toast('这本书还没有卷，先新建一个卷', 'warn');
+      return { ok: false };
+    }
+    const buttons = volumes.map((volume) => ({
+      label: `移到「${volumeDisplayName(volume.id)}」`,
+      value: volume.id
+    }));
+    buttons.push({ label: '移回「未分卷」', value: '__none__' });
+    buttons.push({ label: '取消', value: 'cancel' });
+    const res = await openModal({
+      title: '移到卷',
+      message: `把「${chapterTitle(index, chapter.name)}」移到：`,
+      buttons,
+      cancelValue: 'cancel'
+    });
+    if (!res.action || res.action === 'cancel') return { ok: false, canceled: true };
+    return moveChapterToVolume(index, res.action === '__none__' ? null : res.action);
+  }
+
+  async function moveChapterToVolume(index, volumeId) {
+    const chapter = state.chapters[index];
+    if (!chapter || !state.bookPath) return { ok: false };
+    const currentId = (state.chapters[state.index] || {}).id;
+    try {
+      const data = await call(api.moveChapterToVolume, state.bookPath, chapter.id, volumeId || null);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      if (currentId) {
+        const at = state.chapters.findIndex((c) => c.id === currentId);
+        if (at >= 0) state.index = at;
+      }
+      renderChapterList();
+      renderEditorHeader();
+      updateStatus();
+      toast(`已移到「${volumeDisplayName(volumeId)}」`);
+      return { ok: true, index: data.index };
+    } catch (err) {
+      toast(`移动失败：${err.message}`, 'error');
       return { ok: false, message: err.message };
     }
   }
@@ -1327,6 +1707,42 @@
 
   function hideContextMenu() {
     $('context-menu').classList.add('hidden');
+  }
+
+  function showVolumeMenu(event, volumeId) {
+    state.contextVolumeId = volumeId || null;
+    const menu = $('volume-menu');
+    const volumes = volumeList();
+    const index = volumeId ? volumes.findIndex((v) => v.id === volumeId) : -1;
+    // 「未分卷」组不是真正的卷：只能往里加章节
+    menu.querySelectorAll('button[data-action="rename"], button[data-action="delete"]').forEach((btn) => {
+      btn.classList.toggle('hidden', !volumeId);
+    });
+    const upBtn = menu.querySelector('button[data-action="move-up"]');
+    const downBtn = menu.querySelector('button[data-action="move-down"]');
+    if (upBtn) {
+      upBtn.classList.toggle('hidden', !volumeId);
+      upBtn.disabled = index <= 0;
+    }
+    if (downBtn) {
+      downBtn.classList.toggle('hidden', !volumeId);
+      downBtn.disabled = index < 0 || index >= volumes.length - 1;
+    }
+    const newChapterBtn = menu.querySelector('button[data-action="new-chapter"]');
+    if (newChapterBtn) newChapterBtn.textContent = volumeId ? '在此卷末尾新建章节' : '在「未分卷」末尾新建章节';
+    menu.classList.remove('hidden');
+    menu.style.left = `${event.clientX}px`;
+    menu.style.top = `${event.clientY}px`;
+    const rect = menu.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - 8;
+    const maxY = window.innerHeight - rect.height - 8;
+    if (event.clientX > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
+    if (event.clientY > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+  }
+
+  function hideVolumeMenu() {
+    $('volume-menu').classList.add('hidden');
+    state.contextVolumeId = null;
   }
 
   function showBookMenu(book, x, y) {
@@ -2401,6 +2817,7 @@
     $('btn-back').addEventListener('click', backToShelf);
     $('btn-rename-book').addEventListener('click', renameBookFlow);
     $('btn-new-chapter').addEventListener('click', () => createChapterAt(state.chapters.length));
+    $('btn-new-volume').addEventListener('click', () => createVolumeFlow());
     $('btn-insert').addEventListener('click', () => createChapterAt(state.index + 1));
     $('btn-save').addEventListener('click', () => saveCurrent());
     $('btn-find').addEventListener('click', openFindPanel);
@@ -2486,6 +2903,20 @@
       else if (action === 'delete') await deleteChapterAt(index);
       else if (action === 'insert-before') await createChapterAt(index);
       else if (action === 'insert-after') await createChapterAt(index + 1);
+      else if (action === 'move-volume') await moveChapterToVolumeFlow(index);
+    });
+
+    $('volume-menu').addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action]');
+      if (!btn) return;
+      const volumeId = state.contextVolumeId;
+      hideVolumeMenu();
+      const action = btn.dataset.action;
+      if (action === 'new-chapter') await createChapterAt(state.chapters.length, undefined, volumeId || null);
+      else if (action === 'rename') await renameVolumeFlow(volumeId);
+      else if (action === 'delete') await deleteVolumeFlow(volumeId);
+      else if (action === 'move-up') await moveVolumeFlow(volumeId, -1);
+      else if (action === 'move-down') await moveVolumeFlow(volumeId, 1);
     });
 
     editorEl.addEventListener('input', onEditorInput);
@@ -2522,6 +2953,7 @@
 
     document.addEventListener('click', (event) => {
       if (!event.target.closest('#context-menu') && !event.target.closest('.chapter-item')) hideContextMenu();
+      if (!event.target.closest('#volume-menu') && !event.target.closest('.volume-item')) hideVolumeMenu();
       if (!event.target.closest('#btn-export') && !event.target.closest('#export-menu')) hideExportMenu();
       if (!event.target.closest('#btn-format') && !event.target.closest('#format-menu')) hideFormatMenu();
       if (!event.target.closest('#book-menu') && !event.target.closest('.book-card-more')) hideBookMenu();
@@ -2645,6 +3077,57 @@
       chapterTitles: () => state.chapters.map((c, i) => chapterTitle(i, c.name)),
       chapterNames: () => state.chapters.map((c) => c.name),
       chapterFiles: () => state.chapters.map((c) => c.file),
+      // 分卷
+      volumeNames: () => volumeList().map((v) => v.name),
+      volumeIds: () => volumeList().map((v) => v.id),
+      chapterVolumeIds: () => state.chapters.map((c) => chapterVolumeId(c)),
+      volumeHeaders: () =>
+        Array.from(document.querySelectorAll('.volume-item .volume-name')).map((el) => el.textContent),
+      collapsedVolumes: () => Array.from(state.collapsedVolumes),
+      collapseVolume: (volumeId) => {
+        toggleVolumeCollapse(volumeId);
+        return true;
+      },
+      async newVolume(name) {
+        return createVolumeFlow(name);
+      },
+      async renameVolumeAt(index, name) {
+        const volume = volumeList()[index];
+        if (!volume) return { ok: false };
+        return renameVolumeFlow(volume.id, name);
+      },
+      async deleteVolumeAt(index, skipConfirm) {
+        const volume = volumeList()[index];
+        if (!volume) return { ok: false };
+        return deleteVolumeFlow(volume.id, skipConfirm);
+      },
+      async moveChapterToVolumeAt(chapterIndex, volumeIndex) {
+        const volume = volumeIndex === null ? null : volumeList()[volumeIndex];
+        if (volumeIndex !== null && !volume) return { ok: false };
+        return moveChapterToVolume(chapterIndex, volume ? volume.id : null);
+      },
+      async newChapterInVolume(volumeIndex, name) {
+        const volume = volumeIndex === null ? null : volumeList()[volumeIndex];
+        if (volumeIndex !== null && !volume) return { ok: false };
+        return createChapterAt(state.chapters.length, name, volume ? volume.id : null);
+      },
+      async moveVolumeAt(index, toIndex) {
+        const volume = volumeList()[index];
+        if (!volume) return { ok: false };
+        return moveVolumeFlow(volume.id, toIndex - index);
+      },
+      // 模拟拖拽落点（走和真实拖拽同一条代码路径）
+      async dragChapterTo(chapterIndex, volumeIndex, beforeChapterIndex) {
+        const chapter = state.chapters[chapterIndex];
+        if (!chapter) return { ok: false };
+        const volume = volumeIndex === null ? null : volumeList()[volumeIndex];
+        if (volumeIndex !== null && !volume) return { ok: false };
+        const before = beforeChapterIndex === null || beforeChapterIndex === undefined ? null : state.chapters[beforeChapterIndex];
+        return moveChapterByDrop(chapter, {
+          volumeId: volume ? volume.id : null,
+          beforeChapterId: before ? before.id : null
+        });
+      },
       async chapterTextAt(index) {
         const chapter = state.chapters[index];
         if (!chapter) return null;
@@ -2839,6 +3322,13 @@
       if (versionEl && appInfo && appInfo.version) versionEl.textContent = `v${appInfo.version}`;
     } catch {
       /* 拿不到就保留 index.html 里的静态版本号 */
+    }
+    // 启动时取一次主进程攒下的提示（例如配置文件损坏已归档）
+    try {
+      const warning = await call(api.appWarning);
+      if (warning && warning.message) toast(warning.message, 'warn');
+    } catch {
+      /* 拿不到提示不影响启动 */
     }
     applyEditorStyle();
     applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);

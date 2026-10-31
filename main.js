@@ -39,6 +39,7 @@ const textMenu = require('./core/textmenu');
 let win = null;
 let configStore = null;
 let config = null;
+let configWarning = null; // 配置损坏被归档时的提示，界面启动后取一次
 let forceClose = false;
 let closePending = false;
 let closeTimer = null;
@@ -60,10 +61,39 @@ function fail(err) {
   return { ok: false, code, message };
 }
 
+// 只接受来自我们自己窗口的 IPC（防止将来引入 webview / 远程内容后越权）
+function isTrustedSender(event) {
+  return Boolean(win && !win.isDestroyed() && event && event.sender === win.webContents);
+}
+
 function handle(channel, fn) {
-  ipcMain.handle(channel, async (_event, ...args) => {
+  ipcMain.handle(channel, async (event, ...args) => {
+    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }));
     try {
       return ok(await fn(...args));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+}
+
+// 书架相关的 IPC：第一个参数必须是「书架目录的直接子目录」，
+// 渲染层理论上不会传别的路径，但加一层校验，越权/手误都读不到书架以外的文件。
+function assertBookPath(bookPath, booksRoot) {
+  const root = path.resolve(String(booksRoot || ''));
+  const target = path.resolve(String(bookPath == null ? '' : bookPath));
+  if (path.dirname(target).toLowerCase() !== root.toLowerCase()) {
+    throw Object.assign(new Error('只能操作书架目录下的书'), { code: 'BAD_PATH' });
+  }
+  return target;
+}
+
+function handleBook(channel, fn) {
+  ipcMain.handle(channel, async (event, bookPath, ...args) => {
+    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }));
+    try {
+      const cfg = await getConfig();
+      return ok(await fn(assertBookPath(bookPath, cfg.booksRoot), ...args));
     } catch (err) {
       return fail(err);
     }
@@ -74,6 +104,7 @@ async function getConfig() {
   if (!config) {
     configStore = createConfigStore(app.getPath('userData'));
     config = await configStore.get();
+    configWarning = configStore.takeLoadWarning();
     if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
   }
   return config;
@@ -162,6 +193,12 @@ function registerIpc() {
   handle('config:get', async () => getConfig());
   // 界面上的版本号从 package.json 读，免得每次发版忘了改静态文字
   handle('app:version', async () => ({ version: app.getVersion() }));
+  // 启动后取一次「配置损坏被归档」之类的提示（取完即清空）
+  handle('app:warning', async () => {
+    const warning = configWarning;
+    configWarning = null;
+    return warning;
+  });
 
   handle('config:set', async (patch) => {
     await getConfig();
@@ -204,13 +241,13 @@ function registerIpc() {
     return storage.createBook(cfg.booksRoot, title);
   });
 
-  handle('book:open', async (bookPath) => storage.openBook(bookPath));
-  handle('book:verify', async (bookPath) => storage.verifyBook(bookPath));
-  handle('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title));
-  handle('book:set-last', async (bookPath, chapterId) => storage.setLastOpenChapter(bookPath, chapterId));
+  handleBook('book:open', async (bookPath) => storage.openBook(bookPath));
+  handleBook('book:verify', async (bookPath) => storage.verifyBook(bookPath));
+  handleBook('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title));
+  handleBook('book:set-last', async (bookPath, chapterId) => storage.setLastOpenChapter(bookPath, chapterId));
 
-  handle('chapter:load', async (bookPath, file) => storage.loadChapterText(bookPath, file));
-  handle('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
+  handleBook('chapter:load', async (bookPath, file) => storage.loadChapterText(bookPath, file));
+  handleBook('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
 
   // 正文排版整理：纯文本变换，只计算不写盘（写盘仍由作者 Ctrl+S 决定）
   handle('text:format', async (text, options) => {
@@ -243,7 +280,7 @@ function registerIpc() {
     return findLib.findNextMatch(text, query, fromIndex, options);
   });
 
-  handle('chapter:save', async (bookPath, chapterId, text) => {
+  handleBook('chapter:save', async (bookPath, chapterId, text) => {
     return storage.withBookLock(bookPath, async () => {
       const meta = await storage.readBookMeta(bookPath);
       const chapter = meta.chapters.find((c) => c.id === chapterId);
@@ -285,32 +322,47 @@ function registerIpc() {
     return { name: path.basename(resolved), size: stat.size, base64: buffer.toString('base64') };
   });
 
-  handle('chapter:create', async (bookPath, insertIndex, name) =>
-    storage.createChapter(bookPath, insertIndex, name)
+  handleBook('chapter:create', async (bookPath, insertIndex, name, volumeId) =>
+    storage.createChapter(bookPath, insertIndex, name, volumeId)
   );
-  handle('chapter:rename', async (bookPath, chapterId, name) =>
+  handleBook('chapter:rename', async (bookPath, chapterId, name) =>
     storage.renameChapter(bookPath, chapterId, name)
   );
-  handle('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId));
-  handle('chapter:move', async (bookPath, chapterId, toIndex) =>
+  handleBook('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId));
+  handleBook('chapter:move', async (bookPath, chapterId, toIndex) =>
     storage.moveChapter(bookPath, chapterId, toIndex)
+  );
+  // 分卷：新建 / 改名 / 删除（章节回未分卷，不删章）/ 把章移到别的卷
+  handleBook('volume:create', async (bookPath, name) => storage.createVolume(bookPath, name));
+  handleBook('volume:rename', async (bookPath, volumeId, name) =>
+    storage.renameVolume(bookPath, volumeId, name)
+  );
+  handleBook('volume:delete', async (bookPath, volumeId) => storage.deleteVolume(bookPath, volumeId));
+  handleBook('chapter:move-to-volume', async (bookPath, chapterId, volumeId) =>
+    storage.moveChapterToVolume(bookPath, chapterId, volumeId)
+  );
+  handleBook('volume:move', async (bookPath, volumeId, toIndex) =>
+    storage.moveVolume(bookPath, volumeId, toIndex)
+  );
+  handleBook('chapter:move-to', async (bookPath, chapterId, volumeId, beforeChapterId) =>
+    storage.moveChapterTo(bookPath, chapterId, volumeId, beforeChapterId)
   );
 
   // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
-  handle('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
-  handle('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
+  handleBook('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
+  handleBook('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
 
   // 整本替换的还原：列出 / 还原书内 _trash/替换备份-*/（还原前把当前内容再备份一份）
-  handle('book:list-replace-backups', async (bookPath) => storage.listReplaceBackups(bookPath));
-  handle('book:restore-replace-backup', async (bookPath, backupName) =>
+  handleBook('book:list-replace-backups', async (bookPath) => storage.listReplaceBackups(bookPath));
+  handleBook('book:restore-replace-backup', async (bookPath, backupName) =>
     storage.restoreReplaceBackup(bookPath, backupName)
   );
 
   // 整本智能排版：预检查只算不写；正式整理逐章写盘（写前把原章节备份到 _trash/整理备份-*）
-  handle('book:format-preview', async (bookPath, options) =>
+  handleBook('book:format-preview', async (bookPath, options) =>
     storage.previewFormatBook(bookPath, options)
   );
-  handle('book:format', async (bookPath, options) =>
+  handleBook('book:format', async (bookPath, options) =>
     storage.formatBook(bookPath, options, (progress) => {
       if (win && !win.isDestroyed()) win.webContents.send('format:progress', progress);
     })
@@ -336,7 +388,7 @@ function registerIpc() {
     return { texts, chars, includedUnsaved: overrideIndex >= 0 };
   }
 
-  handle('book:export', async (bookPath, override) => {
+  handleBook('book:export', async (bookPath, override) => {
     const meta = await storage.readBookMeta(bookPath);
     const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
     const cfg = await getConfig();
@@ -376,7 +428,7 @@ function registerIpc() {
     };
   });
 
-  handle('book:copy', async (bookPath, override) => {
+  handleBook('book:copy', async (bookPath, override) => {
     const meta = await storage.readBookMeta(bookPath);
     const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
     const text = exporter.composeBook(meta, texts);
@@ -384,7 +436,7 @@ function registerIpc() {
     return { chapterCount: meta.chapters.length, chars, includedUnsaved };
   });
 
-  handle('book:repair', async (bookPath, mode) => {
+  handleBook('book:repair', async (bookPath, mode) => {
     if (mode === 'bak') return repair.restoreFromBak(bookPath);
     if (mode === 'rebuild') return repair.rebuildFromFiles(bookPath);
     throw new storage.StorageError('BAD_MODE', `未知的修复方式：${mode}`);
@@ -415,7 +467,7 @@ function registerIpc() {
     });
   });
 
-  handle('book:delete', async (bookPath) => {
+  handleBook('book:delete', async (bookPath) => {
     const cfg = await getConfig();
     const root = path.resolve(cfg.booksRoot);
     const target = path.resolve(String(bookPath || ''));
@@ -453,7 +505,7 @@ function registerIpc() {
     return filePaths[0];
   });
 
-  handle('shell:open-book-folder', async (bookPath) => {
+  handleBook('shell:open-book-folder', async (bookPath) => {
     const err = await shell.openPath(bookPath);
     if (err) throw new storage.StorageError('OPEN_FAILED', err);
     return true;

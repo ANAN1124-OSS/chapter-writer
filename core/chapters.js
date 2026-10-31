@@ -84,6 +84,100 @@ function countChars(text) {
   return String(text == null ? '' : text).replace(/\s/g, '').length;
 }
 
+// ---------- 分卷 ----------
+// 书的分卷：meta.volumes = [{ id, name }]（数组顺序 = 显示顺序），章节上的 volumeId 指向卷；
+// 没有 volumeId（或指向已不存在的卷）= 「未分卷」。
+// 顺序约定：chapters 数组顺序 == 界面显示顺序，且必须按「未分卷 → 第1卷 → 第2卷 …」分组连续排列；
+// 任何改卷归属的操作之后都用 normalizeChapterOrder() 归一（稳定排序，组内相对顺序不变）。
+
+function sanitizeVolumes(raw) {
+  const out = [];
+  if (!Array.isArray(raw)) return out;
+  const seen = new Set();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    out.push({ id, name });
+  }
+  return out;
+}
+
+// 卷在排序里的权重：0 = 未分卷，1..n = 第1..n卷；找不到的卷也算未分卷
+function volumeRank(meta, volumeId) {
+  if (!volumeId) return 0;
+  const index = sanitizeVolumes(meta && meta.volumes).findIndex((v) => v.id === volumeId);
+  return index < 0 ? 0 : index + 1;
+}
+
+function normalizeChapterOrder(meta) {
+  const volumes = sanitizeVolumes(meta && meta.volumes);
+  const rank = new Map(volumes.map((v, i) => [v.id, i + 1]));
+  const list = Array.isArray(meta && meta.chapters) ? meta.chapters.slice() : [];
+  // 卷没了 / 卷 id 不认识的章节一律回「未分卷」，避免界面里出现指向不存在卷的章
+  const decorated = list.map((chapter, index) => {
+    const volumeId = chapter && chapter.volumeId && rank.has(chapter.volumeId) ? chapter.volumeId : null;
+    const next = volumeId === (chapter && chapter.volumeId) ? chapter : { ...chapter, volumeId };
+    return { chapter: next, index, r: rank.get(volumeId) || 0 };
+  });
+  decorated.sort((a, b) => (a.r - b.r) || (a.index - b.index));
+  return { ...meta, volumes, chapters: decorated.map((d) => d.chapter) };
+}
+
+function nextVolumeId(meta) {
+  const ids = new Set(sanitizeVolumes(meta && meta.volumes).map((v) => v.id));
+  let i = 1;
+  for (;;) {
+    const id = `v_${pad3(i)}`;
+    if (!ids.has(id)) return id;
+    i += 1;
+  }
+}
+
+// 某卷里最后一章的数组下标之后（没有章节就返回该组插入点）
+function insertIndexForVolume(meta, volumeId) {
+  const list = Array.isArray(meta && meta.chapters) ? meta.chapters : [];
+  const target = volumeId || null;
+  let last = -1;
+  for (let i = 0; i < list.length; i += 1) {
+    const id = (list[i] && list[i].volumeId) || null;
+    if (id === target) last = i;
+  }
+  if (last >= 0) return last + 1;
+  // 卷里还没有章节：插到该卷分组应该开始的位置（下一个卷的第一章之前，或全书末尾）
+  const rank = volumeRank(meta, target);
+  for (let i = 0; i < list.length; i += 1) {
+    const id = (list[i] && list[i].volumeId) || null;
+    if (volumeRank(meta, id) > rank) return i;
+  }
+  return list.length;
+}
+
+function countChaptersInVolume(meta, volumeId) {
+  const target = volumeId || null;
+  return (Array.isArray(meta && meta.chapters) ? meta.chapters : []).filter(
+    (c) => ((c && c.volumeId) || null) === target
+  ).length;
+}
+
+// 调整卷的先后顺序（只改 volumes 数组顺序，章节按新卷序重新归一；章节文件不动）
+function moveVolume(meta, volumeId, toIndex) {
+  const volumes = sanitizeVolumes(meta && meta.volumes).slice();
+  const from = volumes.findIndex((v) => v.id === volumeId);
+  const total = volumes.length;
+  const to = Math.max(0, Math.min(Math.round(Number(toIndex) || 0), total - 1));
+  if (from < 0 || from === to) {
+    return { meta: normalizeChapterOrder({ ...meta, volumes }), moved: false, from, to: from };
+  }
+  const [moved] = volumes.splice(from, 1);
+  volumes.splice(to, 0, moved);
+  return { meta: normalizeChapterOrder({ ...meta, volumes }), moved: true, from, to };
+}
+
+
+
 function normalizeNewlines(text) {
   return String(text == null ? '' : text).replace(/\r\n?/g, '\n');
 }
@@ -106,6 +200,13 @@ module.exports = {
   insertChapter,
   removeChapter,
   updateChapter,
+  sanitizeVolumes,
+  volumeRank,
+  normalizeChapterOrder,
+  nextVolumeId,
+  insertIndexForVolume,
+  countChaptersInVolume,
+  moveVolume,
   countChars,
   normalizeNewlines,
   toDiskNewlines
