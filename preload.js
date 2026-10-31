@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('api', {
   createChapter: (bookPath, insertIndex, name, volumeId) =>
     invoke('chapter:create', bookPath, insertIndex, name, volumeId),
   renameChapter: (bookPath, chapterId, name) => invoke('chapter:rename', bookPath, chapterId, name),
+  updateChapterMeta: (bookPath, chapterId, patch) =>
+    invoke('chapter:update-meta', bookPath, chapterId, patch),
   deleteChapter: (bookPath, chapterId) => invoke('chapter:delete', bookPath, chapterId),
   moveChapter: (bookPath, chapterId, toIndex) => invoke('chapter:move', bookPath, chapterId, toIndex),
   createVolume: (bookPath, name) => invoke('volume:create', bookPath, name),

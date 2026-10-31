@@ -4,6 +4,12 @@ const TITLE_TEMPLATE = '第{num}章：{name}';
 const MAX_NAME_LENGTH = 40;
 const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g;
 const EDGE_DOTS_SPACES = /^[.\s]+|[.\s]+$/g;
+// 章节状态：只记在 书目.json 里（可选字段），txt 一个字节都不动。
+// draft = 草稿（默认）/ revising = 待修 / done = 完稿
+const CHAPTER_STATUSES = ['draft', 'revising', 'done'];
+const CHAPTER_STATUS_LABELS = { draft: '草稿', revising: '待修', done: '完稿' };
+const DEFAULT_CHAPTER_STATUS = 'draft';
+const MAX_NOTE_LENGTH = 200;
 // 原文自带章节标题（导进来的书）：显示时原样保留，不再叠加「第N章：」
 const RAW_TITLE_RE =
   /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部话幕]|楔子|序章|序言|引子|前言|前传|外传|尾声|后记|番外|终章|大结局|附录|开篇|Chapter\s+\d+)/i;
@@ -78,6 +84,69 @@ function updateChapter(meta, chapterId, patch) {
     ...meta,
     chapters: (meta.chapters || []).map((c) => (c.id === chapterId ? { ...c, ...patch } : c))
   };
+}
+
+// ---------- 章节状态 / 备注（可选字段，只影响书目） ----------
+function isChapterStatus(raw) {
+  return typeof raw === 'string' && CHAPTER_STATUSES.includes(raw.trim().toLowerCase());
+}
+
+function sanitizeChapterStatus(raw) {
+  return isChapterStatus(raw) ? raw.trim().toLowerCase() : DEFAULT_CHAPTER_STATUS;
+}
+
+// 备注当成一句话：换行收成空格、去首尾空白、最多 200 字；清空 = 删除备注
+function sanitizeChapterNote(raw) {
+  if (typeof raw !== 'string') return '';
+  const oneLine = raw.replace(/\r\n?/g, '\n').replace(/\s*\n+\s*/g, ' ').trim();
+  return oneLine.length > MAX_NOTE_LENGTH ? oneLine.slice(0, MAX_NOTE_LENGTH) : oneLine;
+}
+
+function chapterStatus(chapter) {
+  return sanitizeChapterStatus(chapter && chapter.status);
+}
+
+function chapterNote(chapter) {
+  return sanitizeChapterNote(chapter && chapter.note);
+}
+
+// 读取时清洗：合法 status 保留（统一小写），非法/缺失就不写这个字段；
+// 空备注同样不保留字段 —— 旧版书目读进来不会平白多出字段，写回时也不会带脏值。
+function cleanChapterMeta(chapter) {
+  const next = { ...chapter };
+  if (isChapterStatus(chapter && chapter.status)) {
+    next.status = String(chapter.status).trim().toLowerCase();
+  } else {
+    delete next.status;
+  }
+  const note = sanitizeChapterNote(chapter && chapter.note);
+  if (note) next.note = note;
+  else delete next.note;
+  return next;
+}
+
+// 只接受白名单字段（status/note）；空备注删除该字段，草稿状态显式保留
+function applyChapterMeta(chapter, patch) {
+  const next = { ...chapter };
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    next.status = sanitizeChapterStatus(patch.status);
+  }
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'note')) {
+    const note = sanitizeChapterNote(patch.note);
+    if (note) next.note = note;
+    else delete next.note;
+  }
+  return next;
+}
+
+function countChapterStatuses(meta) {
+  const counts = { total: 0, draft: 0, revising: 0, done: 0 };
+  const list = Array.isArray(meta && meta.chapters) ? meta.chapters : [];
+  for (const chapter of list) {
+    counts.total += 1;
+    counts[chapterStatus(chapter)] += 1;
+  }
+  return counts;
 }
 
 function countChars(text) {
@@ -190,6 +259,10 @@ module.exports = {
   TITLE_TEMPLATE,
   MAX_NAME_LENGTH,
   RAW_TITLE_RE,
+  CHAPTER_STATUSES,
+  CHAPTER_STATUS_LABELS,
+  DEFAULT_CHAPTER_STATUS,
+  MAX_NOTE_LENGTH,
   pad3,
   formatTitle,
   safeName,
@@ -200,6 +273,14 @@ module.exports = {
   insertChapter,
   removeChapter,
   updateChapter,
+  isChapterStatus,
+  sanitizeChapterStatus,
+  sanitizeChapterNote,
+  chapterStatus,
+  chapterNote,
+  cleanChapterMeta,
+  applyChapterMeta,
+  countChapterStatuses,
   sanitizeVolumes,
   volumeRank,
   normalizeChapterOrder,

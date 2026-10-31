@@ -377,6 +377,20 @@ body.resizing .editor {
   content: " •";
   color: var(--accent);
 }
+/* 章节状态小圆点：灰 = 草稿（默认）、黄 = 待修、绿 = 完稿；备注用 ✎ 提示 */
+.chapter-status-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  background: #b8bec6;
+}
+.chapter-item.status-revising .chapter-status-dot { background: #d99a2b; }
+.chapter-item.status-done .chapter-status-dot { background: #3f9e5f; }
+.chapter-item.active .chapter-status-dot { box-shadow: 0 0 0 2px var(--paper-soft); }
+.chapter-note-mark { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
+.chapter-item.active .chapter-note-mark { color: var(--ink-soft); }
 .sidebar-actions {
   padding: 10px 12px 14px;
   border-top: 1px solid var(--line-strong);
@@ -851,4 +865,5 @@ body.chapter-dragging * { user-select: none; }
   cursor: pointer;
 }
 .context-menu button:hover { background: var(--paper-deep); }
+.context-menu-sep { height: 1px; margin: 4px 6px; background: var(--line-strong); }
 .danger-text { color: var(--danger) !important; }

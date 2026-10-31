@@ -60,6 +60,22 @@
     return `第${index + 1}章：${clean}`;
   }
 
+  // 章节状态 / 备注（与 core/chapters.js 的清洗规则保持一致）：只存在 书目.json 里，不动正文。
+  const CHAPTER_STATUSES = ['draft', 'revising', 'done'];
+  const CHAPTER_STATUS_LABELS = { draft: '草稿', revising: '待修', done: '完稿' };
+
+  function chapterStatus(chapter) {
+    const raw = chapter && typeof chapter.status === 'string' ? chapter.status.trim().toLowerCase() : '';
+    return CHAPTER_STATUSES.includes(raw) ? raw : 'draft';
+  }
+
+  function chapterNote(chapter) {
+    const raw = chapter && chapter.note;
+    if (typeof raw !== 'string') return '';
+    const note = raw.trim();
+    return note.length > 200 ? note.slice(0, 200) : note;
+  }
+
   class ApiError extends Error {
     constructor(message, code) {
       super(message);
@@ -465,10 +481,12 @@
 
       const meta = document.createElement('div');
       meta.className = 'book-card-meta';
+      const done = Number(book.doneChapters) || 0;
       meta.textContent =
         book.status === 'corrupt'
           ? `书目损坏：${book.reason || '无法读取'}`
-          : `${book.chapterCount} 章 · ${formatChars(book.totalChars)}`;
+          : `${book.chapterCount} 章 · ${formatChars(book.totalChars)}` +
+            (done > 0 ? ` · 完稿 ${done}/${book.chapterCount} 章` : '');
       card.appendChild(meta);
 
       // 书名没命中、靠章名命中时，把命中的章名列出来
@@ -895,11 +913,19 @@
   }
 
   function makeChapterItem(chapter, index) {
+    const status = chapterStatus(chapter);
+    const note = chapterNote(chapter);
     const item = document.createElement('div');
-    item.className = 'chapter-item' + (index === state.index ? ' active' : '');
+    item.className = `chapter-item status-${status}` + (index === state.index ? ' active' : '');
     if (index === state.index && state.dirty) item.classList.add('dirty');
     item.dataset.index = String(index);
-    item.title = '单击切换；双击重命名；右键更多';
+    item.dataset.status = status;
+    const tip = [`状态：${CHAPTER_STATUS_LABELS[status]}`, note ? `备注：${note}` : ''].filter(Boolean).join('\n');
+    item.title = `单击切换；双击重命名；右键更多\n${tip}`;
+
+    const dot = document.createElement('span');
+    dot.className = 'chapter-status-dot';
+    dot.title = `状态：${CHAPTER_STATUS_LABELS[status]}（右键可改）`;
 
     const num = document.createElement('span');
     num.className = 'chapter-num';
@@ -909,8 +935,16 @@
     name.className = 'chapter-name';
     name.textContent = String(chapter.name || '').trim() || '未命名';
 
+    item.appendChild(dot);
     item.appendChild(num);
     item.appendChild(name);
+    if (note) {
+      const noteMark = document.createElement('span');
+      noteMark.className = 'chapter-note-mark';
+      noteMark.textContent = '✎';
+      noteMark.title = `备注：${note}`;
+      item.appendChild(noteMark);
+    }
     item.addEventListener('click', () => {
       if (state.suppressChapterClick && Date.now() < state.suppressChapterClick) {
         state.suppressChapterClick = 0;
@@ -1399,6 +1433,49 @@
     }
   }
 
+  // 章节状态 / 备注：只写 书目.json 的可选字段，正文一个字都不动。
+  async function updateChapterInfo(index, patch) {
+    const chapter = state.chapters[index];
+    if (!chapter || !state.bookPath) return { ok: false, message: '没有打开的章节' };
+    try {
+      const data = await call(api.updateChapterMeta, state.bookPath, chapter.id, patch);
+      state.meta = data.meta;
+      state.chapters = data.meta.chapters;
+      renderChapterList();
+      renderEditorHeader();
+      return { ok: true, changed: Boolean(data.changed), chapter: data.chapter };
+    } catch (err) {
+      toast(`保存章节信息失败：${err.message}`, 'error');
+      return { ok: false, message: err.message, code: err.code };
+    }
+  }
+
+  async function setChapterStatusAt(index, status) {
+    const label = CHAPTER_STATUS_LABELS[status];
+    if (!label || !state.chapters[index]) return { ok: false };
+    const res = await updateChapterInfo(index, { status });
+    if (!res.ok) return res;
+    if (res.changed) toast(`已标记为${label}（只改书目，正文没动）`);
+    return { ok: true, status: chapterStatus(state.chapters[index]), changed: res.changed };
+  }
+
+  async function editChapterNoteAt(index) {
+    const chapter = state.chapters[index];
+    if (!chapter) return null;
+    const value = await promptText({
+      title: `章节备注：${chapterTitle(index, chapter.name)}`,
+      message: '给自己记一句话（最多 200 字，只存进书目.json，不碰正文）。清空后确定 = 删除备注。',
+      value: chapter.note || '',
+      placeholder: '比如：这章结尾要重写'
+    });
+    if (value === null) return null;
+    const res = await updateChapterInfo(index, { note: value });
+    if (!res.ok) return null;
+    const freshNote = chapterNote(state.chapters[index]);
+    toast(freshNote ? '备注已保存' : '备注已清除');
+    return freshNote;
+  }
+
   // ---------- 导出 / 复制 ----------
   // 导出 / 复制以磁盘内容为准，但当前章如果还没保存，就把编辑区里的最新内容一起带上
   // （只参与这一次拼接，绝不写盘），这样「导出 = 你眼睛看到的」，保存仍然完全手动。
@@ -1695,6 +1772,14 @@
   function showContextMenu(event, index) {
     state.contextIndex = index;
     const menu = $('context-menu');
+    // 当前状态的那一项前面打勾，避免记不清这章标的是什么
+    const currentStatus = chapterStatus(state.chapters[index]);
+    menu.querySelectorAll('button[data-action^="status-"]').forEach((btn) => {
+      const status = btn.dataset.action.slice('status-'.length);
+      const label = CHAPTER_STATUS_LABELS[status];
+      if (!label) return;
+      btn.textContent = `${status === currentStatus ? '✓ ' : ''}标记为${label}`;
+    });
     menu.classList.remove('hidden');
     menu.style.left = `${event.clientX}px`;
     menu.style.top = `${event.clientY}px`;
@@ -2904,6 +2989,8 @@
       else if (action === 'insert-before') await createChapterAt(index);
       else if (action === 'insert-after') await createChapterAt(index + 1);
       else if (action === 'move-volume') await moveChapterToVolumeFlow(index);
+      else if (action === 'edit-note') await editChapterNoteAt(index);
+      else if (action.startsWith('status-')) await setChapterStatusAt(index, action.slice('status-'.length));
     });
 
     $('volume-menu').addEventListener('click', async (event) => {
@@ -3077,6 +3164,29 @@
       chapterTitles: () => state.chapters.map((c, i) => chapterTitle(i, c.name)),
       chapterNames: () => state.chapters.map((c) => c.name),
       chapterFiles: () => state.chapters.map((c) => c.file),
+      // 章节状态 / 备注
+      chapterStatuses: () => state.chapters.map((c) => chapterStatus(c)),
+      chapterNotes: () => state.chapters.map((c) => chapterNote(c)),
+      chapterStatusDots: () =>
+        Array.from(document.querySelectorAll('#chapter-list .chapter-item')).map(
+          (el) => el.dataset.status || ''
+        ),
+      chapterItemTitles: () =>
+        Array.from(document.querySelectorAll('#chapter-list .chapter-item')).map((el) => el.title),
+      chapterNoteMarks: () =>
+        Array.from(document.querySelectorAll('#chapter-list .chapter-note-mark')).map((el) => el.title),
+      bookCardMetaTexts: () =>
+        Array.from(document.querySelectorAll('.book-card[data-path] .book-card-meta')).map(
+          (el) => el.textContent
+        ),
+      async setChapterStatusAt(index, status) {
+        return setChapterStatusAt(index, status);
+      },
+      async editChapterNoteAt(index) {
+        return editChapterNoteAt(index);
+      },
+      contextMenuItems: () =>
+        Array.from(document.querySelectorAll('#context-menu button')).map((el) => el.textContent),
       // 分卷
       volumeNames: () => volumeList().map((v) => v.name),
       volumeIds: () => volumeList().map((v) => v.id),

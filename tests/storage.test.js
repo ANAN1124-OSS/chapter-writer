@@ -98,6 +98,127 @@ test('重命名章节：只改 name，不动文件名', async () => {
   await fs.access(path.join(bookPath, chapter.file));
 });
 
+test('章节状态/备注：写进书目、txt 一个字节不动、可清空、非法状态被拒', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '状态备注');
+  await storage.createChapter(bookPath, 1, '第二章');
+  const meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '第一章正文。');
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '第二章正文。');
+  const before = [];
+  for (const chapter of meta.chapters) {
+    const filePath = path.join(bookPath, chapter.file);
+    const stat = await fs.stat(filePath);
+    before.push({
+      file: chapter.file,
+      text: await fs.readFile(filePath, 'utf8'),
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
+  }
+
+  const res = await storage.updateChapterMeta(bookPath, meta.chapters[0].id, {
+    status: 'done',
+    note: '补结尾'
+  });
+  assert.equal(res.changed, true);
+  assert.equal(res.chapter.status, 'done');
+  assert.equal(res.chapter.note, '补结尾');
+
+  // 只写书目：txt 的内容、大小、mtime 都没变（「txt 一个字节不动」）
+  for (const item of before) {
+    const filePath = path.join(bookPath, item.file);
+    const stat = await fs.stat(filePath);
+    assert.equal(stat.size, item.size);
+    assert.equal(stat.mtimeMs, item.mtimeMs);
+    assert.equal(await fs.readFile(filePath, 'utf8'), item.text);
+  }
+  const diskMeta = JSON.parse(await fs.readFile(path.join(bookPath, '书目.json'), 'utf8'));
+  assert.equal(diskMeta.chapters[0].status, 'done');
+  assert.equal(diskMeta.chapters[0].note, '补结尾');
+  assert.equal(diskMeta.chapters[1].status, undefined);
+
+  // 备注超过 200 字截断；清空备注 = 删除字段
+  const longRes = await storage.updateChapterMeta(bookPath, meta.chapters[1].id, {
+    note: '字'.repeat(250)
+  });
+  assert.equal(longRes.chapter.note.length, 200);
+  const clearRes = await storage.updateChapterMeta(bookPath, meta.chapters[1].id, { note: '  ' });
+  assert.equal(clearRes.chapter.note, undefined);
+  const afterClear = JSON.parse(await fs.readFile(path.join(bookPath, '书目.json'), 'utf8'));
+  assert.equal(afterClear.chapters[1].note, undefined);
+
+  // 非法状态被拒，书目保持原样
+  await assert.rejects(
+    () => storage.updateChapterMeta(bookPath, meta.chapters[0].id, { status: 'finished' }),
+    (err) => err.code === 'BAD_STATUS'
+  );
+  const stillDone = await storage.readBookMeta(bookPath);
+  assert.equal(stillDone.chapters[0].status, 'done');
+
+  // 没有变化时不写盘（书目 mtime 不变，避免无意义的 .bak 轮换）
+  const metaPath = path.join(bookPath, '书目.json');
+  const metaStat = await fs.stat(metaPath);
+  const noop = await storage.updateChapterMeta(bookPath, meta.chapters[0].id, {
+    status: 'done',
+    note: '补结尾'
+  });
+  assert.equal(noop.changed, false);
+  assert.equal((await fs.stat(metaPath)).mtimeMs, metaStat.mtimeMs);
+});
+
+test('旧版书目（v0.4.1，无 status/note）：照常打开、不自动补字段、完稿数为 0', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '旧版书');
+  // 模拟 v0.4.1 写出的书目：只有 id/file/name/createdAt/chars，没有任何新字段
+  const legacy = {
+    version: 1,
+    id: 'b_legacy',
+    title: '旧版书',
+    titleTemplate: '第{num}章：{name}',
+    fileSeq: 1,
+    chapters: [
+      {
+        id: 'ch_001',
+        file: '001-未命名.txt',
+        name: '起风',
+        chars: 4,
+        createdAt: '2026-10-31T00:00:00.000Z'
+      }
+    ],
+    createdAt: '2026-10-31T00:00:00.000Z'
+  };
+  await fs.writeFile(path.join(bookPath, '书目.json'), JSON.stringify(legacy, null, 2), 'utf8');
+
+  const meta = await storage.readBookMeta(bookPath);
+  assert.equal(meta.chapters[0].status, undefined);
+  assert.equal(meta.chapters[0].note, undefined);
+  const books = await storage.listBooks(root);
+  const listed = books.find((book) => book.title === '旧版书');
+  assert.ok(listed);
+  assert.equal(listed.doneChapters, 0);
+
+  // 普通改名不会把新字段补进旧书目
+  await storage.renameChapter(bookPath, 'ch_001', '大风');
+  const raw = JSON.parse(await fs.readFile(path.join(bookPath, '书目.json'), 'utf8'));
+  assert.equal(raw.chapters[0].status, undefined);
+  assert.equal(raw.chapters[0].note, undefined);
+});
+
+test('书架扫描：完稿章数按 status=done 统计', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '完稿统计');
+  await storage.createChapter(bookPath, 1, '第二章');
+  await storage.createChapter(bookPath, 2, '第三章');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.updateChapterMeta(bookPath, meta.chapters[0].id, { status: 'done' });
+  await storage.updateChapterMeta(bookPath, meta.chapters[2].id, { status: 'done' });
+  await storage.updateChapterMeta(bookPath, meta.chapters[1].id, { status: 'revising' });
+  const books = await storage.listBooks(root);
+  assert.equal(books[0].chapterCount, 3);
+  assert.equal(books[0].doneChapters, 2);
+});
+
 test('删除章节：文件移入 _trash，json 移除，删空后自动补一章', async () => {
   const root = await mkTmp();
   const { path: bookPath } = await storage.createBook(root, '删除测试');

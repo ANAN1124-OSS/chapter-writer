@@ -90,6 +90,53 @@ test('字数统计：不算空白字符', () => {
   assert.equal(ch.countChars(null), 0);
 });
 
+test('章节状态：非法值回落到草稿，合法值统一小写', () => {
+  assert.equal(ch.sanitizeChapterStatus('done'), 'done');
+  assert.equal(ch.sanitizeChapterStatus(' DONE '), 'done');
+  assert.equal(ch.sanitizeChapterStatus('revising'), 'revising');
+  assert.equal(ch.sanitizeChapterStatus('finished'), 'draft');
+  assert.equal(ch.sanitizeChapterStatus(null), 'draft');
+  assert.equal(ch.chapterStatus({ status: 'done' }), 'done');
+  assert.equal(ch.chapterStatus({ status: 'weird' }), 'draft');
+  assert.equal(ch.chapterStatus({}), 'draft');
+  assert.deepEqual(ch.CHAPTER_STATUSES, ['draft', 'revising', 'done']);
+});
+
+test('章节备注：一句话、最多 200 字、空值清空', () => {
+  assert.equal(ch.sanitizeChapterNote('  这章要改结尾  '), '这章要改结尾');
+  assert.equal(ch.sanitizeChapterNote('第一行\n第二行'), '第一行 第二行');
+  assert.equal(ch.sanitizeChapterNote('字'.repeat(250)).length, 200);
+  assert.equal(ch.sanitizeChapterNote(123), '');
+  assert.equal(ch.chapterNote({ note: '  补结尾 ' }), '补结尾');
+  assert.equal(ch.chapterNote({}), '');
+});
+
+test('章节清洗：旧数据没有 status/note 不乱加字段，非法值不写回', () => {
+  const old = ch.cleanChapterMeta({ id: 'ch_001', file: '001-未命名.txt', name: '起风' });
+  assert.deepEqual(Object.keys(old).sort(), ['file', 'id', 'name']);
+  assert.equal(old.status, undefined);
+  assert.equal(old.note, undefined);
+  const dirty = ch.cleanChapterMeta({ id: 'x', status: 'NOPE', note: '   ' });
+  assert.equal(dirty.status, undefined);
+  assert.equal(dirty.note, undefined);
+  const good = ch.cleanChapterMeta({ id: 'x', status: ' DONE ', note: '要改\n结尾' });
+  assert.equal(good.status, 'done');
+  assert.equal(good.note, '要改 结尾');
+});
+
+test('章节元数据补丁：只认 status/note，空备注删除字段，统计各状态章数', () => {
+  const base = { id: 'x', file: 'x.txt', name: '甲' };
+  const done = ch.applyChapterMeta(base, { status: 'done', note: '补结尾', name: '不该生效' });
+  assert.equal(done.status, 'done');
+  assert.equal(done.note, '补结尾');
+  assert.equal(done.name, '甲');
+  const cleared = ch.applyChapterMeta(done, { note: '   ' });
+  assert.equal(cleared.note, undefined);
+  const meta = { chapters: [{ status: 'done' }, {}, { status: 'revising' }, { status: 'bogus' }] };
+  assert.deepEqual(ch.countChapterStatuses(meta), { total: 4, draft: 2, revising: 1, done: 1 });
+  assert.deepEqual(ch.countChapterStatuses({}), { total: 0, draft: 0, revising: 0, done: 0 });
+});
+
 test('换行归一：读入统一 \\n，落盘统一 \\r\\n', () => {
   assert.equal(ch.normalizeNewlines('a\r\nb\rc\nd'), 'a\nb\nc\nd');
   assert.equal(ch.toDiskNewlines('a\nb'), 'a\r\nb');

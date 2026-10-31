@@ -328,6 +328,10 @@ function registerIpc() {
   handleBook('chapter:rename', async (bookPath, chapterId, name) =>
     storage.renameChapter(bookPath, chapterId, name)
   );
+  // 章节状态 / 备注：只改书目可选字段（txt 不动）
+  handleBook('chapter:update-meta', async (bookPath, chapterId, patch) =>
+    storage.updateChapterMeta(bookPath, chapterId, patch)
+  );
   handleBook('chapter:delete', async (bookPath, chapterId) => storage.deleteChapter(bookPath, chapterId));
   handleBook('chapter:move', async (bookPath, chapterId, toIndex) =>
     storage.moveChapter(bookPath, chapterId, toIndex)

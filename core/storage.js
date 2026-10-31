@@ -85,12 +85,14 @@ async function readBookMeta(bookPath) {
     throw new StorageError('PARSE_ERROR', `${BOOK_FILE} 解析失败（内容不是合法 JSON）`);
   }
   validateMeta(meta);
-  meta.chapters = meta.chapters.map((c, i) => ({
-    ...c,
-    id: typeof c.id === 'string' && c.id ? c.id : `ch_${chaptersLib.pad3(i + 1)}`,
-    name: typeof c.name === 'string' ? c.name : '',
-    createdAt: typeof c.createdAt === 'string' ? c.createdAt : nowIso()
-  }));
+  meta.chapters = meta.chapters.map((c, i) =>
+    chaptersLib.cleanChapterMeta({
+      ...c,
+      id: typeof c.id === 'string' && c.id ? c.id : `ch_${chaptersLib.pad3(i + 1)}`,
+      name: typeof c.name === 'string' ? c.name : '',
+      createdAt: typeof c.createdAt === 'string' ? c.createdAt : nowIso()
+    })
+  );
   if (typeof meta.titleTemplate !== 'string' || !meta.titleTemplate.trim()) {
     meta.titleTemplate = chaptersLib.TITLE_TEMPLATE;
   }
@@ -245,6 +247,8 @@ async function listBooks(booksRoot) {
         chapterCount: meta.chapters.length,
         // 章节名给书架搜索用（只搜书名/章节名，不搜正文）
         chapterNames: meta.chapters.map((chapter) => chapter.name || ''),
+        // 书卡上的「完稿 X/Y 章」（只统计 status === 'done' 的章）
+        doneChapters: chaptersLib.countChapterStatuses(meta).done,
         totalChars: stats.totalChars,
         lastModified: stats.latestMtime,
         missing: []
@@ -258,6 +262,7 @@ async function listBooks(booksRoot) {
         title: folder,
         chapterCount: 0,
         chapterNames: [],
+        doneChapters: 0,
         totalChars: 0,
         lastModified: 0,
         reason: err.message,
@@ -473,6 +478,36 @@ async function renameChapter(bookPath, chapterId, name) {
   const updated = chaptersLib.updateChapter(meta, chapterId, { name: String(name == null ? '' : name).trim() });
   const saved = await writeBookMeta(bookPath, updated);
   return { meta: saved, chapter: saved.chapters[index] };
+}
+
+// 章节状态 / 备注：只改书目里的可选字段，章节 txt 一个字节都不动。
+// patch 只认 status（draft/revising/done）和 note（≤200 字；空字符串 = 删除备注）；
+// 返回 changed=false 时不写盘（避免无意义的 .bak 轮换）。
+async function updateChapterMeta(bookPath, chapterId, patch = {}) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new StorageError('BAD_PATCH', '章节信息必须是一个对象');
+  }
+  const meta = await readBookMeta(bookPath);
+  const index = chaptersLib.findChapterIndex(meta, chapterId);
+  if (index < 0) throw new StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+  if (Object.prototype.hasOwnProperty.call(patch, 'status') && !chaptersLib.isChapterStatus(patch.status)) {
+    throw new StorageError('BAD_STATUS', '章节状态只能是 draft / revising / done');
+  }
+  const changes = {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) changes.status = patch.status;
+  if (Object.prototype.hasOwnProperty.call(patch, 'note')) changes.note = patch.note;
+  if (!Object.keys(changes).length) {
+    return { meta, chapter: meta.chapters[index], index, changed: false };
+  }
+  const current = meta.chapters[index];
+  const nextChapter = chaptersLib.applyChapterMeta(current, changes);
+  const changed = current.status !== nextChapter.status || (current.note || '') !== (nextChapter.note || '');
+  if (!changed) {
+    return { meta, chapter: current, index, changed: false };
+  }
+  const chapters = meta.chapters.map((c) => (c.id === chapterId ? nextChapter : c));
+  const saved = await writeBookMeta(bookPath, { ...meta, chapters });
+  return { meta: saved, chapter: saved.chapters[index], index, changed: true };
 }
 
 function timestampForFile(date = new Date()) {
@@ -910,6 +945,7 @@ module.exports = {
   moveChapterTo: locked(moveChapterTo),
   moveVolume: locked(moveVolume),
   renameChapter: locked(renameChapter),
+  updateChapterMeta: locked(updateChapterMeta),
   deleteChapter: locked(deleteChapter),
   moveChapter: locked(moveChapter),
   searchBook,
