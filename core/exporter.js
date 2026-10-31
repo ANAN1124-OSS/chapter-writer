@@ -24,8 +24,42 @@ function composeBook(meta, texts) {
 }
 
 // 导出文件用：UTF-8 带 BOM，方便记事本等老工具识别
-function exportBuffer(meta, texts) {
-  return Buffer.from(`${BOM}${composeBook(meta, texts)}`, 'utf8');
+function exportBufferFromText(text) {
+  return Buffer.from(`${BOM}${String(text == null ? '' : text)}`, 'utf8');
 }
 
-module.exports = { BOM, composeBook, exportBuffer };
+function exportBuffer(meta, texts) {
+  return exportBufferFromText(composeBook(meta, texts));
+}
+
+// 导出/复制时，把「编辑区里当前章的最新内容」一起拼进去（只影响这一次输出，绝不写盘）。
+// override = { chapterId?, chapterFile?, text }；返回章节下标，-1 表示没匹配到（就按磁盘内容来）。
+function chapterIndexOf(meta, override) {
+  if (!override || typeof override.text !== 'string') return -1;
+  const chapters = (meta && Array.isArray(meta.chapters) && meta.chapters) || [];
+  if (override.chapterId) {
+    const byId = chapters.findIndex((chapter) => chapter && chapter.id === override.chapterId);
+    if (byId >= 0) return byId;
+  }
+  if (override.chapterFile) {
+    return chapters.findIndex((chapter) => chapter && chapter.file === override.chapterFile);
+  }
+  return -1;
+}
+
+// 导出对话框的默认目录：优先用「上一次导出保存到的目录」，没记过或目录已经没了才退回默认目录（文档）。
+// exists 传进来是为了能在单测里替换掉真实的文件系统检查。
+function resolveExportDir(remembered, fallback, exists) {
+  const dir = typeof remembered === 'string' ? remembered.trim() : '';
+  if (dir && (!exists || exists(dir))) return dir;
+  return fallback;
+}
+
+module.exports = {
+  BOM,
+  composeBook,
+  exportBuffer,
+  exportBufferFromText,
+  chapterIndexOf,
+  resolveExportDir
+};

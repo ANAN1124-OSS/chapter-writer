@@ -105,6 +105,7 @@
     replaceBackups: [], // 当前书的「整本替换」备份列表（查找面板里展示 / 还原用）
     bookDisplay: {}, // 当前书的显示设置覆盖（只覆盖改过的项）
     shelfQuery: '', // 书架搜索词（书名 / 章节名）
+    formatBookRunning: false, // 「一键整理本书」进行中（防重复触发）
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
@@ -922,16 +923,10 @@
 
   async function createChapterAt(insertIndex, nameOverride) {
     if (!state.bookPath) return { ok: false };
+    // 作者要求（2026-10-31）：新建 / 插入章节前，当前章有未保存修改就自动保存，不再弹窗
     if (state.dirty) {
-      const action = await askUnsaved({
-        title: '新建章节前保存',
-        message: `「${currentChapterLabel()}」有未保存的修改。`
-      });
-      if (action === 'cancel') return { ok: false, canceled: true };
-      if (action === 'save') {
-        const saved = await saveCurrent();
-        if (!saved.ok) return saved;
-      }
+      const saved = await saveCurrent();
+      if (!saved.ok) return saved; // 保存失败会弹错误提示并停在这里，不建新章
     }
     const appending = insertIndex >= state.chapters.length;
     let name = nameOverride;
@@ -1025,28 +1020,26 @@
   }
 
   // ---------- 导出 / 复制 ----------
-  async function ensureSavedForOutput() {
-    if (!state.dirty) return true;
-    const action = await askUnsaved({
-      title: '先保存再导出',
-      message: '当前章节有未保存的修改。导出/复制读的是磁盘上的内容，建议先保存。',
-      saveLabel: '保存并导出',
-      discardLabel: '用磁盘上的旧内容导出'
-    });
-    if (action === 'cancel') return false;
-    if (action === 'save') {
-      const saved = await saveCurrent();
-      if (!saved.ok) return false;
-    }
-    return true;
+  // 导出 / 复制以磁盘内容为准，但当前章如果还没保存，就把编辑区里的最新内容一起带上
+  // （只参与这一次拼接，绝不写盘），这样「导出 = 你眼睛看到的」，保存仍然完全手动。
+  function currentChapterOverride() {
+    if (!state.dirty) return null;
+    const chapter = state.chapters[state.index];
+    if (!chapter) return null;
+    return { chapterId: chapter.id, text: editorEl.value };
+  }
+
+  function outputSummary(data) {
+    const parts = [`${data.chapterCount} 章`, `${Number(data.chars) || 0} 字`];
+    if (data.includedUnsaved) parts.push('含当前章未保存内容');
+    return `（${parts.join(' · ')}）`;
   }
 
   async function copyBookFlow() {
     if (!state.bookPath) return;
-    if (!(await ensureSavedForOutput())) return;
     try {
-      const data = await call(api.copyBook, state.bookPath);
-      toast(`已复制整本：${data.chapterCount} 章`);
+      const data = await call(api.copyBook, state.bookPath, currentChapterOverride());
+      toast(`已复制整本${outputSummary(data)}`);
     } catch (err) {
       toast(`复制失败：${err.message}`, 'error');
     }
@@ -1054,11 +1047,10 @@
 
   async function exportBookFlow() {
     if (!state.bookPath) return;
-    if (!(await ensureSavedForOutput())) return;
     try {
-      const data = await call(api.exportBook, state.bookPath);
+      const data = await call(api.exportBook, state.bookPath, currentChapterOverride());
       if (data.canceled) return;
-      toast(`已导出：${data.filePath}`);
+      toast(`已导出：${data.filePath}${outputSummary(data)}`);
     } catch (err) {
       toast(`导出失败：${err.message}`, 'error');
     }
@@ -2032,6 +2024,140 @@
     }
   }
 
+  // ---------- 一键整理本书 ----------
+  let formatBookProgressEl = null;
+
+  function showFormatBookProgress(text) {
+    if (!formatBookProgressEl) {
+      formatBookProgressEl = document.createElement('div');
+      formatBookProgressEl.className = 'toast';
+      $('toast-area').appendChild(formatBookProgressEl);
+    }
+    formatBookProgressEl.textContent = text;
+  }
+
+  function hideFormatBookProgress() {
+    if (formatBookProgressEl && formatBookProgressEl.parentNode) formatBookProgressEl.remove();
+    formatBookProgressEl = null;
+  }
+
+  // 把排版规则讲成人话，放进确认框
+  function describeFormatOptions(options) {
+    const opts = { ...DEFAULT_FORMAT_OPTIONS, ...(options || {}) };
+    const parts = [];
+    if (opts.indent === '2') parts.push('段首缩进 2 字符');
+    else if (opts.indent === '0') parts.push('段首缩进 0 字符');
+    else parts.push('缩进不处理');
+    const blankMap = {
+      keep: '段间保持原样',
+      single: '段间空一行',
+      singleIndent: '段间空一行（含缩进）',
+      none: '段间不空行'
+    };
+    parts.push(blankMap[opts.blankLines] || blankMap.single);
+    if (opts.trimTrailing) parts.push('删行尾空白');
+    if (opts.normalizePunct) parts.push('中文旁标点转全角');
+    if (opts.curlyQuotes) parts.push('直引号转弯引号');
+    if (opts.ellipsis) parts.push('省略号转中文');
+    if (opts.removeCjkSpaces) parts.push('删中文间空格');
+    return parts.join(' · ');
+  }
+
+  // 一键整理本书：复用上次「整理本章」的规则 → 预检查 → 确认 → 整本整理（写前备份）
+  async function runFormatBook() {
+    if (!state.bookPath || !state.meta) {
+      toast('先打开一本书再整理', 'warn');
+      return { ok: false };
+    }
+    if (state.formatBookRunning) {
+      toast('正在整理这本书，请稍候', 'warn');
+      return { ok: false, busy: true };
+    }
+    hideFormatMenu();
+    if (state.dirty) {
+      const action = await askUnsaved({
+        title: '整理本书前先处理未保存的修改',
+        message: `「${currentChapterLabel()}」还有未保存的修改；整本整理会直接写盘，建议先保存。`,
+        saveLabel: '保存后整理',
+        discardLabel: '不保存（按磁盘内容整理）'
+      });
+      if (action === 'cancel') return { ok: false, canceled: true };
+      if (action === 'save') {
+        const saved = await saveCurrent();
+        if (!saved.ok) return saved;
+      } else {
+        await loadChapterAt(state.index); // 用磁盘上的旧内容继续
+      }
+    }
+
+    const options = { ...DEFAULT_FORMAT_OPTIONS, ...((state.config && state.config.formatOptions) || {}) };
+    let preview;
+    try {
+      preview = await call(api.formatPreviewBook, state.bookPath, options);
+    } catch (err) {
+      toast(`预检查失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+    if (!preview.chaptersChanged) {
+      toast('这本书已经是整理后的格式，没有可改的地方');
+      return { ok: true, changed: 0, data: preview };
+    }
+
+    const listText = preview.changed
+      .slice(0, 6)
+      .map((item) => chapterTitle(item.index, item.name))
+      .join('、');
+    const moreText =
+      preview.chaptersChanged > 6
+        ? ` 等共 ${preview.chaptersChanged} 章`
+        : `（共 ${preview.chaptersChanged} 章）`;
+    const confirmed = await openModal({
+      title: '一键整理本书',
+      message:
+        `规则：${describeFormatOptions(options)}\n\n` +
+        `会整理 ${preview.chapterCount} 章，其中 ${preview.chaptersChanged} 章有改动：\n${listText}${moreText}\n\n` +
+        '写盘前会把要改动的原章节备份到书内 _trash/整理备份-时间戳/，可以人工找回。\n' +
+        '整本整理会直接写盘（和「保存」一样是显式动作）；整理完当前章会从磁盘重新载入。',
+      buttons: [
+        { label: '取消', value: 'cancel' },
+        { label: '开始整理', value: 'ok', kind: 'primary' }
+      ],
+      cancelValue: 'cancel'
+    });
+    if (confirmed.action !== 'ok') return { ok: false, canceled: true };
+
+    state.formatBookRunning = true;
+    const currentId = state.chapters[state.index] && state.chapters[state.index].id;
+    showFormatBookProgress(`正在整理整本书…（共 ${preview.chaptersChanged} 章要改）`);
+    try {
+      const result = await call(api.formatBook, state.bookPath, options);
+      // 整理后重新载入书和当前章（正文、字数缓存都变了）
+      const opened = await call(api.openBook, state.bookPath);
+      state.meta = opened.meta;
+      state.chapters = opened.meta.chapters;
+      const index = Math.max(
+        0,
+        state.chapters.findIndex((chapter) => chapter.id === currentId)
+      );
+      await loadChapterAt(index);
+      renderChapterList();
+      renderEditorHeader();
+      await refreshShelf();
+      toast(
+        `已整理全书：${result.chaptersChanged} 章${
+          result.backupDir ? '，原文已备份到 _trash/整理备份' : ''
+        }`
+      );
+      return { ok: true, changed: result.chaptersChanged, data: result };
+    } catch (err) {
+      toast(`整理本书失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    } finally {
+      state.formatBookRunning = false;
+      hideFormatBookProgress();
+    }
+  }
+
   async function setDisplayPreset(name) {
     const preset = DISPLAY_PRESETS[name];
     if (!preset) return;
@@ -2326,7 +2452,8 @@
       hideFormatMenu();
       if (action === 'undo') {
         if (!undoFormat()) toast('没有可撤销的整理', 'warn');
-      } else if (action === 'preset-compact') await setDisplayPreset('compact');
+      } else if (action === 'apply-book') await runFormatBook();
+      else if (action === 'preset-compact') await setDisplayPreset('compact');
       else if (action === 'preset-normal') await setDisplayPreset('normal');
       else if (action === 'preset-loose') await setDisplayPreset('loose');
       else if (action === 'display-settings') openSettings();
@@ -2383,6 +2510,15 @@
 
     // 主进程拦截到关窗/退出时，由这里决定「保存并退出 / 不保存退出 / 取消」
     api.onCloseRequested(handleCloseRequest);
+
+    // 整本排版进度（主进程逐章汇报，显示在右下角进度条上）
+    api.onFormatProgress((progress) => {
+      if (!state.formatBookRunning) return;
+      if (!progress || !progress.total) return;
+      showFormatBookProgress(
+        `正在整理整本书：${Math.min(progress.done, progress.total)}/${progress.total} 章`
+      );
+    });
 
     document.addEventListener('click', (event) => {
       if (!event.target.closest('#context-menu') && !event.target.closest('.chapter-item')) hideContextMenu();
@@ -2516,13 +2652,17 @@
         return res && res.ok ? res.data.text : null;
       },
       currentIndex: () => state.index,
+      currentChapterId: () => (state.chapters[state.index] ? state.chapters[state.index].id : null),
+      bookPathValue: () => state.bookPath,
       currentTitle: () => $('chapter-title').textContent || '',
       dirty: () => state.dirty,
       title: () => document.title,
+      versionText: () => ($('app-version') ? $('app-version').textContent : ''),
       statusText: () => $('status-text').textContent,
       view: () => state.view,
       modalOpen: () => Boolean(state.modal),
       dialog: () => (state.modal ? state.modal.opts.title : null),
+      modalMessage: () => $('modal-message').textContent,
       modalButtons: () => (state.modal ? state.modal.opts.buttons.map((b) => b.value) : []),
       answerModal: (value) => answerModalValue(value),
       async importPaths(paths, mode) {
@@ -2579,6 +2719,15 @@
       writeFormatOptions: (options) => writeFormatOptions(options),
       async applyFormat() {
         return applyFormatToEditor();
+      },
+      async runFormatBook() {
+        return runFormatBook();
+      },
+      formatBookProgressText: () => (formatBookProgressEl ? formatBookProgressEl.textContent : ''),
+      async setFormatOptions(options) {
+        state.globalConfig = await call(api.setConfig, { formatOptions: options || {} });
+        state.config = effectiveConfig();
+        return true;
       },
       canUndoFormat: () => canUndoFormat(),
       undoFormat: () => undoFormat(),
@@ -2682,6 +2831,14 @@
       state.config = { ...state.globalConfig };
     } catch (err) {
       toast(`读取配置失败：${err.message}`, 'error');
+    }
+    // 版本号以 package.json 为准（发版只改一处，界面跟着变）
+    try {
+      const appInfo = await call(api.appVersion);
+      const versionEl = $('app-version');
+      if (versionEl && appInfo && appInfo.version) versionEl.textContent = `v${appInfo.version}`;
+    } catch {
+      /* 拿不到就保留 index.html 里的静态版本号 */
     }
     applyEditorStyle();
     applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);

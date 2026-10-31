@@ -384,3 +384,76 @@ test('替换备份：非法目录名 / 不存在的备份 / 已删章节都被�
   assert.equal(res.skipped, 1);
   assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '阿明一。');
 });
+
+test('整本排版：预检查只算不写，正式整理逐章写盘并备份原文', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '整本排版书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '他说,"第一段。"');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '第二段');
+  await storage.createChapter(bookPath, 2, '第三章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[2].file, '　　已经整理好的。');
+
+  const options = { indent: '2', blankLines: 'single', trimTrailing: true, normalizePunct: true };
+
+  // 预检查：只读
+  const preview = await storage.previewFormatBook(bookPath, options);
+  assert.equal(preview.chapterCount, 3);
+  assert.equal(preview.chaptersChanged, 2);
+  assert.deepEqual(preview.changed.map((item) => item.index), [0, 1]);
+  assert.equal(preview.stats.indentFixed, 2);
+  assert.equal(
+    (await fs.readFile(path.join(bookPath, meta.chapters[0].file), 'utf8')),
+    '他说,"第一段。"',
+    '预检查不能写盘'
+  );
+
+  // 正式整理：逐章写盘 + 备份
+  const progressLog = [];
+  const res = await storage.formatBook(bookPath, options, (progress) => progressLog.push(progress.done));
+  assert.equal(res.chaptersChanged, 2);
+  assert.ok(res.backupDir && res.backupDir.includes('整理备份-'));
+  assert.deepEqual(progressLog, [1, 2, 3]);
+  // 原文备份：整理前的内容
+  const backupText = await fs.readFile(path.join(res.backupDir, meta.chapters[0].file), 'utf8');
+  assert.equal(backupText, '他说,"第一段。"');
+  await assert.rejects(
+    () => fs.access(path.join(res.backupDir, meta.chapters[2].file)),
+    '没改动的章节不进备份'
+  );
+  // 写盘结果
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '　　他说，"第一段。"');
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[1].file)).text, '　　第二段');
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[2].file)).text, '　　已经整理好的。');
+  // 字数缓存跟着更新
+  const updated = await storage.readBookMeta(bookPath);
+  assert.equal(updated.chapters[0].chars, 9);
+  assert.equal(updated.chapters[1].chars, 3);
+  // 再整理一次：没有改动，不弹备份目录也不需要
+  const again = await storage.formatBook(bookPath, options);
+  assert.equal(again.chaptersChanged, 0);
+  assert.equal(again.backupDir, null);
+});
+
+test('整本排版：缺文件的章节跳过，不中断整本整理', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '缺文件排版书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '第一段');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '第二段');
+  await fs.unlink(path.join(bookPath, meta.chapters[1].file));
+
+  const res = await storage.formatBook(bookPath, {
+    indent: '2',
+    blankLines: 'keep',
+    trimTrailing: true,
+    normalizePunct: true
+  });
+  assert.equal(res.chaptersChanged, 1);
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '　　第一段');
+});

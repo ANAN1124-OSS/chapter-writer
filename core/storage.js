@@ -5,6 +5,7 @@ const path = require('node:path');
 const { atomicWriteFile, writeJsonAtomic, stripBom } = require('./atomic');
 const chaptersLib = require('./chapters');
 const findLib = require('./find');
+const formatLib = require('./format');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -13,6 +14,8 @@ const CORRUPT_PREFIX = '书目.json.corrupt-';
 // 整本替换的备份目录（写盘前把原章节复制到这里）与「还原前」的反向备份目录
 const REPLACE_BACKUP_PREFIX = '替换备份-';
 const RESTORE_BACKUP_PREFIX = '还原前备份-';
+// 整本智能排版的备份目录（写盘前把要改动的原章节复制到这里）
+const FORMAT_BACKUP_PREFIX = '整理备份-';
 
 class StorageError extends Error {
   constructor(code, message) {
@@ -503,6 +506,96 @@ async function replaceInBook(bookPath, options = {}) {
   };
 }
 
+// ---------- 整本智能排版（「一键整理本书」） ----------
+const FORMAT_STATS_KEYS = [
+  'paragraphs',
+  'indentFixed',
+  'trailingTrimmed',
+  'blankCollapsed',
+  'punctFixed',
+  'cjkSpacesRemoved',
+  'quotesFixed',
+  'ellipsisFixed'
+];
+
+function emptyFormatStats() {
+  const stats = {};
+  for (const key of FORMAT_STATS_KEYS) stats[key] = 0;
+  return stats;
+}
+
+function addFormatStats(target, stats) {
+  for (const key of FORMAT_STATS_KEYS) target[key] += Number(stats && stats[key]) || 0;
+  return target;
+}
+
+// 预检查：只读不写。返回会改动的章节数、前几章名字和合计统计，供确认框显示。
+async function previewFormatBook(bookPath, options = {}) {
+  const meta = await readBookMeta(bookPath);
+  const stats = emptyFormatStats();
+  const changed = [];
+  for (let i = 0; i < meta.chapters.length; i += 1) {
+    const chapter = meta.chapters[i];
+    const loaded = await loadTextOrSkip(bookPath, chapter);
+    if (!loaded) continue;
+    const res = formatLib.formatText(loaded.text, options);
+    if (!res.changed) continue;
+    addFormatStats(stats, res.stats);
+    changed.push({ index: i, file: chapter.file, name: chapter.name || '' });
+  }
+  return {
+    bookTitle: meta.title,
+    chapterCount: meta.chapters.length,
+    chaptersChanged: changed.length,
+    changed: changed.slice(0, 12),
+    changedTruncated: changed.length > 12,
+    stats
+  };
+}
+
+// 整本智能排版：逐章格式化后写盘；写盘前把要改动的原章节备份到书内 _trash/整理备份-时间戳/。
+// 作者显式点「一键整理本书…」才会执行，规则沿用「整理本章」记住的那套。
+async function formatBook(bookPath, options = {}, onProgress) {
+  const meta = await readBookMeta(bookPath);
+  const total = meta.chapters.length;
+  const stats = emptyFormatStats();
+  const changed = [];
+  let backupDir = null;
+  let backupCreated = false;
+  for (let i = 0; i < meta.chapters.length; i += 1) {
+    const chapter = meta.chapters[i];
+    if (typeof onProgress === 'function') {
+      try {
+        onProgress({ done: i + 1, total, index: i, name: chapter.name || '' });
+      } catch { /* 进度回调出错不影响整理 */ }
+    }
+    const loaded = await loadTextOrSkip(bookPath, chapter);
+    if (!loaded) continue;
+    const res = formatLib.formatText(loaded.text, options);
+    if (!res.changed) continue;
+    if (!backupCreated) {
+      backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), FORMAT_BACKUP_PREFIX);
+      await ensureDir(backupDir);
+      backupCreated = true;
+    }
+    // 先备份原文再写盘：整理也是「改正文」的显式动作，必须留退路
+    await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
+    await saveChapterText(bookPath, chapter.file, res.text);
+    chapter.chars = chaptersLib.countChars(res.text);
+    addFormatStats(stats, res.stats);
+    changed.push({ index: i, file: chapter.file, name: chapter.name || '' });
+  }
+  if (changed.length) await writeBookMeta(bookPath, meta);
+  return {
+    bookTitle: meta.title,
+    chapterCount: total,
+    chaptersChanged: changed.length,
+    backupDir,
+    changed: changed.slice(0, 12),
+    stats
+  };
+}
+
 // 在 _trash 下生成一个不重名的备份目录（同名就加 -2、-3…）
 async function uniqueTrashDir(trashDir, prefix) {
   const stamp = timestampForFile();
@@ -702,6 +795,8 @@ module.exports = {
   moveChapter: locked(moveChapter),
   searchBook,
   replaceInBook: locked(replaceInBook),
+  previewFormatBook,
+  formatBook: locked(formatBook),
   listReplaceBackups,
   restoreReplaceBackup: locked(restoreReplaceBackup),
   renameBook: locked(renameBook),

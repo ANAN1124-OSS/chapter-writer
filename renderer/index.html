@@ -15,7 +15,7 @@
         <div class="brand">
           <span class="brand-mark">章</span>
           <span class="brand-name">章节写作器</span>
-          <span class="version muted small">v0.3</span>
+          <span id="app-version" class="version muted small">v0.4</span>
         </div>
         <div class="topbar-right">
           <div class="shelf-search">
@@ -60,6 +60,7 @@
               <button id="btn-format" class="btn ghost" type="button" title="整理本章正文 / 调整正文显示">排版 ▾</button>
               <div class="dropdown-menu hidden" id="format-menu">
                 <button type="button" data-action="apply">一键整理本章…</button>
+                <button type="button" data-action="apply-book">一键整理本书…</button>
                 <button type="button" data-action="undo" id="format-undo-item">撤销上次整理</button>
                 <div class="dropdown-sep"></div>
                 <button type="button" data-action="preset-compact">显示：紧凑</button>

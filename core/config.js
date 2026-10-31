@@ -43,7 +43,9 @@ const DEFAULTS = Object.freeze({
   // 每本书的显示设置覆盖：{ [bookId]: { 只放改过的项 } }；没有覆盖的书沿用上面的全局值
   bookDisplay: {},
   // 「整理本章」上一次用过的规则，下次打开对话框沿用（不改正文，只是记住勾选）
-  formatOptions: { ...formatLib.DEFAULT_OPTIONS }
+  formatOptions: { ...formatLib.DEFAULT_OPTIONS },
+  // 上次「导出 TXT」保存到的目录，下次导出默认还开在这里（目录没了会自动退回「文档」）
+  lastExportDir: ''
 });
 
 function clampInt(value, min, max, fallback) {
@@ -137,6 +139,9 @@ function sanitize(raw) {
   cfg.editorPaper = PAPER_THEMES.includes(cfg.editorPaper) ? cfg.editorPaper : DEFAULTS.editorPaper;
   cfg.bookDisplay = sanitizeBookDisplay(cfg.bookDisplay);
   cfg.formatOptions = formatLib.sanitizeOptions(cfg.formatOptions);
+  // 上次导出的目录：只做基本清洗，路径不存在时由主进程退回「文档」目录
+  const lastExportDir = typeof cfg.lastExportDir === 'string' ? cfg.lastExportDir.trim() : '';
+  cfg.lastExportDir = lastExportDir.length > 1000 ? '' : lastExportDir;
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

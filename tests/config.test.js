@@ -198,3 +198,11 @@ test('按书显示设置：非法值按全局规则夹紧，非法 bookId 被忽
   assert.equal(cleaned.bookDisplay.b_ok.editorSidebarWidth, 800);
   assert.equal(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay && Object.keys(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay).length, 0);
 });
+
+test('导出目录记忆：默认空、去首尾空白、坏值回空', () => {
+  assert.equal(sanitize({}).lastExportDir, '');
+  assert.equal(sanitize({ lastExportDir: '  D:\\xxs  ' }).lastExportDir, 'D:\\xxs');
+  assert.equal(sanitize({ lastExportDir: 123 }).lastExportDir, '');
+  assert.equal(sanitize({ lastExportDir: null }).lastExportDir, '');
+  assert.equal(sanitize({ lastExportDir: 'x'.repeat(2000) }).lastExportDir, '');
+});

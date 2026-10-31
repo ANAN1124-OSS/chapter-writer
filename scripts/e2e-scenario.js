@@ -48,6 +48,12 @@ module.exports = async function runScenario(ctx) {
 
   await waitFor('Boolean(window.__cwTest && window.__cwTest.ready)');
 
+  // 0. 界面版本号跟着 package.json 走（发版只改一处，避免界面还显示旧版本）
+  check(
+    '界面版本号取自 package.json',
+    (await exec('window.__cwTest.versionText()')) === `v${require('../package.json').version}`
+  );
+
   // 1. 新建书 → 自动打开、自动带一个空章
   await exec("window.__cwTest.newBook('测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");
@@ -157,6 +163,39 @@ module.exports = async function runScenario(ctx) {
   check('剪贴板内容与导出格式完全一致', clipText === expected, {
     actual: typeof clipText === 'string' ? clipText.slice(0, 120) : String(clipText)
   });
+
+  // 9b. 导出/复制把编辑区里当前章的未保存内容也带上（只影响输出，绝不偷偷写盘）
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec("window.__cwTest.setText('这段还没保存，但导出和复制都必须有')");
+  const unsavedText = await exec('window.__cwTest.text()');
+  const unsavedId = await exec('window.__cwTest.currentChapterId()');
+  const copyUnsaved = await exec(
+    `window.api.copyBook(${JSON.stringify(bookDir)}, { chapterId: ${JSON.stringify(unsavedId)}, text: ${JSON.stringify(unsavedText)} })`
+  );
+  check('复制整本可以用编辑区内容覆盖当前章', Boolean(copyUnsaved && copyUnsaved.ok === true), copyUnsaved);
+  check('复制结果标明含未保存内容', copyUnsaved.data && copyUnsaved.data.includedUnsaved === true, copyUnsaved.data);
+  check('复制结果回报章数与字数', copyUnsaved.data.chapterCount === 3 && copyUnsaved.data.chars > 0, copyUnsaved.data);
+  const clipUnsaved = await clipboard.readText();
+  check(
+    '未保存的内容出现在复制结果里',
+    typeof clipUnsaved === 'string' && clipUnsaved.includes('这段还没保存，但导出和复制都必须有'),
+    typeof clipUnsaved === 'string' ? clipUnsaved.slice(0, 120) : String(clipUnsaved)
+  );
+  check('用编辑区覆盖后磁盘仍是旧内容（没有偷偷保存）', (await diskText('001-未命名.txt')) === '风从海面吹来。\n\n他收起了帆。');
+  check('复制后当前章仍是未保存状态', (await exec('window.__cwTest.dirty()')) === true);
+
+  // 9c. 章节 id 对不上时退回磁盘内容（避免误把别的章覆盖成当前章）
+  const copyBadOverride = await exec(
+    `window.api.copyBook(${JSON.stringify(bookDir)}, { chapterId: 'ch_not_exist', text: '不该出现在结果里' })`
+  );
+  check('覆盖匹配不到时仍能复制', Boolean(copyBadOverride && copyBadOverride.ok === true), copyBadOverride);
+  check('匹配不到时不标记含未保存内容', copyBadOverride.data && copyBadOverride.data.includedUnsaved === false, copyBadOverride.data);
+  const clipBad = await clipboard.readText();
+  check(
+    '匹配不到时不会把内容硬塞进结果',
+    typeof clipBad === 'string' && !clipBad.includes('不该出现在结果里'),
+    typeof clipBad === 'string' ? clipBad.slice(0, 120) : String(clipBad)
+  );
 
   // 10. 关窗拦截：未保存 → 取消 → 不退出
   await exec("window.__cwTest.setText('关窗测试：这段不该丢')");
@@ -1213,6 +1252,182 @@ module.exports = async function runScenario(ctx) {
       Object.keys(cfgOnDisk.bookDisplay).length > 0 &&
       !cfgOnDisk.bookDisplay[bookAId],
     cfgOnDisk.bookDisplay && Object.keys(cfgOnDisk.bookDisplay)
+  );
+
+  // 35. 新建 / 插入章节前自动保存当前章（不再弹「保存 / 不保存 / 取消」）
+  await exec("window.__cwTest.newBook('自动保存测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec("window.__cwTest.setText('第一段没保存的内容')");
+  check('自动保存：输入后是未保存状态', (await exec('window.__cwTest.dirty()')) === true);
+  await exec("window.__cwTest.newChapter('新章一')");
+  check('自动保存：新建章节不再弹询问框', (await exec('window.__cwTest.modalOpen()')) === false);
+  check(
+    '自动保存：新建前的内容已写盘',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '第一段没保存的内容'
+  );
+  check('自动保存：新章已创建并切过去', (await exec('window.__cwTest.currentTitle()')) === '第2章：新章一');
+  check('自动保存：切到新章后是干净状态', (await exec('window.__cwTest.dirty()')) === false);
+
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec("window.__cwTest.setText('插入前没保存的内容')");
+  await exec('window.__cwTest.insertAfter(0, "插入章")');
+  check('自动保存：插入章节同样不弹询问框', (await exec('window.__cwTest.modalOpen()')) === false);
+  check(
+    '自动保存：插入前的内容已写盘',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '插入前没保存的内容'
+  );
+  check(
+    '自动保存：插入章位置正确',
+    JSON.stringify(await exec('window.__cwTest.chapterNames()')) === JSON.stringify(['', '插入章', '新章一']),
+    await exec('window.__cwTest.chapterNames()')
+  );
+
+  // 36. 一键整理本书：复用当前规则 + 确认框 + 整本备份 + 进度
+  await exec("window.__cwTest.newBook('整本排版测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const fmtBookPath = await exec('window.__cwTest.state.bookPath');
+  await exec("window.__cwTest.newChapter('第二章')");
+  await exec("window.__cwTest.newChapter('第三章')");
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec(`window.__cwTest.setText(' 他说,"第一段."')`);
+  await exec('window.__cwTest.save()');
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await exec("window.__cwTest.setText('第二段   ')");
+  await exec('window.__cwTest.save()');
+  await exec("window.__cwTest.switchTo(2, 'discard')");
+  await exec("window.__cwTest.setText('　　已经整理好。')");
+  await exec('window.__cwTest.save()');
+  const fmtOptions = { indent: '2', blankLines: 'single', trimTrailing: true, normalizePunct: true };
+  await exec(`window.__cwTest.setFormatOptions(${JSON.stringify(fmtOptions)})`);
+
+  await exec("document.getElementById('btn-format').click()");
+  check(
+    '整本排版：排版菜单里有「一键整理本书…」',
+    (await exec('Boolean(document.querySelector(\'#format-menu button[data-action="apply-book"]\'))')) === true
+  );
+  await exec("document.getElementById('btn-format').click()");
+
+  const fmtPreview = await exec(
+    `window.api.formatPreviewBook(${JSON.stringify(fmtBookPath)}, ${JSON.stringify(fmtOptions)}).then((r) => (r.ok ? r.data : null))`
+  );
+  check(
+    '整本排版：预检查统计会改动的章数',
+    Boolean(fmtPreview) && fmtPreview.chapterCount === 3 && fmtPreview.chaptersChanged === 2,
+    fmtPreview && { chapterCount: fmtPreview.chapterCount, changed: fmtPreview.chaptersChanged }
+  );
+  check(
+    '整本排版：预检查不写盘',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === ' 他说,"第一段."'
+  );
+
+  const bookFormatPromise = exec('window.__cwTest.runFormatBook()');
+  await waitFor('window.__cwTest.modalOpen()');
+  check('整本排版：会先弹确认框', (await exec('window.__cwTest.dialog()')) === '一键整理本书');
+  const fmtConfirmMessage = await exec('window.__cwTest.modalMessage()');
+  check(
+    '整本排版：确认框列出规则与要改的章数',
+    fmtConfirmMessage.includes('段首缩进 2 字符') && fmtConfirmMessage.includes('2 章有改动'),
+    fmtConfirmMessage.slice(0, 120)
+  );
+  check(
+    '整本排版：确认框说明会先备份',
+    fmtConfirmMessage.includes('整理备份'),
+    fmtConfirmMessage.slice(0, 120)
+  );
+  await exec("window.__cwTest.answerModal('ok')");
+  const bookFormatResult = await bookFormatPromise;
+  check('整本排版：执行成功', bookFormatResult && bookFormatResult.ok === true, bookFormatResult);
+  await sleep(400);
+  const fmtMeta = await storage.readBookMeta(fmtBookPath);
+  check(
+    '整本排版：全书已写盘为整理后格式',
+    (await storage.loadChapterText(fmtBookPath, fmtMeta.chapters[0].file)).text === '　　他说，"第一段。"' &&
+      (await storage.loadChapterText(fmtBookPath, fmtMeta.chapters[1].file)).text === '　　第二段',
+    {
+      ch0: (await storage.loadChapterText(fmtBookPath, fmtMeta.chapters[0].file)).text,
+      ch1: (await storage.loadChapterText(fmtBookPath, fmtMeta.chapters[1].file)).text
+    }
+  );
+  check(
+    '整本排版：已经整理好的章不动',
+    (await storage.loadChapterText(fmtBookPath, fmtMeta.chapters[2].file)).text === '　　已经整理好。'
+  );
+  check(
+    '整本排版：字数缓存已更新',
+    fmtMeta.chapters[0].chars === 9 && fmtMeta.chapters[1].chars === 3,
+    fmtMeta.chapters.map((chapter) => chapter.chars)
+  );
+  const fmtTrash = await fs.readdir(path.join(fmtBookPath, '_trash')).catch(() => []);
+  const fmtBackupName = fmtTrash.find((name) => name.startsWith('整理备份-'));
+  check('整本排版：原文备份到书内 _trash/整理备份-*', Boolean(fmtBackupName), fmtTrash);
+  const fmtBackupText = await fs.readFile(
+    path.join(fmtBookPath, '_trash', fmtBackupName, fmtMeta.chapters[0].file),
+    'utf8'
+  );
+  check('整本排版：备份里是整理前的原文', fmtBackupText === ' 他说,"第一段."', fmtBackupText);
+  check(
+    '整本排版：进度提示在完成后收起',
+    (await exec('window.__cwTest.formatBookProgressText()')) === ''
+  );
+  check(
+    '整本排版：当前章已重新载入',
+    (await exec('window.__cwTest.text()')) === '　　已经整理好。'
+  );
+
+  const fmtAgain = await exec('window.__cwTest.runFormatBook()');
+  check(
+    '整本排版：没有改动时不弹确认、直接提示',
+    fmtAgain && fmtAgain.ok === true && fmtAgain.changed === 0 && (await exec('window.__cwTest.modalOpen()')) === false,
+    fmtAgain
+  );
+
+  // 有未保存修改时先问「保存后整理 / 不保存 / 取消」
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec("window.__cwTest.setText('临时未保存的内容')");
+  const fmtDirtyPromise = exec('window.__cwTest.runFormatBook()');
+  await waitFor('window.__cwTest.modalOpen()');
+  check(
+    '整本排版：当前章未保存会先问',
+    (await exec('window.__cwTest.dialog()')) === '整理本书前先处理未保存的修改'
+  );
+  await exec("window.__cwTest.answerModal('save')");
+  await waitFor("window.__cwTest.dialog() === '一键整理本书'");
+  await exec("window.__cwTest.answerModal('cancel')");
+  const fmtDirtyResult = await fmtDirtyPromise;
+  check('整本排版：取消后不写盘', fmtDirtyResult && fmtDirtyResult.canceled === true, fmtDirtyResult);
+  check(
+    '整本排版：取消后磁盘上只多了刚保存的未整理内容',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '临时未保存的内容'
+  );
+
+  // 导出目录记忆：导出过的文件夹下次要记住（写进 config.json；坏值自动清洗）
+  const { app } = require('electron');
+  const configFile = path.join(app.getPath('userData'), 'config.json');
+  const wantedDir = 'D:\\导出测试目录';
+  const setDirRes = await exec(`window.api.setConfig({ lastExportDir: ${JSON.stringify(wantedDir)} })`);
+  check(
+    '导出目录记忆：能写进配置并读回',
+    Boolean(setDirRes && setDirRes.ok === true && setDirRes.data.lastExportDir === wantedDir),
+    setDirRes && setDirRes.data
+  );
+  await exec('window.api.setConfig({ lastExportDir: 12345 })');
+  const badDirCfg = await exec('window.api.getConfig()');
+  check(
+    '导出目录记忆：非法值清洗成空（下次退回文档目录）',
+    Boolean(badDirCfg && badDirCfg.ok === true && badDirCfg.data.lastExportDir === ''),
+    badDirCfg && badDirCfg.data
+  );
+  await exec(`window.api.setConfig({ lastExportDir: ${JSON.stringify(wantedDir)} })`);
+  let savedConfig = null;
+  try {
+    savedConfig = JSON.parse(await fs.readFile(configFile, 'utf8'));
+  } catch {
+    /* 读不到就当失败 */
+  }
+  check(
+    '导出目录记忆：真的落进 config.json',
+    Boolean(savedConfig && savedConfig.lastExportDir === wantedDir),
+    savedConfig && savedConfig.lastExportDir
   );
 
   return { ok: true, checks: checks.length, details: checks };

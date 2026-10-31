@@ -10,6 +10,7 @@ async function invoke(channel, ...args) {
 }
 
 contextBridge.exposeInMainWorld('api', {
+  appVersion: () => invoke('app:version'),
   listBooks: () => invoke('books:list'),
   createBook: (title) => invoke('book:create', title),
   openBook: (bookPath) => invoke('book:open', bookPath),
@@ -35,9 +36,11 @@ contextBridge.exposeInMainWorld('api', {
   listReplaceBackups: (bookPath) => invoke('book:list-replace-backups', bookPath),
   restoreReplaceBackup: (bookPath, backupName) =>
     invoke('book:restore-replace-backup', bookPath, backupName),
+  formatPreviewBook: (bookPath, options) => invoke('book:format-preview', bookPath, options),
+  formatBook: (bookPath, options) => invoke('book:format', bookPath, options),
 
-  exportBook: (bookPath) => invoke('book:export', bookPath),
-  copyBook: (bookPath) => invoke('book:copy', bookPath),
+  exportBook: (bookPath, override) => invoke('book:export', bookPath, override),
+  copyBook: (bookPath, override) => invoke('book:copy', bookPath, override),
   repairBook: (bookPath, mode) => invoke('book:repair', bookPath, mode),
   importBooks: (paths, options) => invoke('book:import', paths, options),
   deleteBook: (bookPath) => invoke('book:delete', bookPath),
@@ -57,6 +60,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   onImportProgress: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('import:progress', (_event, progress) => cb(progress));
+  },
+  onFormatProgress: (cb) => {
+    if (typeof cb === 'function') ipcRenderer.on('format:progress', (_event, progress) => cb(progress));
   },
   reportDirty: (dirty) => ipcRenderer.send('app:dirty', Boolean(dirty)),
   closeReady: (allowed) => ipcRenderer.send('app:close-ready', Boolean(allowed))

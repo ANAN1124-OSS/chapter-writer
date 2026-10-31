@@ -34,6 +34,7 @@ const importer = require('./core/importer');
 const exporter = require('./core/exporter');
 const formatLib = require('./core/format');
 const findLib = require('./core/find');
+const textMenu = require('./core/textmenu');
 
 let win = null;
 let configStore = null;
@@ -159,6 +160,8 @@ function setupCloseFlow() {
 // ---------- IPC ----------
 function registerIpc() {
   handle('config:get', async () => getConfig());
+  // 界面上的版本号从 package.json 读，免得每次发版忘了改静态文字
+  handle('app:version', async () => ({ version: app.getVersion() }));
 
   handle('config:set', async (patch) => {
     await getConfig();
@@ -303,40 +306,82 @@ function registerIpc() {
     storage.restoreReplaceBackup(bookPath, backupName)
   );
 
-  handle('book:export', async (bookPath) => {
-    const meta = await storage.readBookMeta(bookPath);
+  // 整本智能排版：预检查只算不写；正式整理逐章写盘（写前把原章节备份到 _trash/整理备份-*）
+  handle('book:format-preview', async (bookPath, options) =>
+    storage.previewFormatBook(bookPath, options)
+  );
+  handle('book:format', async (bookPath, options) =>
+    storage.formatBook(bookPath, options, (progress) => {
+      if (win && !win.isDestroyed()) win.webContents.send('format:progress', progress);
+    })
+  );
+
+  // 拼导出/复制用的正文：默认读磁盘；override 是编辑区里当前章的最新内容（未保存也算，只参与拼接不写盘）
+  // chars 回报的是「正文字数」（去掉空白/换行，和编辑页字数统计同一口径），不是文件字节数
+  async function collectExportTexts(bookPath, meta, override) {
+    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    const chaptersLib = require('./core/chapters');
     const texts = [];
-    for (const chapter of meta.chapters) {
-      const loaded = await storage.loadChapterText(bookPath, chapter.file);
-      texts.push(loaded.text);
+    let chars = 0;
+    for (let i = 0; i < meta.chapters.length; i += 1) {
+      let text;
+      if (i === overrideIndex) {
+        text = override.text;
+      } else {
+        text = (await storage.loadChapterText(bookPath, meta.chapters[i].file)).text;
+      }
+      texts.push(text);
+      chars += chaptersLib.countChars(text);
     }
+    return { texts, chars, includedUnsaved: overrideIndex >= 0 };
+  }
+
+  handle('book:export', async (bookPath, override) => {
+    const meta = await storage.readBookMeta(bookPath);
+    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
+    const cfg = await getConfig();
+    // 默认落到「上一次导出保存到的目录」；没记过、或那个目录已经不存在了，才退回「文档」
+    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
+      try {
+        return fsSync.statSync(dir).isDirectory();
+      } catch {
+        return false;
+      }
+    });
     const defaultName = `${require('./core/chapters').safeName(meta.title)}.txt`;
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
       title: '导出 TXT',
-      defaultPath: path.join(app.getPath('documents'), defaultName),
+      defaultPath: path.join(defaultDir, defaultName),
       filters: [{ name: '文本文件', extensions: ['txt'] }]
     });
     if (canceled || !filePath) return { canceled: true };
-    const buffer = exporter.exportBuffer(meta, texts);
-    await atomicWriteFile(filePath, buffer);
+    const text = exporter.composeBook(meta, texts);
+    await atomicWriteFile(filePath, exporter.exportBufferFromText(text));
+    // 记住这次导出的目录，下次导出默认还开在这里（记不住也不影响导出结果）
+    const chosenDir = path.dirname(filePath);
+    if (chosenDir && chosenDir !== cfg.lastExportDir) {
+      try {
+        const updated = await configStore.set({ lastExportDir: chosenDir });
+        config = booksRootOverride ? { ...updated, booksRoot: booksRootOverride } : updated;
+      } catch {
+        /* 忽略：只是记个位置 */
+      }
+    }
     return {
       canceled: false,
       filePath,
       chapterCount: meta.chapters.length,
-      chars: exporter.composeBook(meta, texts).length
+      chars,
+      includedUnsaved
     };
   });
 
-  handle('book:copy', async (bookPath) => {
+  handle('book:copy', async (bookPath, override) => {
     const meta = await storage.readBookMeta(bookPath);
-    const texts = [];
-    for (const chapter of meta.chapters) {
-      const loaded = await storage.loadChapterText(bookPath, chapter.file);
-      texts.push(loaded.text);
-    }
+    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
     const text = exporter.composeBook(meta, texts);
     await clipboard.writeText(text);
-    return { chapterCount: meta.chapters.length, chars: text.length };
+    return { chapterCount: meta.chapters.length, chars, includedUnsaved };
   });
 
   handle('book:repair', async (bookPath, mode) => {
@@ -441,6 +486,12 @@ async function createWindow() {
   win.once('ready-to-show', () => win.show());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (event) => event.preventDefault());
+  // 能填文字的地方（正文 / 章节名 / 书名 / 搜索框 / 查找替换输入框）右键出中文菜单：剪切 / 复制 / 粘贴 / 全选
+  // 章节列表、书架卡片有自带的 HTML 右键菜单，这里只认 isEditable，不会冲突
+  win.webContents.on('context-menu', (_event, params) => {
+    if (!textMenu.shouldShow(params) || !win || win.isDestroyed()) return;
+    Menu.buildFromTemplate(textMenu.buildTemplate(params)).popup({ window: win });
+  });
   win.webContents.on('before-input-event', (_event, input) => {
     if (input.type === 'keyDown' && input.control && input.shift && String(input.key).toLowerCase() === 'i') {
       win.webContents.toggleDevTools();
