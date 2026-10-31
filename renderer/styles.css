@@ -151,6 +151,20 @@ html, body {
 }
 .shelf-search-clear:hover { background: var(--paper-deep); color: var(--ink); }
 .shelf-search-summary { margin-bottom: 12px; }
+/* 分组筛选（v0.8-3）：只有书架里存在分组时才出现 */
+.shelf-group-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; }
+.shelf-group-label { font-size: 13px; color: var(--ink-soft); }
+.shelf-group-select {
+  min-width: 150px;
+  max-width: 260px;
+  padding: 5px 9px;
+  font-family: var(--ui-font);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+}
 
 /* 书架「正文命中」（提案 7.3）：搜索结果面板，点一条打开那本书的那一章 */
 .shelf-content {
@@ -312,6 +326,23 @@ html, body {
   word-break: break-all;
 }
 .book-card-meta { font-size: 13px; color: var(--ink-soft); }
+/* 书籍信息（v0.8-3）：作者 / 分组 + 标签 / 简介，旧书没有这些字段就整行不出现 */
+.book-card-author { font-size: 12.5px; color: var(--ink-soft); word-break: break-all; }
+.book-card-tags {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent);
+  word-break: break-all;
+}
+.book-card-brief {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .book-card-time { font-size: 12px; color: var(--ink-faint); }
 .book-card-match {
   font-size: 12px;
@@ -1289,6 +1320,41 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   flex: 0 0 auto;
   font-size: 12px;
   color: var(--ink-faint);
+}
+
+/* ---------- 书籍信息（作者 / 简介 / 分组 / 标签，v0.8-3） ---------- */
+/* 小窗口（本机 1294×766）里字段区滚动、底部按钮常驻可见——别把按钮卷进滚动区。 */
+.bookinfo-modal {
+  width: min(560px, 90vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.bookinfo-book {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--paper-deep);
+  border-radius: 7px;
+  word-break: break-all;
+}
+.bookinfo-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.bookinfo-modal .field { margin-top: 12px; }
+.bookinfo-modal .modal-input { margin-top: 0; }
+.bookinfo-brief { min-height: 84px; line-height: 1.6; resize: vertical; }
+.bookinfo-error { flex: 0 0 auto; min-height: 18px; margin-top: 10px; font-size: 13px; color: var(--danger); }
+.bookinfo-modal .modal-buttons {
+  flex: 0 0 auto;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 /* ---------- 同步冲突副本 ---------- */

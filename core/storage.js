@@ -8,6 +8,7 @@ const findLib = require('./find');
 const formatLib = require('./format');
 const schemaLib = require('./schema');
 const conflictLib = require('./conflict');
+const bookInfoLib = require('./bookinfo');
 const historyLib = require('./history');
 const snapshotLib = require('./snapshot');
 const openBooksLib = require('./open-books');
@@ -107,7 +108,13 @@ async function readBookMeta(bookPath) {
   if (!Number.isFinite(Number(meta.fileSeq))) meta.fileSeq = meta.chapters.length;
   if (typeof meta.title !== 'string') meta.title = path.basename(bookPath);
   // 分卷：清掉非法卷、把指向不存在卷的章归为「未分卷」，并把章节顺序归一成「未分卷 → 第1卷 → …」
-  return chaptersLib.normalizeChapterOrder({ ...meta, volumes: chaptersLib.sanitizeVolumes(meta.volumes) });
+  const normalized = chaptersLib.normalizeChapterOrder({
+    ...meta,
+    volumes: chaptersLib.sanitizeVolumes(meta.volumes)
+  });
+  // 书籍信息（v0.8-3）：作者 / 简介 / 分组 / 标签都是可选的，读取时清洗但不补字段；
+  // 旧书目没有它们照常打开（下次正常写盘也不会凭空多出来）。
+  return bookInfoLib.cleanBookInfo(normalized);
 }
 
 async function writeBookMeta(bookPath, meta, { ensureDir: ensureDirectory = true } = {}) {
@@ -268,14 +275,20 @@ async function listBooks(booksRoot) {
         bookStats(bookPath, meta),
         scanConflictCopies(bookPath)
       ]);
+      const info = bookInfoLib.readBookInfo(meta);
       return {
         path: bookPath,
         folder,
         status: 'ok',
         title: meta.title || folder,
         schemaVersion: meta.schemaVersion,
+        // 书籍信息（v0.8-3）：作者 / 简介 / 分组 / 标签，旧书一律是空值
+        author: info.author,
+        brief: info.brief,
+        group: info.group,
+        tags: info.tags,
         chapterCount: meta.chapters.length,
-        // 章节名给书架搜索用（只搜书名/章节名，不搜正文）
+        // 章节名给书架搜索用（书名 / 作者 / 分组 / 标签 / 章节名都是内存过滤，正文另走索引）
         chapterNames: meta.chapters.map((chapter) => chapter.name || ''),
         // 书卡上的「完稿 X/Y 章」（只统计 status === 'done' 的章）
         doneChapters: chaptersLib.countChapterStatuses(meta).done,
@@ -292,6 +305,10 @@ async function listBooks(booksRoot) {
         folder,
         status: 'corrupt',
         title: folder,
+        author: '',
+        brief: '',
+        group: '',
+        tags: [],
         chapterCount: 0,
         chapterNames: [],
         doneChapters: 0,
@@ -617,6 +634,24 @@ async function updateChapterMeta(bookPath, chapterId, patch = {}) {
   const chapters = meta.chapters.map((c) => (c.id === chapterId ? nextChapter : c));
   const saved = await writeBookMeta(bookPath, { ...meta, chapters });
   return { meta: saved, chapter: saved.chapters[index], index, changed: true };
+}
+
+// 书籍信息（v0.8-3）：只改 书目.json 里的可选 author / brief / group / tags，
+// 书文件夹名、章节文件名、章节 txt 一个字节都不动。
+// patch 只认这四个键；空字符串 / 空数组 = 清掉该字段；没有实际变化不写盘（不做无意义的 .bak 轮换）。
+async function updateBookInfo(bookPath, patch = {}) {
+  const fields = bookInfoLib.bookInfoPatchFields(patch);
+  if (!fields) {
+    throw new StorageError('BAD_BOOK_INFO', '书籍信息字段不合法（只支持作者 / 简介 / 分组 / 标签）');
+  }
+  const meta = await readBookMeta(bookPath);
+  const before = bookInfoLib.readBookInfo(meta);
+  const next = { ...before, ...fields };
+  if (bookInfoLib.sameBookInfo(before, next)) {
+    return { meta, info: before, changed: false };
+  }
+  const saved = await writeBookMeta(bookPath, bookInfoLib.cleanBookInfo({ ...meta, ...fields }));
+  return { meta: saved, info: bookInfoLib.readBookInfo(saved), changed: true };
 }
 
 function timestampForFile(date = new Date()) {
@@ -1320,6 +1355,7 @@ module.exports = {
   moveVolume: locked(moveVolume),
   renameChapter: locked(renameChapter),
   updateChapterMeta: locked(updateChapterMeta),
+  updateBookInfo: locked(updateBookInfo),
   deleteChapter: locked(deleteChapter),
   moveChapter: locked(moveChapter),
   searchBook,

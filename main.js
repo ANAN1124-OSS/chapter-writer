@@ -823,6 +823,10 @@ function registerIpc() {
   handleBook('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title), {
     mutation: 'rename'
   });
+  // 书籍信息（v0.8-3）：作者 / 简介 / 分组 / 标签只写 书目.json 的可选字段，不动书文件夹 / 章节文件。
+  handleBook('book:update-info', async (bookPath, patch) => storage.updateBookInfo(bookPath, patch), {
+    mutation: 'write'
+  });
   handleBook('book:set-last', async (bookPath, chapterId) => {
     const info = await storage.setLastOpenChapter(bookPath, chapterId);
     if (info && info.ok) await rememberRecentBook(bookPath, info);
@@ -1902,6 +1906,22 @@ async function runAutomation() {
       } else if (screenshotDialog === 'bookmenu') {
         await automationWin.webContents.executeJavaScript(
           `const more = document.querySelector('.book-card-more'); if (more) more.click();`,
+          true
+        );
+        await sleep(500);
+      } else if (screenshotDialog === 'bookinfo') {
+        // 开发截图用：打开第一本书的「书籍信息」并填示例值（只改界面，不保存）
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+             const book = (window.__cwTest.state.books || []).find((item) => item.status !== 'corrupt');
+             if (!book) return false;
+             window.__cwTest.openBookInfoForPath(book.path);
+             window.__cwTest.setBookInfoField('author', '示例作者');
+             window.__cwTest.setBookInfoField('group', '玄幻');
+             window.__cwTest.setBookInfoField('tags', '爽文、升级流');
+             window.__cwTest.setBookInfoField('brief', '一句话简介：一个关于旧车站与未寄出的信的故事。');
+             return true;
+           })()`,
           true
         );
         await sleep(500);

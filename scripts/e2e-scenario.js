@@ -3801,6 +3801,238 @@ module.exports = async function runScenario(ctx) {
       Object.keys(timerDiskFinal).sort().join('|') === 'days|version'
   );
 
+  // 44j. 书卡作者 / 简介 + 书架分组 / 标签（v0.8-3，提案 N3）
+  // 只写 书目.json 的可选字段；分组只是书架视图，不动书文件夹 / 章节 txt。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  check(
+    '书籍信息：没有任何分组时，书架不显示分组筛选条',
+    (await exec('window.__cwTest.shelfGroupBarVisible()')) === false
+  );
+  const infoBookTitle = '信息卡测试书';
+  await exec(`window.__cwTest.newBook(${JSON.stringify(infoBookTitle)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const infoBookPath = await exec('window.__cwTest.bookPathValue()');
+  const infoBookFolder = path.basename(infoBookPath);
+  const infoMetaPath = path.join(infoBookPath, '书目.json');
+  const infoChapter = (await storage.readBookMeta(infoBookPath)).chapters[0];
+  const infoTxtPath = path.join(infoBookPath, infoChapter.file);
+  await exec("window.__cwTest.setText('书籍信息测试正文。')");
+  await exec('window.__cwTest.save()');
+  const infoTxtBytesBefore = await fs.readFile(infoTxtPath);
+  const infoTxtStatBefore = await fs.stat(infoTxtPath);
+  const infoContentFiles = (names) =>
+    names.filter((name) => name !== '书目.json' && name !== '书目.json.bak').sort();
+  const infoDirBefore = infoContentFiles(await fs.readdir(infoBookPath));
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
+  const infoMenuTexts = await exec('window.__cwTest.bookMenuTexts()');
+  check('书籍信息：书卡右键菜单有「书籍信息…」', infoMenuTexts.includes('书籍信息…'), infoMenuTexts);
+  await exec(`window.__cwTest.openBookMenuForPath(${JSON.stringify(infoBookPath)})`);
+  check('书籍信息：菜单能打开（不是点了没反应）', (await exec('window.__cwTest.bookMenuOpen()')) === true);
+  await exec("window.__cwTest.clickBookMenuAction('info')");
+  await waitFor('window.__cwTest.bookInfoDialogOpen()');
+  const infoEmptyValues = await exec('window.__cwTest.bookInfoValues()');
+  check(
+    '书籍信息：旧书（没有可选字段）打开弹层时四项都是空值',
+    infoEmptyValues &&
+      infoEmptyValues.author === '' &&
+      infoEmptyValues.group === '' &&
+      infoEmptyValues.tags === '' &&
+      infoEmptyValues.brief === '' &&
+      (await exec('window.__cwTest.bookInfoBookText()')).includes(infoBookTitle),
+    infoEmptyValues
+  );
+
+  // 44j-1. 填作者 / 分组 / 标签 / 简介 → 保存：清洗后写进 书目.json，正文一个字节不动
+  await exec("window.__cwTest.setBookInfoField('author', ' 测试作者 ')");
+  await exec("window.__cwTest.setBookInfoField('group', '玄幻')");
+  await exec("window.__cwTest.setBookInfoField('tags', '爽文，升级、爽文')");
+  await exec("window.__cwTest.setBookInfoField('brief', '第一行简介\\r\\n\\r\\n\\r\\n第二行简介')");
+  const infoSaveResult = await exec('window.__cwTest.saveBookInfoDialog()');
+  await waitFor('!window.__cwTest.bookInfoDialogOpen()');
+  const infoMetaOnDisk = JSON.parse(await fs.readFile(infoMetaPath, 'utf8'));
+  check(
+    '书籍信息：保存后 书目.json 里作者 / 分组 / 简介按规则清洗、标签去重',
+    infoSaveResult &&
+      infoSaveResult.ok === true &&
+      infoSaveResult.changed === true &&
+      infoMetaOnDisk.author === '测试作者' &&
+      infoMetaOnDisk.group === '玄幻' &&
+      infoMetaOnDisk.brief === '第一行简介\n\n第二行简介' &&
+      JSON.stringify(infoMetaOnDisk.tags) === JSON.stringify(['爽文', '升级']),
+    { result: infoSaveResult, meta: infoMetaOnDisk }
+  );
+  check(
+    '书籍信息：保存只改书目，章节 txt 字节 / mtime / 文件名 / 书内文件数都没变',
+    JSON.stringify(await fs.readFile(infoTxtPath)) === JSON.stringify(infoTxtBytesBefore) &&
+      (await fs.stat(infoTxtPath)).mtimeMs === infoTxtStatBefore.mtimeMs &&
+      JSON.stringify(infoContentFiles(await fs.readdir(infoBookPath))) === JSON.stringify(infoDirBefore),
+    { entries: await fs.readdir(infoBookPath) }
+  );
+  const infoCard = await exec(`window.__cwTest.bookCardInfo(${JSON.stringify(infoBookFolder)})`);
+  check(
+    '书籍信息：书卡显示作者 / 分组与标签 / 简介',
+    infoCard &&
+      infoCard.author.includes('测试作者') &&
+      infoCard.tags.includes('分组：玄幻') &&
+      infoCard.tags.includes('#爽文') &&
+      infoCard.tags.includes('#升级') &&
+      infoCard.brief.includes('第一行简介') &&
+      infoCard.brief.includes('第二行简介'),
+    infoCard
+  );
+  const infoShelfPayload = await exec(`window.__cwTest.shelfBookInfo(${JSON.stringify(infoBookFolder)})`);
+  check(
+    '书籍信息：书架列表带 author / brief / group / tags（供筛选和搜索用）',
+    infoShelfPayload &&
+      infoShelfPayload.author === '测试作者' &&
+      infoShelfPayload.group === '玄幻' &&
+      JSON.stringify(infoShelfPayload.tags) === JSON.stringify(['爽文', '升级']),
+    infoShelfPayload
+  );
+
+  // 44j-2. 书架搜索：作者 / 分组 / 标签都能命中
+  await exec("window.__cwTest.setShelfQuery('测试作者')");
+  check(
+    '书籍信息：按作者能在书架上搜到',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).includes(infoBookTitle)
+  );
+  await exec("window.__cwTest.setShelfQuery('爽文')");
+  check(
+    '书籍信息：按标签能在书架上搜到',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).includes(infoBookTitle)
+  );
+  await exec("window.__cwTest.setShelfQuery('玄幻')");
+  check(
+    '书籍信息：按分组能在书架上搜到',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).includes(infoBookTitle)
+  );
+  await exec("window.__cwTest.setShelfQuery('')");
+
+  // 44j-3. 分组筛选：一本短篇书 + 一本已存在的未分组书
+  await exec("window.__cwTest.newBook('信息卡乙')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const infoBookBPath = await exec('window.__cwTest.bookPathValue()');
+  await exec('window.__cwTest.backToShelf()');
+  const infoBookBResult = await exec(
+    `window.api.updateBookInfo(${JSON.stringify(infoBookBPath)}, { author: '乙作者', group: '短篇' })`
+  );
+  await exec('window.__cwTest.refreshShelf()');
+  const infoGroupOptions = await exec('window.__cwTest.shelfGroupOptions()');
+  const infoGroupValues = infoGroupOptions.map((item) => item.value);
+  check(
+    '书籍信息：有分组后书架出现分组筛选（全部分组 / 未分组 / 短篇 / 玄幻）',
+    infoBookBResult &&
+      infoBookBResult.ok === true &&
+      (await exec('window.__cwTest.shelfGroupBarVisible()')) === true &&
+      infoGroupValues.includes('') &&
+      infoGroupValues.includes('__none__') &&
+      infoGroupValues.includes('短篇') &&
+      infoGroupValues.includes('玄幻'),
+    infoGroupValues
+  );
+  await exec("window.__cwTest.setShelfGroup('玄幻')");
+  const infoFilteredXuanhuan = await exec('window.__cwTest.shelfFilteredTitles()');
+  check(
+    '书籍信息：选「玄幻」只显示这一组的书',
+    infoFilteredXuanhuan.includes(infoBookTitle) &&
+      !infoFilteredXuanhuan.includes('信息卡乙'),
+    infoFilteredXuanhuan
+  );
+  const historyTitle = (await storage.readBookMeta(historyBookPath)).title;
+  await exec("window.__cwTest.setShelfGroup('__none__')");
+  const infoFilteredNone = await exec('window.__cwTest.shelfFilteredTitles()');
+  check(
+    '书籍信息：选「未分组」只显示没有分组的书',
+    infoFilteredNone.includes(historyTitle) &&
+      !infoFilteredNone.includes(infoBookTitle) &&
+      !infoFilteredNone.includes('信息卡乙'),
+    { filtered: infoFilteredNone, historyTitle }
+  );
+  const infoAllCount = (await exec('window.__cwTest.shelfTitles()')).length;
+  await exec("window.__cwTest.setShelfGroup('')");
+  const infoAllFiltered = await exec('window.__cwTest.shelfFilteredTitles()');
+  check(
+    '书籍信息：回到「全部分组」显示所有书（筛选只影响显示）',
+    infoAllFiltered.length === infoAllCount && infoAllFiltered.includes(infoBookTitle),
+    { shown: infoAllFiltered.length, total: infoAllCount }
+  );
+  await exec("window.__cwTest.setShelfGroup('短篇')");
+  await exec("window.__cwTest.setShelfQuery('测试作者')");
+  check(
+    '书籍信息：分组筛选和搜索能叠加（短篇 + 测试作者 = 空）',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).length === 0
+  );
+  await exec("window.__cwTest.setShelfQuery('乙作者')");
+  check(
+    '书籍信息：分组筛选和搜索能叠加（短篇 + 乙作者 = 信息卡乙）',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).includes('信息卡乙')
+  );
+  await exec("window.__cwTest.setShelfQuery('')");
+
+  // 44j-4. 取消不写盘；清空分组后筛选条自动更新、选中状态回到全部
+  const infoMetaBeforeCancel = await fs.readFile(infoMetaPath);
+  await exec("window.__cwTest.setShelfGroup('玄幻')");
+  await exec(`window.__cwTest.openBookInfoForPath(${JSON.stringify(infoBookPath)})`);
+  await exec("window.__cwTest.setBookInfoField('author', '不该保存的作者')");
+  await exec('window.__cwTest.closeBookInfoDialog()');
+  await sleep(200);
+  check(
+    '书籍信息：点取消不写盘（书目字节不变）',
+    JSON.stringify(await fs.readFile(infoMetaPath)) === JSON.stringify(infoMetaBeforeCancel)
+  );
+  await exec(`window.__cwTest.openBookInfoForPath(${JSON.stringify(infoBookPath)})`);
+  await exec("window.__cwTest.setBookInfoField('group', '')");
+  await exec('window.__cwTest.saveBookInfoDialog()');
+  await waitFor('!window.__cwTest.bookInfoDialogOpen()');
+  const infoGroupOptionsAfter = (await exec('window.__cwTest.shelfGroupOptions()')).map((item) => item.value);
+  const infoMetaAfterClear = JSON.parse(await fs.readFile(infoMetaPath, 'utf8'));
+  check(
+    '书籍信息：清空分组后从书目删掉该字段，筛选项里也没有「玄幻」了',
+    !('group' in infoMetaAfterClear) && !infoGroupOptionsAfter.includes('玄幻') &&
+      infoGroupOptionsAfter.includes('短篇')
+  );
+  check(
+    '书籍信息：当前选中的分组不见了时，筛选自动回到「全部分组」',
+    (await exec('window.__cwTest.shelfGroupValue()')) === '' &&
+      (await exec('window.__cwTest.shelfFilteredTitles()')).length === infoAllCount
+  );
+
+  // 44j-5. 旧书兼容 / 不新增配置字段
+  const historyMetaRaw = JSON.parse(await fs.readFile(path.join(historyBookPath, '书目.json'), 'utf8'));
+  const historyShelfInfo = await exec(
+    `window.__cwTest.shelfBookInfo(${JSON.stringify(path.basename(historyBookPath))})`
+  );
+  check(
+    '书籍信息：旧书书目没有被补字段，书架上的书籍信息是空值',
+    !('author' in historyMetaRaw) &&
+      !('brief' in historyMetaRaw) &&
+      !('group' in historyMetaRaw) &&
+      !('tags' in historyMetaRaw) &&
+      historyShelfInfo &&
+      historyShelfInfo.author === '' &&
+      historyShelfInfo.brief === '' &&
+      historyShelfInfo.group === '' &&
+      historyShelfInfo.tags.length === 0,
+    { meta: historyMetaRaw, shelf: historyShelfInfo }
+  );
+  const infoConfigDisk = await readConfigDisk();
+  check(
+    '书籍信息：不新增任何配置字段（作者 / 分组 / 标签只存在书目里）',
+    !Object.keys(infoConfigDisk).some((key) => /author|brief|bookinfo|tags|group/i.test(key)),
+    Object.keys(infoConfigDisk)
+  );
+  const infoMetaFinal = JSON.parse(await fs.readFile(infoMetaPath, 'utf8'));
+  check(
+    '书籍信息：作者 / 简介 / 标签仍在，章节文件一个没多',
+    infoMetaFinal.author === '测试作者' &&
+      infoMetaFinal.brief === '第一行简介\n\n第二行简介' &&
+      JSON.stringify(infoMetaFinal.tags) === JSON.stringify(['爽文', '升级']) &&
+      JSON.stringify(infoContentFiles(await fs.readdir(infoBookPath))) === JSON.stringify(infoDirBefore)
+  );
+
   // 45. 导出 EPUB（v0.7-1）：整本书 → EPUB 3；分卷做目录级、一章一个 XHTML、纯文字封面
   await exec("window.__cwTest.newBook('EPUB导出测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");

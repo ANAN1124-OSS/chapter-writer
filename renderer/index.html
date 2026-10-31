@@ -19,7 +19,7 @@
         </div>
         <div class="topbar-right">
           <div class="shelf-search">
-            <input id="shelf-search" class="text-input" type="text" placeholder="搜索书名 / 章节名 / 正文（Ctrl+F）" autocomplete="off" />
+            <input id="shelf-search" class="text-input" type="text" placeholder="搜索书名 / 作者 / 标签 / 正文（Ctrl+F）" autocomplete="off" />
             <button id="btn-shelf-search-clear" class="shelf-search-clear hidden" type="button" title="清除搜索（Esc）">×</button>
           </div>
           <span id="books-root-label" class="muted small"></span>
@@ -50,6 +50,11 @@
             <button id="btn-shelf-content-more" class="btn ghost tiny hidden" type="button">显示更多</button>
           </div>
           <div id="shelf-content-list" class="shelf-content-list"></div>
+        </div>
+        <!-- 分组筛选（v0.8-3）：只影响书架显示，不改书文件夹；一本书都没有分组时收起 -->
+        <div id="shelf-group-bar" class="shelf-group-bar hidden">
+          <label for="shelf-group-filter" class="shelf-group-label">分组</label>
+          <select id="shelf-group-filter" class="shelf-group-select" title="只筛选书架显示；分组只写在 书目.json 里，不改书文件夹名"></select>
         </div>
         <div class="book-grid" id="book-grid"></div>
       </div>
@@ -362,6 +367,41 @@
       <div class="modal-buttons">
         <button id="btn-conflict-open-folder" class="btn ghost" type="button">打开书文件夹</button>
         <button id="btn-conflict-close" class="btn primary" type="button">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 书籍信息（作者 / 简介 / 分组 / 标签，v0.8-3） ============ -->
+  <div id="bookinfo-backdrop" class="backdrop hidden">
+    <div class="modal bookinfo-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">书籍信息</h2>
+      <p class="modal-message">
+        作者 / 简介 / 分组 / 标签只写进这本书的 <code>书目.json</code>（可选字段、纯文本）：不会改书文件夹名，也不会动任何章节 txt。旧书没有这些字段照常打开。
+      </p>
+      <div class="bookinfo-book" id="bookinfo-book"></div>
+      <div class="bookinfo-scroll">
+        <label class="field">
+          <span>作者</span>
+          <input id="bookinfo-author" class="modal-input" type="text" maxlength="80" autocomplete="off" placeholder="可留空" />
+        </label>
+        <label class="field">
+          <span>分组</span>
+          <input id="bookinfo-group" class="modal-input" type="text" maxlength="40" autocomplete="off" list="bookinfo-group-list" placeholder="如：玄幻 / 短篇 / 待改（可留空）" />
+          <datalist id="bookinfo-group-list"></datalist>
+        </label>
+        <label class="field">
+          <span>标签</span>
+          <input id="bookinfo-tags" class="modal-input" type="text" maxlength="240" autocomplete="off" placeholder="逗号分隔，最多 10 个，如：爽文，升级流" />
+        </label>
+        <label class="field">
+          <span>简介</span>
+          <textarea id="bookinfo-brief" class="modal-input bookinfo-brief" rows="4" maxlength="1000" placeholder="一句话简介 / 备忘（可留空；换行会保留）"></textarea>
+        </label>
+      </div>
+      <div class="bookinfo-error" id="bookinfo-error"></div>
+      <div class="modal-buttons">
+        <button id="btn-bookinfo-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-bookinfo-save" class="btn primary" type="button">保存</button>
       </div>
     </div>
   </div>
@@ -736,11 +776,13 @@
   <div id="book-menu" class="context-menu hidden">
     <button type="button" data-action="open">打开这本书</button>
     <button type="button" data-action="open-new-window" title="在另一个窗口打开这本书；同一本书不会开两个窗口">在新窗口打开</button>
+    <button type="button" data-action="info">书籍信息…</button>
     <button type="button" data-action="folder">打开所在文件夹</button>
     <button type="button" data-action="history">本书历史…</button>
     <button type="button" data-action="delete" class="danger-text">删除这本书…</button>
   </div>
 
+  <script src="../core/bookinfo.js"></script>
   <script src="editor-logic.js"></script>
   <script src="focus-logic.js"></script>
 <script src="renderer.js"></script>
