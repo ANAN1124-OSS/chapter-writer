@@ -102,24 +102,32 @@
   <!-- ============ 排版：整理本章 ============ -->
   <div id="format-backdrop" class="backdrop hidden">
     <div class="modal format-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">整理本章正文</h2>
+      <h2 class="modal-title">智能排版 · 仅当前章</h2>
       <p class="modal-message">
         只处理正在编辑的这一章，不改章名、不碰别的章。整理结果先放进编辑区，仍是「未保存」状态：
         按 Ctrl+S 才写盘，Ctrl+Z 或「排版 → 撤销上次整理」可退回。
       </p>
       <div class="format-rules">
-        <label class="check-row"><input type="checkbox" id="fmt-indent" /> 段首缩进两格（两个全角空格）</label>
-        <label class="check-row"><input type="checkbox" id="fmt-trailing" /> 删除每行行尾空白</label>
-        <label class="check-row"><input type="checkbox" id="fmt-punct" /> 中文旁边的半角标点转全角（，。；：！？）</label>
-        <label class="check-row"><input type="checkbox" id="fmt-cjkspace" /> 删除中文之间的多余空格（可能影响语感，默认不勾）</label>
+        <label class="field inline">
+          <span>段首缩进</span>
+          <select id="fmt-indent" class="text-input">
+            <option value="2">缩进 2 字符（全角空格）</option>
+            <option value="0">缩进 0 字符（去掉原有缩进）</option>
+            <option value="none">不处理缩进</option>
+          </select>
+        </label>
         <label class="field inline">
           <span>段落之间</span>
           <select id="fmt-blank" class="text-input">
             <option value="keep">保持原样</option>
             <option value="single">空一行</option>
+            <option value="singleIndent">空一行（含缩进）</option>
             <option value="none">不空行（紧凑）</option>
           </select>
         </label>
+        <label class="check-row"><input type="checkbox" id="fmt-trailing" /> 删除每行行尾空白</label>
+        <label class="check-row"><input type="checkbox" id="fmt-punct" /> 中文旁边的半角标点转全角（，。；：！？）</label>
+        <label class="check-row"><input type="checkbox" id="fmt-cjkspace" /> 删除中文之间的多余空格（可能影响语感，默认不勾）</label>
       </div>
       <div class="format-summary" id="fmt-summary"></div>
       <pre class="format-preview" id="fmt-preview"></pre>
@@ -144,13 +152,23 @@
           <button id="btn-pick-folder" class="btn ghost" type="button">选择…</button>
         </div>
       </label>
+      <div class="field-group">字体</div>
       <label class="field">
         <span>正文字体</span>
         <select id="settings-font" class="text-input">
           <option value="serif">宋体 / 衬线</option>
           <option value="sans">黑体 / 无衬线</option>
           <option value="kai">楷体</option>
+          <option value="custom">自定义字体文件…</option>
         </select>
+      </label>
+      <label class="field">
+        <span>自定义字体（.ttf / .otf，只读取不复制）</span>
+        <div class="field-row">
+          <input id="settings-font-name" class="text-input" type="text" readonly placeholder="未选择，使用上面的内置字体" />
+          <button id="btn-pick-font" class="btn ghost" type="button">选择…</button>
+          <button id="btn-reset-font" class="btn ghost" type="button" title="恢复宋体并忘掉自定义字体">恢复默认</button>
+        </div>
       </label>
       <label class="field">
         <span>字号</span>
@@ -162,8 +180,9 @@
           <option value="24">24</option>
         </select>
       </label>
+      <div class="field-group">排版</div>
       <label class="field">
-        <span>行距</span>
+        <span>行间距</span>
         <select id="settings-line-height" class="text-input">
           <option value="1.6">1.6 · 紧凑</option>
           <option value="1.8">1.8</option>
@@ -173,12 +192,23 @@
         </select>
       </label>
       <label class="field">
-        <span>字距</span>
+        <span>字间距</span>
         <select id="settings-letter-spacing" class="text-input">
           <option value="0">0 · 默认</option>
           <option value="0.02">0.02 · 略松</option>
           <option value="0.05">0.05 · 中</option>
           <option value="0.08">0.08 · 宽</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>左右边距</span>
+        <select id="settings-padding-x" class="text-input">
+          <option value="16">16 px · 很窄</option>
+          <option value="24">24 px</option>
+          <option value="40">40 px</option>
+          <option value="56">56 px · 标准</option>
+          <option value="80">80 px</option>
+          <option value="120">120 px · 很宽</option>
         </select>
       </label>
       <label class="field">
@@ -191,12 +221,16 @@
           <option value="720">720 px</option>
         </select>
       </label>
+      <div class="field-group">背景</div>
       <label class="field">
-        <span>正文底色</span>
+        <span>背景主题</span>
         <select id="settings-paper" class="text-input">
           <option value="paper">原纸白</option>
           <option value="cream">米黄 · 护眼</option>
           <option value="green">豆绿 · 护眼</option>
+          <option value="night">夜间 · 深色</option>
+          <option value="kraft">牛皮纸 · 纹理</option>
+          <option value="grid">网格纸 · 纹理</option>
         </select>
       </label>
       <p class="muted small">

@@ -6,8 +6,9 @@ const { writeJsonAtomic, stripBom } = require('./atomic');
 const formatLib = require('./format');
 
 const DEFAULT_BOOKS_ROOT = '文档\\我的小说';
-const FONTS = ['serif', 'sans', 'kai'];
-const PAPER_THEMES = ['paper', 'cream', 'green'];
+const FONTS = ['serif', 'sans', 'kai', 'custom'];
+// 背景主题：纯色 4 档 + 两种纸张纹理（对应口袋写作「背景设置」里的配色/纸张纹理/夜间）
+const PAPER_THEMES = ['paper', 'cream', 'green', 'night', 'kraft', 'grid'];
 
 const DEFAULTS = Object.freeze({
   booksRoot: DEFAULT_BOOKS_ROOT,
@@ -15,11 +16,15 @@ const DEFAULTS = Object.freeze({
   editorFont: 'serif',
   editorFontSize: 18,
   editorSidebarWidth: 250,
+  // 自定义字体（editorFont = 'custom' 时生效；只记路径，不复制字体文件）
+  editorCustomFontPath: '',
+  editorCustomFontName: '',
   // 显示排版（写作页「排版 ▾」/ 设置里可调）
   editorLineHeight: 1.95,
   editorLetterSpacing: 0.02,
   editorPageWidth: 0, // 0 = 通栏；>0 为正文最大宽度（px）
-  editorPaper: 'paper', // paper 原纸白 / cream 米黄 / green 豆绿（护眼）
+  editorPaddingX: 56, // 正文左右边距（px）
+  editorPaper: 'paper', // paper 原纸白 / cream 米黄 / green 豆绿 / night 夜间 / kraft 牛皮纸 / grid 网格纸
   // 「整理本章」上一次用过的规则，下次打开对话框沿用（不改正文，只是记住勾选）
   formatOptions: { ...formatLib.DEFAULT_OPTIONS }
 });
@@ -48,13 +53,19 @@ function sanitize(raw) {
   // 章节栏宽度（拖动分隔条调整，双击恢复默认）
   cfg.editorSidebarWidth = clampInt(cfg.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
 
-  // 显示排版：行距 / 字距 / 正文宽度 / 护眼底色
+  // 自定义字体：路径只做基本清洗，选中的字体没了会回落到内置字体
+  cfg.editorCustomFontPath = typeof cfg.editorCustomFontPath === 'string' ? cfg.editorCustomFontPath.trim() : '';
+  cfg.editorCustomFontName = typeof cfg.editorCustomFontName === 'string' ? cfg.editorCustomFontName.trim() : '';
+  if (cfg.editorFont === 'custom' && !cfg.editorCustomFontPath) cfg.editorFont = DEFAULTS.editorFont;
+
+  // 显示排版：行距 / 字距 / 正文宽度 / 左右边距 / 背景主题
   cfg.editorLineHeight = clampFloat(cfg.editorLineHeight, 1.2, 3, DEFAULTS.editorLineHeight);
   cfg.editorLetterSpacing = clampFloat(cfg.editorLetterSpacing, 0, 0.2, DEFAULTS.editorLetterSpacing);
   const pageWidth = Number(cfg.editorPageWidth);
   cfg.editorPageWidth = Number.isFinite(pageWidth) && pageWidth > 0
     ? clampInt(pageWidth, 600, 1600, DEFAULTS.editorPageWidth)
     : 0;
+  cfg.editorPaddingX = clampInt(cfg.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
   cfg.editorPaper = PAPER_THEMES.includes(cfg.editorPaper) ? cfg.editorPaper : DEFAULTS.editorPaper;
   cfg.formatOptions = formatLib.sanitizeOptions(cfg.formatOptions);
 

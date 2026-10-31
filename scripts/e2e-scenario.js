@@ -573,5 +573,114 @@ module.exports = async function runScenario(ctx) {
   await waitFor('window.__cwTest.modalOpen() === false');
   check('取消关窗后窗口不关闭', (await waitCloseReady()) === false);
 
+  // 25. 智能排版（对齐口袋写作）：缩进 0 字符 / 空一行（含缩进）
+  const smartOpts = {
+    indent: '0',
+    blankLines: 'single',
+    trimTrailing: true,
+    normalizePunct: true,
+    removeCjkSpaces: false
+  };
+  await exec(`window.__cwTest.setText(${JSON.stringify('　　第一段。\n\n　　第二段。')})`);
+  await exec(`window.__cwTest.writeFormatOptions(${JSON.stringify(smartOpts)})`);
+  await exec('window.__cwTest.applyFormat()');
+  check(
+    '智能排版：缩进可设为 0 字符（去掉缩进）',
+    (await exec('window.__cwTest.text()')) === '第一段。\n\n第二段。',
+    await exec('window.__cwTest.text()')
+  );
+
+  const indentBlankOpts = { ...smartOpts, indent: '2', blankLines: 'singleIndent' };
+  await exec(`window.__cwTest.setText(${JSON.stringify('第一段。\n\n第二段。')})`);
+  await exec(`window.__cwTest.writeFormatOptions(${JSON.stringify(indentBlankOpts)})`);
+  await exec('window.__cwTest.applyFormat()');
+  const indentBlankText = await exec('window.__cwTest.text()');
+  check(
+    '智能排版：空行可带缩进（空行里是全角空格）',
+    indentBlankText === '　　第一段。\n　　\n　　第二段。',
+    indentBlankText
+  );
+  const indentSave = await exec('window.__cwTest.save()');
+  check('智能排版：含缩进的空行保存成功', Boolean(indentSave && indentSave.ok === true), indentSave);
+  const indentBlankRaw = await fs.readFile(path.join(currentBookDir, currentChapterFile), 'utf8');
+  check(
+    '智能排版：落盘为 CRLF 且空行保留全角缩进',
+    indentBlankRaw === '　　第一段。\r\n　　\r\n　　第二段。',
+    indentBlankRaw
+  );
+  const undoDepthBeforeRepeat = await exec('window.__cwTest.formatUndoDepth()');
+  await exec('window.__cwTest.applyFormat()');
+  check('智能排版：重复整理幂等（不会再改一次）', (await exec('window.__cwTest.text()')) === indentBlankText);
+  check(
+    '智能排版：无改动时不往撤销栈里塞东西',
+    (await exec('window.__cwTest.formatUndoDepth()')) === undoDepthBeforeRepeat
+  );
+
+  // 26. 口袋写作同款显示项：字体文件（.ttf）、夜间、纸张纹理、左右边距
+  const testFontPath = 'C:\\Windows\\Fonts\\consola.ttf';
+  const fontRead = await exec(`window.api.readFont(${JSON.stringify(testFontPath)})`);
+  check(
+    '字体文件读取成功（主进程读成 base64 给渲染层）',
+    Boolean(fontRead && fontRead.ok && fontRead.data.size > 1000 && fontRead.data.base64.length > 1000),
+    fontRead && { ok: fontRead.ok, size: fontRead.data && fontRead.data.size }
+  );
+  const badFontRead = await exec('window.api.readFont("C:\\\\Windows\\\\win.ini")');
+  check(
+    '非字体文件被拒绝',
+    Boolean(badFontRead && badFontRead.ok === false && badFontRead.code === 'BAD_FONT'),
+    badFontRead && { ok: badFontRead.ok, code: badFontRead.code }
+  );
+  const customLoaded = await exec(`window.__cwTest.loadCustomFont(${JSON.stringify(testFontPath)})`);
+  await sleep(300);
+  const customState = await exec('window.__cwTest.customFontLoaded()');
+  check('自定义字体能加载进页面（FontFace）', customLoaded === true && customState.ok === true, customState);
+  const customApplied = await exec(
+    `window.__cwTest.setCustomFont(${JSON.stringify(testFontPath)}, 'consola.ttf')`
+  );
+  check('自定义字体写入配置后生效', customApplied === true);
+  check(
+    '页面字体已切到自定义字体',
+    (await exec('window.__cwTest.displayStyle()')).fontFamily.includes('cw-custom-font'),
+    (await exec('window.__cwTest.displayStyle()')).fontFamily
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setSelect('settings-paper', 'night')");
+  const nightStyle = await exec('window.__cwTest.displayStyle()');
+  check('夜间主题生效（页面换成深色）', nightStyle.paperClass.includes('theme-night'), nightStyle.paperClass);
+  const nightRgb = (nightStyle.backgroundColor.match(/\d+/g) || []).map(Number);
+  check(
+    '夜间主题：正文底色变深、字色不变',
+    nightRgb.length >= 3 && nightRgb[0] < 80 && nightRgb[1] < 80 && nightRgb[2] < 80,
+    nightStyle.backgroundColor
+  );
+  await exec("window.__cwTest.setSelect('settings-padding-x', '24')");
+  const paddingStyle = await exec('window.__cwTest.displayStyle()');
+  check('左右边距可调（24px）', paddingStyle.paddingLeft === '24px' && paddingStyle.paddingRight === '24px', {
+    left: paddingStyle.paddingLeft,
+    right: paddingStyle.paddingRight
+  });
+  await exec("window.__cwTest.setSelect('settings-paper', 'kraft')");
+  const kraftStyle = await exec('window.__cwTest.displayStyle()');
+  check(
+    '牛皮纸主题带纹理（CSS 渐变，不加图片文件）',
+    kraftStyle.backgroundImage.includes('repeating-linear-gradient'),
+    kraftStyle.backgroundImage.slice(0, 80)
+  );
+  await exec("window.__cwTest.setSelect('settings-paper', 'grid')");
+  const gridStyle = await exec('window.__cwTest.displayStyle()');
+  check('网格纸主题带纹理', gridStyle.backgroundImage.includes('linear-gradient'), gridStyle.backgroundImage.slice(0, 80));
+
+  await exec("window.__cwTest.setSelect('settings-paper', 'night')");
+  await exec("document.getElementById('btn-settings-save').click()");
+  await waitFor("window.api.getConfig().then((r) => (r.ok && r.data.editorPaper === 'night'))", 10000);
+  const displayCfg = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check(
+    '夜间主题与左右边距写入配置',
+    displayCfg.editorPaper === 'night' && displayCfg.editorPaddingX === 24,
+    { paper: displayCfg.editorPaper, paddingX: displayCfg.editorPaddingX }
+  );
+  check('改主题/边距不动正文一个字', (await exec('window.__cwTest.text()')) === indentBlankText);
+
   return { ok: true, checks: checks.length, details: checks };
 };

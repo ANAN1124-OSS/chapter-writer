@@ -5,20 +5,28 @@ const INDENT = '\u3000\u3000'; // 段首缩进：两个全角空格（中文小�
 const HAN_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
 const FULL_PUNCT = new Set(['，', '。', '；', '：', '！', '？']);
 const PUNCT_MAP = { ',': '，', '.': '。', ';': '；', ':': '：', '!': '！', '?': '？' };
-const BLANK_MODES = ['keep', 'single', 'none'];
+const BLANK_MODES = ['keep', 'single', 'singleIndent', 'none'];
+const INDENT_MODES = ['none', '0', '2'];
 
 const DEFAULT_OPTIONS = Object.freeze({
-  indent: true,           // 段首缩进两格（先去掉原有行首空白再加）
-  blankLines: 'single',   // 段间空行：keep 保持原样 / single 空一行 / none 不空行
-  trimTrailing: true,     // 删除每行行尾空白
-  normalizePunct: true,   // 中文旁边的半角标点转全角（，。；：！？）
-  removeCjkSpaces: false  // 删除中文之间的多余空格（默认关：可能影响语感）
+  indent: '2',             // 段首缩进：none 不处理 / '0' 去掉缩进 / '2' 两个全角空格
+  blankLines: 'single',    // 段间空行：keep 保持原样 / single 空一行 / singleIndent 空一行（含缩进）/ none 不空行
+  trimTrailing: true,      // 删除每行行尾空白
+  normalizePunct: true,    // 中文旁边的半角标点转全角（，。；：！？）
+  removeCjkSpaces: false   // 删除中文之间的多余空格（默认关：可能影响语感）
 });
+
+// 兼容旧配置：以前 indent 是布尔值（true=缩进两格 / false=不管）
+function normalizeIndentMode(raw) {
+  if (typeof raw === 'boolean') return raw ? '2' : 'none';
+  if (INDENT_MODES.includes(raw)) return raw;
+  return DEFAULT_OPTIONS.indent;
+}
 
 function sanitizeOptions(raw) {
   const merged = { ...DEFAULT_OPTIONS, ...(raw && typeof raw === 'object' ? raw : {}) };
   return {
-    indent: Boolean(merged.indent),
+    indent: normalizeIndentMode(merged.indent),
     blankLines: BLANK_MODES.includes(merged.blankLines) ? merged.blankLines : DEFAULT_OPTIONS.blankLines,
     trimTrailing: Boolean(merged.trimTrailing),
     normalizePunct: Boolean(merged.normalizePunct),
@@ -85,6 +93,7 @@ function removeCjkSpaces(text) {
 
 function formatText(text, rawOptions) {
   const options = sanitizeOptions(rawOptions);
+  const indent = options.indent;
   const stats = {
     paragraphs: 0,
     indentFixed: 0,
@@ -121,8 +130,9 @@ function formatText(text, rawOptions) {
       }
     }
 
-    if (options.indent) {
-      const next = INDENT + stripLeading(line);
+    if (indent !== 'none') {
+      // '2' = 两个全角空格；'0' = 去掉原有缩进（不补空格）
+      const next = (indent === '2' ? INDENT : '') + stripLeading(line);
       if (next !== line) stats.indentFixed += 1;
       line = next;
     }
@@ -145,6 +155,10 @@ function formatText(text, rawOptions) {
 
   stats.paragraphs = paragraphs.length;
 
+  // 「空一行（含缩进）」：空行里放两个全角空格，粘到会吃掉纯空行的平台也不塌；
+  // 缩进设为 0 / 不处理时没有缩进可带，退化成普通空行。
+  const blankLineText = indent === '2' ? INDENT : '';
+
   let result;
   if (!paragraphs.length) {
     result = '';
@@ -154,9 +168,16 @@ function formatText(text, rawOptions) {
       result += '\n'.repeat(paragraphs[i].gap + 1) + paragraphs[i].text;
     }
   } else {
-    const separator = options.blankLines === 'single' ? '\n\n' : '\n';
+    let separator = '\n';
+    let wanted = 0;
+    if (options.blankLines === 'single') {
+      separator = '\n\n';
+      wanted = 1;
+    } else if (options.blankLines === 'singleIndent') {
+      separator = `\n${blankLineText}\n`;
+      wanted = 1;
+    }
     for (let i = 1; i < paragraphs.length; i += 1) {
-      const wanted = options.blankLines === 'single' ? 1 : 0;
       if (paragraphs[i].gap !== wanted) stats.blankCollapsed += 1;
     }
     result = paragraphs.map((p) => p.text).join(separator);

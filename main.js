@@ -205,6 +205,35 @@ function registerIpc() {
     });
   });
 
+  // 自定义正文字体：只允许字体文件，读成 base64 交给渲染层的 FontFace 加载（渲染层仍无 fs）
+  const FONT_EXTS = new Set(['.ttf', '.otf', '.ttc']);
+  const FONT_MAX_BYTES = 24 * 1024 * 1024;
+
+  handle('font:pick', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: '选择正文字体文件',
+      buttonLabel: '使用这个字体',
+      properties: ['openFile'],
+      filters: [{ name: '字体文件', extensions: ['ttf', 'otf', 'ttc'] }]
+    });
+    if (canceled || !filePaths || !filePaths.length) return { canceled: true };
+    return { canceled: false, path: filePaths[0], name: path.basename(filePaths[0]) };
+  });
+
+  handle('font:read', async (fontPath) => {
+    const resolved = path.resolve(String(fontPath == null ? '' : fontPath));
+    if (!FONT_EXTS.has(path.extname(resolved).toLowerCase())) {
+      throw new storage.StorageError('BAD_FONT', '只支持 .ttf / .otf / .ttc 字体文件');
+    }
+    const stat = await fs.stat(resolved);
+    if (!stat.isFile()) throw new storage.StorageError('BAD_FONT', '选中的不是一个字体文件');
+    if (stat.size > FONT_MAX_BYTES) {
+      throw new storage.StorageError('FONT_TOO_BIG', '字体文件太大（超过 24MB），请换一个小一点的');
+    }
+    const buffer = await fs.readFile(resolved);
+    return { name: path.basename(resolved), size: stat.size, base64: buffer.toString('base64') };
+  });
+
   handle('chapter:create', async (bookPath, insertIndex, name) =>
     storage.createChapter(bookPath, insertIndex, name)
   );

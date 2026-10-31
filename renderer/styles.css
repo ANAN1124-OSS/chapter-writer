@@ -12,15 +12,19 @@
   --danger: #a94442;
   --ok: #4f7a52;
   --warn: #a9741e;
+  --input-bg: #ffffff;
+  --hover-tint: rgba(255, 255, 255, .55);
   --ui-font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   --editor-font-family: "SimSun", "Songti SC", "Source Han Serif SC", serif;
   --editor-font-size: 18px;
   --editor-line-height: 1.95;
   --editor-letter-spacing: .02em;
   --editor-max-width: none;
+  --editor-padding-x: 56px;
+  --editor-bg-image: none;
 }
 
-/* 护眼底色：只换纸色（书架、章节栏、正文一起变），正文墨色不动 */
+/* 背景主题：只换纸色/纹理（书架、章节栏、正文一起变），正文墨色默认不动 */
 body.theme-cream {
   --paper: #f7efdc;
   --paper-soft: #fbf6ea;
@@ -30,6 +34,42 @@ body.theme-green {
   --paper: #e8efe2;
   --paper-soft: #f0f5ec;
   --paper-deep: #dde7d6;
+}
+body.theme-kraft {
+  --paper: #f0e6d2;
+  --paper-soft: #f6eedd;
+  --paper-deep: #e5d8bf;
+  /* 牛皮纸的细纤维纹理：纯 CSS，不用图片文件 */
+  --editor-bg-image:
+    repeating-linear-gradient(0deg, rgba(122, 92, 46, .045) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(90deg, rgba(122, 92, 46, .028) 0 1px, transparent 1px 4px);
+}
+body.theme-grid {
+  --paper: #f4f7f6;
+  --paper-soft: #fafcfb;
+  --paper-deep: #e7edeb;
+  /* 网格纸：24px 方格 */
+  --editor-bg-image:
+    linear-gradient(rgba(96, 122, 138, .10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(96, 122, 138, .10) 1px, transparent 1px);
+  --editor-bg-size: 24px 24px;
+}
+body.theme-night {
+  --paper: #1f2023;
+  --paper-soft: #26282c;
+  --paper-deep: #2f3237;
+  --ink: #dcd8d0;
+  --ink-soft: #a8a49b;
+  --ink-faint: #7e7a72;
+  --line: #3a3d42;
+  --line-strong: #4a4e54;
+  --accent: #c08a5f;
+  --accent-soft: #d3a274;
+  --danger: #d06a6a;
+  --ok: #7fae83;
+  --warn: #d0a04a;
+  --input-bg: #2b2e32;
+  --hover-tint: rgba(255, 255, 255, .07);
 }
 
 * { box-sizing: border-box; }
@@ -291,7 +331,7 @@ body.resizing .editor {
   line-height: 1.5;
   color: var(--ink);
 }
-.chapter-item:hover { background: rgba(255, 255, 255, .55); }
+.chapter-item:hover { background: var(--hover-tint); }
 .chapter-item.active {
   background: var(--paper-soft);
   border-left-color: var(--accent);
@@ -377,11 +417,13 @@ body.resizing .editor {
   width: 100%;
   max-width: var(--editor-max-width);
   align-self: center;
-  padding: 34px 56px 42px;
+  padding: 34px var(--editor-padding-x) 42px;
   border: none;
   outline: none;
   resize: none;
-  background: var(--paper);
+  background-color: var(--paper);
+  background-image: var(--editor-bg-image);
+  background-size: var(--editor-bg-size, auto);
   color: var(--ink);
   font-family: var(--editor-font-family);
   font-size: var(--editor-font-size);
@@ -472,7 +514,7 @@ body.resizing .editor {
   font-family: var(--ui-font);
   font-size: 14px;
   color: var(--ink);
-  background: #fff;
+  background: var(--input-bg);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   outline: none;
@@ -511,13 +553,24 @@ body.resizing .editor {
 }
 .field-row { display: flex; gap: 8px; }
 .field-row .btn { flex: 0 0 auto; white-space: nowrap; }
+.field-row .text-input { flex: 1 1 auto; min-width: 0; }
+.field-row input[readonly] { background: var(--paper-deep); color: var(--ink-soft); }
+.field-group {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-faint);
+  letter-spacing: .08em;
+  user-select: none;
+}
 .text-input {
   width: 100%;
   padding: 8px 10px;
   font-family: var(--ui-font);
   font-size: 13.5px;
   color: var(--ink);
-  background: #fff;
+  background: var(--input-bg);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   outline: none;
@@ -563,7 +616,7 @@ body.resizing .editor {
   margin-top: 12px;
 }
 .field.inline > span { display: inline; margin: 0; white-space: nowrap; }
-.field.inline .text-input { width: 190px; }
+.field.inline .text-input { width: 260px; }
 .format-summary {
   min-height: 18px;
   margin-top: 14px;
@@ -575,7 +628,7 @@ body.resizing .editor {
   padding: 12px 14px;
   max-height: 230px;
   overflow: auto;
-  background: #fff;
+  background: var(--input-bg);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   font-family: var(--editor-font-family);

@@ -111,10 +111,38 @@ test('整理：单段长正文、英文数字行也能加缩进', () => {
 
 test('规则清洗：非法值回落到默认', () => {
   assert.deepEqual(sanitizeOptions(null), { ...DEFAULT_OPTIONS });
-  assert.deepEqual(sanitizeOptions({ blankLines: 'weird', indent: 1 }), {
-    ...DEFAULT_OPTIONS,
-    indent: true
-  });
+  assert.deepEqual(sanitizeOptions({ blankLines: 'weird', indent: 1 }), { ...DEFAULT_OPTIONS });
   assert.equal(sanitizeOptions({ blankLines: 'none' }).blankLines, 'none');
   assert.equal(sanitizeOptions({ trimTrailing: 0 }).trimTrailing, false);
+  // 兼容旧配置里的布尔缩进
+  assert.equal(sanitizeOptions({ indent: true }).indent, '2');
+  assert.equal(sanitizeOptions({ indent: false }).indent, 'none');
+  assert.equal(sanitizeOptions({ indent: '0' }).indent, '0');
+  assert.equal(sanitizeOptions({ blankLines: 'singleIndent' }).blankLines, 'singleIndent');
+});
+
+test('智能排版：段首缩进可选「不处理 / 0 字符 / 2 字符」', () => {
+  const indented = '　　第一段\n\n　　第二段';
+  assert.equal(F(indented, { indent: 'none', blankLines: 'keep' }), indented);
+  assert.equal(F(indented, { indent: '0', blankLines: 'keep' }), '第一段\n\n第二段');
+  assert.equal(F('第一段\n\n第二段', { indent: '2' }), '　　第一段\n\n　　第二段');
+  // 0 字符：连原来夹在中间的空格也要清掉
+  assert.equal(F('  第一段', { indent: '0', blankLines: 'keep' }), '第一段');
+  // 不处理：原有缩进原样保留
+  assert.equal(F('  第一段', { indent: 'none', blankLines: 'keep' }), '  第一段');
+});
+
+test('智能排版：空行「含缩进」（粘贴到吃空行的平台也不塌）', () => {
+  assert.equal(
+    F('第一段\n\n第二段', { blankLines: 'singleIndent' }),
+    '　　第一段\n　　\n　　第二段'
+  );
+  // 幂等：再整理一次不变
+  const once = formatText('第一段\n\n第二段', { blankLines: 'singleIndent' });
+  const twice = formatText(once.text, { blankLines: 'singleIndent' });
+  assert.equal(twice.text, once.text);
+  assert.equal(twice.changed, false);
+  // 缩进 0 字符时没有缩进可带，退化成普通空行
+  assert.equal(F('第一段\n\n第二段', { blankLines: 'singleIndent', indent: '0' }), '第一段\n\n第二段');
+  assert.equal(F('第一段\n\n第二段', { blankLines: 'singleIndent', indent: 'none' }), '第一段\n\n第二段');
 });

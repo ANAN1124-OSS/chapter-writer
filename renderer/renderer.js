@@ -94,6 +94,7 @@
     sidebarDragging: false,
     formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了）
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
+    settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -211,7 +212,36 @@
     document.title = `${state.dirty ? '* ' : ''}章节写作器${bookName}`;
   }
 
-  // 显示排版（字体/字号/行距/字距/正文宽度/护眼底色）只改 CSS 变量，绝不改正文
+  // 显示排版（字体/字号/行间距/字间距/边距/宽度/背景）只改 CSS 变量，绝不改正文
+  const CUSTOM_FONT_FAMILY = '"cw-custom-font"';
+  const loadedCustomFont = { path: '', name: '', ok: false };
+
+  // 自定义字体：主进程读文件 → 这里用 FontFace 注册（渲染层仍然没有文件系统权限）
+  async function loadCustomFont(fontPath, { silent = false } = {}) {
+    const wanted = String(fontPath || '');
+    if (!wanted) return false;
+    if (loadedCustomFont.path === wanted && loadedCustomFont.ok) return true;
+    try {
+      const res = await call(api.readFont, wanted);
+      const binary = atob(res.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      const face = new FontFace('cw-custom-font', bytes.buffer);
+      await face.load();
+      document.fonts.add(face);
+      loadedCustomFont.path = wanted;
+      loadedCustomFont.name = res.name;
+      loadedCustomFont.ok = true;
+      return true;
+    } catch (err) {
+      loadedCustomFont.path = wanted;
+      loadedCustomFont.name = '';
+      loadedCustomFont.ok = false;
+      if (!silent) toast(`字体加载失败：${err.message}`, 'error');
+      return false;
+    }
+  }
+
   function applyEditorStyle(override) {
     const fonts = {
       serif: '"SimSun", "Songti SC", "Source Han Serif SC", serif',
@@ -220,15 +250,22 @@
     };
     const cfg = override || state.config || {};
     const root = document.documentElement.style;
-    root.setProperty('--editor-font-family', fonts[cfg.editorFont] || fonts.serif);
+    const fontFamily =
+      cfg.editorFont === 'custom' && cfg.editorCustomFontPath
+        ? `${CUSTOM_FONT_FAMILY}, ${fonts.serif}`
+        : fonts[cfg.editorFont] || fonts.serif;
+    root.setProperty('--editor-font-family', fontFamily);
     root.setProperty('--editor-font-size', `${cfg.editorFontSize || 18}px`);
     root.setProperty('--editor-line-height', String(cfg.editorLineHeight || 1.95));
     const spacing = cfg.editorLetterSpacing == null ? 0.02 : Number(cfg.editorLetterSpacing);
     root.setProperty('--editor-letter-spacing', `${Number.isFinite(spacing) ? spacing : 0.02}em`);
     const pageWidth = Number(cfg.editorPageWidth) || 0;
     root.setProperty('--editor-max-width', pageWidth > 0 ? `${pageWidth}px` : 'none');
-    document.body.classList.toggle('theme-cream', cfg.editorPaper === 'cream');
-    document.body.classList.toggle('theme-green', cfg.editorPaper === 'green');
+    const paddingX = Number(cfg.editorPaddingX);
+    root.setProperty('--editor-padding-x', `${Number.isFinite(paddingX) && paddingX > 0 ? paddingX : 56}px`);
+    for (const theme of ['cream', 'green', 'night', 'kraft', 'grid']) {
+      document.body.classList.toggle(`theme-${theme}`, cfg.editorPaper === theme);
+    }
   }
 
   // ---------- 章节栏 / 写作区 可拖动分隔条 ----------
@@ -1093,9 +1130,9 @@
   }
 
   // ---------- 排版 ----------
-  // 「一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
+  // 「智能排版/一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
   const DEFAULT_FORMAT_OPTIONS = {
-    indent: true,
+    indent: '2',
     blankLines: 'single',
     trimTrailing: true,
     normalizePunct: true,
@@ -1103,26 +1140,30 @@
   };
 
   const DISPLAY_PRESETS = {
-    compact: { label: '紧凑', patch: { editorLineHeight: 1.6, editorLetterSpacing: 0, editorPageWidth: 0 } },
-    normal: { label: '标准', patch: { editorLineHeight: 1.95, editorLetterSpacing: 0.02, editorPageWidth: 0 } },
-    loose: { label: '宽松', patch: { editorLineHeight: 2.4, editorLetterSpacing: 0.05, editorPageWidth: 800 } }
+    compact: { label: '紧凑', patch: { editorLineHeight: 1.6, editorLetterSpacing: 0, editorPaddingX: 24, editorPageWidth: 0 } },
+    normal: { label: '标准', patch: { editorLineHeight: 1.95, editorLetterSpacing: 0.02, editorPaddingX: 56, editorPageWidth: 0 } },
+    loose: { label: '宽松', patch: { editorLineHeight: 2.4, editorLetterSpacing: 0.05, editorPaddingX: 80, editorPageWidth: 800 } }
   };
 
   const displaySettingsIds = [
-    'settings-font',
     'settings-size',
     'settings-line-height',
     'settings-letter-spacing',
+    'settings-padding-x',
     'settings-page-width',
     'settings-paper'
   ];
 
   function readDisplayForm() {
+    const draft = state.settingsFontDraft || { path: '', name: '' };
     return {
       editorFont: $('settings-font').value,
+      editorCustomFontPath: draft.path,
+      editorCustomFontName: draft.name,
       editorFontSize: Number($('settings-size').value),
       editorLineHeight: Number($('settings-line-height').value),
       editorLetterSpacing: Number($('settings-letter-spacing').value),
+      editorPaddingX: Number($('settings-padding-x').value),
       editorPageWidth: Number($('settings-page-width').value),
       editorPaper: $('settings-paper').value
     };
@@ -1130,7 +1171,7 @@
 
   function readFormatOptions() {
     return {
-      indent: $('fmt-indent').checked,
+      indent: $('fmt-indent').value,
       blankLines: $('fmt-blank').value,
       trimTrailing: $('fmt-trailing').checked,
       normalizePunct: $('fmt-punct').checked,
@@ -1140,11 +1181,15 @@
 
   function writeFormatOptions(options) {
     const opts = { ...DEFAULT_FORMAT_OPTIONS, ...(options && typeof options === 'object' ? options : {}) };
-    $('fmt-indent').checked = opts.indent !== false;
+    // 兼容旧配置里的布尔缩进
+    const indent = opts.indent === true ? '2' : opts.indent === false ? 'none' : String(opts.indent);
+    $('fmt-indent').value = ['none', '0', '2'].includes(indent) ? indent : '2';
     $('fmt-trailing').checked = opts.trimTrailing !== false;
     $('fmt-punct').checked = opts.normalizePunct !== false;
     $('fmt-cjkspace').checked = Boolean(opts.removeCjkSpaces);
-    $('fmt-blank').value = ['keep', 'single', 'none'].includes(opts.blankLines) ? opts.blankLines : 'single';
+    $('fmt-blank').value = ['keep', 'single', 'singleIndent', 'none'].includes(opts.blankLines)
+      ? opts.blankLines
+      : 'single';
   }
 
   function toggleFormatMenu() {
@@ -1368,11 +1413,20 @@
   function openSettings() {
     const cfg = state.config || {};
     state.settingsBackup = state.config ? { ...state.config } : null;
+    state.settingsFontDraft = {
+      path: cfg.editorCustomFontPath || '',
+      name: cfg.editorCustomFontName || ''
+    };
     $('settings-root').value = cfg.booksRoot || '';
     setSelectValue('settings-font', cfg.editorFont, 'serif');
+    if ($('settings-font').value === 'custom' && !state.settingsFontDraft.path) {
+      $('settings-font').value = 'serif';
+    }
+    $('settings-font-name').value = state.settingsFontDraft.name || state.settingsFontDraft.path || '';
     setSelectValue('settings-size', cfg.editorFontSize, 18);
     setSelectValue('settings-line-height', cfg.editorLineHeight, 1.95);
     setSelectValue('settings-letter-spacing', cfg.editorLetterSpacing, 0.02);
+    setSelectValue('settings-padding-x', cfg.editorPaddingX, 56);
     setSelectValue('settings-page-width', cfg.editorPageWidth, 0);
     setSelectValue('settings-paper', cfg.editorPaper, 'paper');
     $('settings-backdrop').classList.remove('hidden');
@@ -1415,6 +1469,42 @@
       } catch (err) {
         toast(`选择目录失败：${err.message}`, 'error');
       }
+    });
+
+    // 自定义字体：选择 → 主进程读文件 → FontFace 注册 → 实时预览（点「保存设置」才记住）
+    $('btn-pick-font').addEventListener('click', async () => {
+      try {
+        const picked = await call(api.pickFont);
+        if (!picked || picked.canceled || !picked.path) return;
+        const ok = await loadCustomFont(picked.path);
+        if (!ok) return;
+        state.settingsFontDraft = { path: picked.path, name: picked.name };
+        $('settings-font-name').value = picked.name;
+        $('settings-font').value = 'custom';
+        previewSettings();
+        toast(`已选字体：${picked.name}（点「保存设置」后长期生效）`);
+      } catch (err) {
+        toast(`选择字体失败：${err.message}`, 'error');
+      }
+    });
+    $('btn-reset-font').addEventListener('click', () => {
+      state.settingsFontDraft = { path: '', name: '' };
+      $('settings-font-name').value = '';
+      $('settings-font').value = 'serif';
+      previewSettings();
+      toast('已恢复默认字体（宋体）');
+    });
+    $('settings-font').addEventListener('change', async () => {
+      const draft = state.settingsFontDraft || {};
+      if ($('settings-font').value === 'custom') {
+        if (!draft.path) {
+          toast('先点「选择…」挑一个 .ttf / .otf 字体文件', 'warn');
+          $('settings-font').value = 'serif';
+        } else {
+          await loadCustomFont(draft.path, { silent: true });
+        }
+      }
+      previewSettings();
     });
 
     $('btn-import').addEventListener('click', onImportClick);
@@ -1685,6 +1775,20 @@
       undoFormat: () => undoFormat(),
       formatUndoDepth: () => state.formatUndo.length,
       applyDisplayPreset: (name) => setDisplayPreset(name),
+      loadCustomFont: (fontPath) => loadCustomFont(fontPath, { silent: true }),
+      customFontLoaded: () => ({ ...loadedCustomFont }),
+      // 测试用：等价于「设置里选好字体文件 + 保存设置」的落库路径
+      async setCustomFont(fontPath, name) {
+        const ok = await loadCustomFont(fontPath, { silent: true });
+        if (!ok) return false;
+        state.config = await call(api.setConfig, {
+          editorFont: 'custom',
+          editorCustomFontPath: fontPath,
+          editorCustomFontName: name || ''
+        });
+        applyEditorStyle();
+        return true;
+      },
       displayStyle: () => {
         const styles = getComputedStyle(editorEl);
         return {
@@ -1692,6 +1796,11 @@
           letterSpacing: styles.letterSpacing,
           maxWidth: styles.maxWidth,
           fontSize: styles.fontSize,
+          fontFamily: styles.fontFamily,
+          paddingLeft: styles.paddingLeft,
+          paddingRight: styles.paddingRight,
+          backgroundImage: styles.backgroundImage,
+          backgroundColor: styles.backgroundColor,
           paperClass: document.body.className,
           paperBg: getComputedStyle(document.body).backgroundColor
         };
@@ -1720,6 +1829,10 @@
     }
     applyEditorStyle();
     applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);
+    // 上次用的自定义字体：启动时异步加载（失败就退回内置字体，不影响写作）
+    if (state.config && state.config.editorFont === 'custom' && state.config.editorCustomFontPath) {
+      loadCustomFont(state.config.editorCustomFontPath, { silent: true }).then(() => applyEditorStyle());
+    }
     showView('shelf');
     await refreshShelf();
     if (state.testMode) {

@@ -61,9 +61,10 @@ test('显示排版配置：默认值 + 持久化', async () => {
   assert.equal(cfg.editorLineHeight, 1.95);
   assert.equal(cfg.editorLetterSpacing, 0.02);
   assert.equal(cfg.editorPageWidth, 0, '默认通栏');
+  assert.equal(cfg.editorPaddingX, 56, '默认左右边距');
   assert.equal(cfg.editorPaper, 'paper');
   assert.deepEqual(cfg.formatOptions, {
-    indent: true,
+    indent: '2',
     blankLines: 'single',
     trimTrailing: true,
     normalizePunct: true,
@@ -74,6 +75,7 @@ test('显示排版配置：默认值 + 持久化', async () => {
     editorLineHeight: 2.2,
     editorLetterSpacing: 0.05,
     editorPageWidth: 800,
+    editorPaddingX: 24,
     editorPaper: 'cream',
     formatOptions: { indent: true, blankLines: 'none', trimTrailing: true, normalizePunct: false, removeCjkSpaces: true }
   });
@@ -81,6 +83,7 @@ test('显示排版配置：默认值 + 持久化', async () => {
   assert.equal(cfg2.editorLineHeight, 2.2);
   assert.equal(cfg2.editorLetterSpacing, 0.05);
   assert.equal(cfg2.editorPageWidth, 800);
+  assert.equal(cfg2.editorPaddingX, 24);
   assert.equal(cfg2.editorPaper, 'cream');
   assert.equal(cfg2.formatOptions.blankLines, 'none');
   assert.equal(cfg2.formatOptions.normalizePunct, false);
@@ -92,16 +95,34 @@ test('显示排版配置：脏数据被夹到合理范围', () => {
     editorLineHeight: 99,
     editorLetterSpacing: -1,
     editorPageWidth: 'x',
+    editorPaddingX: 9999,
     editorPaper: 'pink',
     formatOptions: { blankLines: 'weird' }
   });
   assert.equal(cleaned.editorLineHeight, 3);
   assert.equal(cleaned.editorLetterSpacing, 0);
   assert.equal(cleaned.editorPageWidth, 0);
+  assert.equal(cleaned.editorPaddingX, 200);
   assert.equal(cleaned.editorPaper, 'paper');
   assert.equal(cleaned.formatOptions.blankLines, 'single');
-  assert.equal(cleaned.formatOptions.indent, true);
+  assert.equal(cleaned.formatOptions.indent, '2');
 
   assert.equal(sanitize({ editorPageWidth: 99999 }).editorPageWidth, 1600);
   assert.equal(sanitize({ editorPageWidth: 900 }).editorPageWidth, 900);
+  assert.equal(sanitize({ editorPaddingX: 8 }).editorPaddingX, 16);
+  assert.equal(sanitize({ editorPaper: 'night' }).editorPaper, 'night');
+  assert.equal(sanitize({ editorPaper: 'kraft' }).editorPaper, 'kraft');
+});
+
+test('自定义字体：没有字体文件时回落内置字体', () => {
+  assert.equal(sanitize({ editorFont: 'custom' }).editorFont, 'serif', '缺路径不能停在 custom');
+  const custom = sanitize({
+    editorFont: 'custom',
+    editorCustomFontPath: 'D:\\fonts\\我的字体.ttf',
+    editorCustomFontName: '我的字体.ttf'
+  });
+  assert.equal(custom.editorFont, 'custom');
+  assert.equal(custom.editorCustomFontPath, 'D:\\fonts\\我的字体.ttf');
+  assert.equal(custom.editorCustomFontName, '我的字体.ttf');
+  assert.equal(sanitize({ editorCustomFontPath: 123 }).editorCustomFontPath, '');
 });

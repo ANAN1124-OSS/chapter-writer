@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('api', {
 
   getConfig: () => invoke('config:get'),
   setConfig: (patch) => invoke('config:set', patch),
+  pickFont: () => invoke('font:pick'),
+  readFont: (fontPath) => invoke('font:read', fontPath),
   pickFolder: () => invoke('shell:pick-folder'),
   openBookFolder: (bookPath) => invoke('shell:open-book-folder', bookPath),
 
