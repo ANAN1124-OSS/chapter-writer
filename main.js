@@ -42,6 +42,7 @@ const statsLib = require('./core/stats');
 const epubLib = require('./core/epub');
 const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
+const ttsLib = require('./core/tts');
 
 let win = null;
 let configStore = null;
@@ -402,6 +403,13 @@ function registerIpc() {
     if (!list.ok) return { ok: false, code: list.code, message: list.message, wordList };
     const result = sensitiveLib.scanText(text, list.words, options);
     return { ok: true, ...result, wordList };
+  });
+
+  // 朗读（提案 5.3）：只把正文切成「一段一段」，发声由渲染层交给系统语音（speechSynthesis）。
+  // 主进程不读盘、不写盘；chunks 的 start/end 与编辑区 value 一致，供点击 / 跟随高亮定位。
+  handle('text:tts-chunks', async (text, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    return ttsLib.buildChunks(text, options);
   });
 
   // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
@@ -1245,6 +1253,24 @@ async function runAutomation() {
         await sleep(120);
         await win.webContents.executeJavaScript(`window.__cwTest.sensitiveRun();`, true);
         await sleep(900);
+      } else if (screenshotDialog === 'tts') {
+        // 开发截图用：假语音引擎 + 朗读小条（真的出声在开发机上也会吵，这里只展示界面状态）
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.ttsInstallFakeSpeech(); document.getElementById('btn-tts').click();`,
+          true
+        );
+        try {
+          await waitForRenderer(
+            'window.__cwTest.ttsBarOpen() && window.__cwTest.ttsChunks().length > 0',
+            8000
+          );
+          await win.webContents.executeJavaScript('window.__cwTest.ttsFakeFinish();', true);
+          await sleep(320);
+          await win.webContents.executeJavaScript('window.__cwTest.ttsPlay();', true);
+        } catch {
+          console.log('[screenshot] 朗读条没能准备好');
+        }
+        await sleep(400);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',

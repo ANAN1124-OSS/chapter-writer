@@ -70,6 +70,7 @@
           <div class="editor-actions">
             <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
             <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
+            <button id="btn-tts" class="btn ghost" type="button" title="朗读本章：用 Windows 自带语音读正文，只读不改、不写盘（Esc 停止）">朗读</button>
             <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
             <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
             <div class="dropdown">
@@ -120,6 +121,36 @@
   </div>
 
   <div id="toast-area"></div>
+
+  <!-- ============ 朗读本章（悬浮小条：只读正文、不改字、不写盘） ============ -->
+  <div id="tts-bar" class="tts-bar hidden" role="region" aria-label="朗读">
+    <div class="tts-top">
+      <button id="btn-tts-play" class="btn primary tiny" type="button" title="播放 / 暂停">▶ 播放</button>
+      <button id="btn-tts-stop" class="btn ghost tiny" type="button" title="停止（停在当前段落，再点播放从这里继续）">■ 停止</button>
+      <button id="btn-tts-prev" class="btn ghost tiny" type="button" title="上一段">‹ 上一段</button>
+      <button id="btn-tts-next" class="btn ghost tiny" type="button" title="下一段">下一段 ›</button>
+      <span class="tts-sep"></span>
+      <label class="tts-field">语速
+        <select id="tts-rate" class="text-input" title="语速越小读得越慢">
+          <option value="0.8">0.8×</option>
+          <option value="1" selected>1.0×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2.0×</option>
+        </select>
+      </label>
+      <label class="tts-field">语音
+        <select id="tts-voice" class="text-input"
+                title="系统里的语音（Windows 设置 → 时间和语言 → 语音 可安装更多）"></select>
+      </label>
+      <label class="check-row inline" title="把编辑区选区移到正在读的段落（只改选区，不改文字）">
+        <input id="tts-follow" type="checkbox" /> 跟随高亮
+      </label>
+      <button id="btn-tts-close" class="btn ghost tiny tts-close" type="button" title="收起朗读条（Esc）">×</button>
+    </div>
+    <div class="tts-status" id="tts-status">未开始</div>
+    <div class="tts-preview" id="tts-preview"></div>
+  </div>
 
   <!-- ============ 查找替换 ============ -->
   <div id="find-backdrop" class="backdrop hidden">

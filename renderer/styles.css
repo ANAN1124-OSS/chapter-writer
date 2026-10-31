@@ -1516,3 +1516,62 @@ body.chapter-dragging * { user-select: none; }
 .context-menu button:hover { background: var(--paper-deep); }
 .context-menu-sep { height: 1px; margin: 4px 6px; background: var(--line-strong); }
 .danger-text { color: var(--danger) !important; }
+
+/* ---------- 朗读（悬浮小条：只读正文、不改字、不写盘） ---------- */
+.tts-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(900px, calc(100vw - 44px));
+  padding: 10px 12px;
+  background: var(--paper-soft);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(60, 48, 30, .22);
+}
+.tts-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.tts-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0 2px;
+  background: var(--line);
+}
+.tts-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.tts-field .text-input {
+  width: auto;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.tts-field #tts-voice { max-width: 220px; }
+.tts-close { margin-left: auto; font-size: 14px; line-height: 1; }
+.tts-status {
+  min-height: 17px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.tts-status.error { color: var(--danger); }
+.tts-status .muted { color: var(--ink-faint); }
+.tts-preview {
+  margin-top: 2px;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tts-preview:empty { display: none; }

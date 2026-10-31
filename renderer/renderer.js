@@ -142,6 +142,18 @@
     sensitiveWordList: null, // 当前词表状态：{ ok, path, name, count, code, message, stats }
     sensitiveWordsDraft: '', // 设置里刚选的词表路径（点「保存设置」才落配置）
     sensitiveWordsInfo: null, // 设置弹层里显示的词表状态（读取当前草稿对应的词表）
+    tts: {
+      open: false, // 朗读小条是否显示
+      status: 'idle', // idle | playing | paused | done | error
+      chunks: [], // 主进程切好的段落：[{ start, end, text, paragraph, line }]
+      index: 0, // 当前朗读 / 选中的段落下标（0 基）
+      rate: 1, // 语速（0.5–2）
+      voiceURI: '', // 选中的系统语音（'' = 系统默认）
+      follow: false, // 跟随高亮：把编辑区选区移到正在读的段落（只改选区，不改文字）
+      error: '', // 朗读失败 / 没有正文等错误信息
+      loading: false, // 正在准备正文（切分中）
+      requestId: 0 // 丢弃过期的异步切分结果
+    },
     fragments: [], // 灵感箱列表（_碎片 顶层的 txt，最新在前）
     fragmentSelected: null, // 插入面板里当前选中的碎片 { name, text, chars }
     fragmentBusy: false, // 正在保存碎片（防重复写）
@@ -256,6 +268,7 @@
 
   // ---------- 视图切换 ----------
   function showView(view) {
+    if (view !== 'editor') closeTtsBar();
     state.view = view;
     $('shelf-view').classList.toggle('hidden', view !== 'shelf');
     $('editor-view').classList.toggle('hidden', view !== 'editor');
@@ -1272,6 +1285,11 @@
 
   // ---------- 编辑区事件 ----------
   function onEditorInput() {
+    // 朗读读的是「打开那一刻」的正文：改了字就停，别让进度 / 跟随高亮对不上新正文
+    if (state.tts.open) {
+      closeTtsBar();
+      toast('正文已修改，朗读已停止');
+    }
     state.lastEditAt = Date.now();
     const dirty = editorEl.value !== state.baseText;
     if (dirty !== state.dirty) state.dirty = dirty;
@@ -1295,6 +1313,8 @@
       state.saveError = null;
       editorEl.value = data.text;
       editorEl.scrollTop = 0;
+      // 切章后正在念的已经不是眼前这一章了，立刻停
+      stopTtsForChapterChange();
       renderChapterList();
       renderEditorHeader();
       updateStatus();
@@ -3968,6 +3988,418 @@
     }
   }
 
+  // ---------- 朗读（提案 5.3） ----------
+  // 用 Electron 自带的 speechSynthesis（Windows 上走本地 SAPI 语音）朗读当前章正文。
+  // 原则：只说不动 —— 不修改编辑区、不写盘、不切章、不改 dirty；改字 / 切章 / 收起朗读条立刻停止。
+  // 正文怎么切成「一段一段」由主进程 core/tts.js 算（单测覆盖），这里只管按顺序念。
+  const realSpeechEngine = {
+    available: () =>
+      typeof window.speechSynthesis !== 'undefined' &&
+      typeof window.SpeechSynthesisUtterance !== 'undefined',
+    voices: () => {
+      try {
+        return window.speechSynthesis.getVoices() || [];
+      } catch {
+        return [];
+      }
+    },
+    speak({ text, rate, voiceURI }, handlers) {
+      const utter = new window.SpeechSynthesisUtterance(text);
+      utter.lang = 'zh-CN';
+      utter.rate = ttsClampRate(rate);
+      const voice = voiceURI
+        ? Array.from(realSpeechEngine.voices()).find((item) => (item.voiceURI || item.name) === voiceURI)
+        : null;
+      if (voice) {
+        utter.voice = voice;
+        utter.lang = voice.lang || utter.lang;
+      }
+      utter.onstart = () => handlers.start && handlers.start();
+      utter.onend = () => handlers.end && handlers.end();
+      utter.onerror = (event) => handlers.error && handlers.error(event);
+      window.speechSynthesis.speak(utter);
+      return utter;
+    },
+    pause() {
+      try {
+        window.speechSynthesis.pause();
+      } catch { /* 没有语音就当已暂停 */ }
+    },
+    resume() {
+      try {
+        window.speechSynthesis.resume();
+      } catch { /* 没有语音就当已继续 */ }
+    },
+    cancel() {
+      try {
+        window.speechSynthesis.cancel();
+      } catch { /* 没有语音就当已停止 */ }
+    }
+  };
+
+  // 测试模式可以把引擎换成假的：E2E 不依赖机器上装没装语音，也绝不会真的出声。
+  // 正常使用（没有 ?test=1 的钩子调用）永远是 realSpeechEngine。
+  let fakeSpeechEngine = null;
+  let fakeSpeechState = { spoken: [], last: null, pending: null, speaking: false, paused: false };
+  const speechEngine = () => fakeSpeechEngine || realSpeechEngine;
+  let ttsToken = 0; // 每次发声 +1：cancel 之后迟到的回调一律忽略
+  let ttsWatchdog = null;
+
+  function ttsClampRate(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 1;
+    return Math.min(2, Math.max(0.5, n));
+  }
+
+  function currentTtsChunk() {
+    return state.tts.chunks[state.tts.index] || null;
+  }
+
+  function ttsSummaryText() {
+    const tts = state.tts;
+    const total = tts.chunks.length;
+    if (tts.error) return { text: tts.error, error: true };
+    if (tts.loading) return { text: '正在准备正文…', error: false };
+    if (!total) return { text: '本章没有可朗读的正文', error: true };
+    const position = `第 ${tts.index + 1}/${total} 段`;
+    if (tts.status === 'playing') {
+      const percent = Math.round(((tts.index + 1) / total) * 100);
+      return { text: `正在朗读 ${position} · ${percent}%`, error: false };
+    }
+    if (tts.status === 'paused') return { text: `已暂停 · ${position}`, error: false };
+    if (tts.status === 'done') return { text: `已读完（共 ${total} 段）`, error: false };
+    return { text: `已停止 · ${position}`, error: false };
+  }
+
+  function renderTtsBar() {
+    const bar = $('tts-bar');
+    if (!bar) return;
+    bar.classList.toggle('hidden', !state.tts.open);
+    if (!state.tts.open) return;
+    const hasChunks = state.tts.chunks.length > 0;
+    const playing = state.tts.status === 'playing';
+    $('btn-tts-play').textContent = playing ? '⏸ 暂停' : '▶ 播放';
+    $('btn-tts-play').disabled = state.tts.loading || !hasChunks;
+    $('btn-tts-stop').disabled = !hasChunks;
+    $('btn-tts-prev').disabled = !hasChunks || state.tts.index <= 0;
+    $('btn-tts-next').disabled = !hasChunks || state.tts.index >= state.tts.chunks.length - 1;
+    $('tts-rate').disabled = !hasChunks;
+    $('tts-rate').value = String(state.tts.rate);
+    $('tts-follow').checked = state.tts.follow;
+    const summary = ttsSummaryText();
+    const statusEl = $('tts-status');
+    statusEl.textContent = summary.text;
+    statusEl.classList.toggle('error', Boolean(summary.error));
+    const chunk = currentTtsChunk();
+    const preview = $('tts-preview');
+    preview.textContent = chunk ? chunk.text.slice(0, 60) + (chunk.text.length > 60 ? '…' : '') : '';
+    preview.title = chunk ? chunk.text : '';
+  }
+
+  function renderTtsVoices() {
+    const select = $('tts-voice');
+    if (!select) return;
+    const voices = Array.from(speechEngine().voices() || []);
+    const wanted = state.tts.voiceURI;
+    select.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = voices.length ? '系统默认' : '（系统没有报告语音）';
+    select.appendChild(def);
+    for (const voice of voices) {
+      const option = document.createElement('option');
+      option.value = voice.voiceURI || voice.name || '';
+      option.textContent = `${voice.name || '语音'}${voice.lang ? `（${voice.lang}）` : ''}`;
+      select.appendChild(option);
+    }
+    if (wanted && voices.some((voice) => (voice.voiceURI || voice.name) === wanted)) {
+      select.value = wanted;
+    } else {
+      select.value = '';
+      state.tts.voiceURI = '';
+    }
+    select.disabled = !voices.length;
+  }
+
+  // 跟随高亮：只改编辑区选区，不 focus、不改文字；编辑区有焦点时才看得见高亮
+  function selectTtsChunk(index) {
+    const chunk = state.tts.chunks[index];
+    if (!chunk) return false;
+    editorEl.setSelectionRange(chunk.start, chunk.end);
+    scrollCaretIntoView(chunk.start);
+    return true;
+  }
+
+  function clearTtsWatchdog() {
+    if (ttsWatchdog) {
+      clearTimeout(ttsWatchdog);
+      ttsWatchdog = null;
+    }
+  }
+
+  function stopTtsEngine() {
+    clearTtsWatchdog();
+    ttsToken += 1;
+    try {
+      speechEngine().cancel();
+    } catch { /* 停不下来也不影响界面状态 */ }
+  }
+
+  function stopTts({ error = '', keepOpen = true } = {}) {
+    stopTtsEngine();
+    state.tts.status = error ? 'error' : 'idle';
+    state.tts.error = error;
+    if (!keepOpen) state.tts.open = false;
+    renderTtsBar();
+  }
+
+  function closeTtsBar() {
+    if (!state.tts.open && !state.tts.chunks.length) return;
+    stopTts({ keepOpen: false });
+  }
+
+  function failTts(message) {
+    stopTts({ error: message });
+    toast(`朗读失败：${message}`, 'error');
+  }
+
+  async function openTtsBar({ autoplay = true } = {}) {
+    if (!state.bookPath || !state.chapters.length) {
+      toast('先打开一本书再朗读', 'warn');
+      return { ok: false, message: '没有打开的书' };
+    }
+    if (!speechEngine().available()) {
+      toast('这个运行环境不支持语音朗读（没有系统语音）', 'warn');
+      return { ok: false, message: '没有系统语音' };
+    }
+    // 「从光标处开始念」：刚打开章节时光标停在全文末尾（textarea 的默认行为），
+    // 这时按「从头念」处理，免得点开朗读直接从最后一段开始；用户自己把光标放到中间 / 末尾就按光标算。
+    const selectionStart = editorEl.selectionStart || 0;
+    const collapsed = selectionStart === (editorEl.selectionEnd || 0);
+    const atVeryEnd = collapsed && selectionStart >= editorEl.value.length;
+    const caret = atVeryEnd ? 0 : selectionStart;
+    const requestId = state.tts.requestId + 1;
+    state.tts.requestId = requestId;
+    stopTtsEngine();
+    state.tts.open = true;
+    state.tts.loading = true;
+    state.tts.status = 'idle';
+    state.tts.error = '';
+    state.tts.chunks = [];
+    state.tts.index = 0;
+    renderTtsBar();
+    renderTtsVoices();
+    let result;
+    try {
+      result = await call(api.ttsChunks, editorEl.value, { caret });
+    } catch (err) {
+      if (requestId !== state.tts.requestId) return { ok: false, stale: true };
+      state.tts.loading = false;
+      state.tts.error = `切分正文失败：${err.message}`;
+      renderTtsBar();
+      toast(`切分正文失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+    // 等主进程期间可能已经切章 / 收起：结果作废
+    if (requestId !== state.tts.requestId || !state.tts.open) return { ok: false, stale: true };
+    state.tts.loading = false;
+    state.tts.chunks = result.chunks || [];
+    state.tts.index = result.startIndex >= 0 ? result.startIndex : 0;
+    if (!state.tts.chunks.length) {
+      state.tts.status = 'error';
+      state.tts.error = '本章没有可朗读的正文';
+      renderTtsBar();
+      toast('本章没有可朗读的正文', 'warn');
+      return { ok: false, message: '没有正文' };
+    }
+    renderTtsBar();
+    if (autoplay) speakTtsChunk();
+    return { ok: true, chunks: state.tts.chunks.length, index: state.tts.index };
+  }
+
+  function speakTtsChunk() {
+    const chunk = currentTtsChunk();
+    if (!chunk) return;
+    stopTtsEngine(); // 先取消上一段，并让它的回调失效
+    state.tts.status = 'playing';
+    state.tts.error = '';
+    renderTtsBar();
+    if (state.tts.follow) selectTtsChunk(state.tts.index);
+    const token = ttsToken;
+    try {
+      speechEngine().speak(
+        { text: chunk.text, rate: state.tts.rate, voiceURI: state.tts.voiceURI },
+        {
+          start: () => {
+            if (token !== ttsToken) return;
+            clearTtsWatchdog();
+          },
+          end: () => {
+            if (token !== ttsToken) return;
+            clearTtsWatchdog();
+            advanceTts(token);
+          },
+          error: (event) => {
+            if (token !== ttsToken) return;
+            clearTtsWatchdog();
+            const code = event && event.error ? String(event.error) : '';
+            if (code === 'canceled' || code === 'interrupted') return; // 自己 cancel 的不算失败
+            failTts(`系统语音出错（${code || '未知原因'}）`);
+          }
+        }
+      );
+    } catch (err) {
+      failTts(err.message || '系统语音不可用');
+      return;
+    }
+    if (!fakeSpeechEngine) {
+      // 真实语音没有反应（没装语音 / 音频设备不可用）时，别一直显示「朗读中」
+      ttsWatchdog = setTimeout(() => {
+        if (token !== ttsToken || state.tts.status !== 'playing') return;
+        const synth = window.speechSynthesis;
+        if (synth && (synth.speaking || synth.pending || synth.paused)) return;
+        failTts('系统语音没有响应（可能没有安装语音或音频设备不可用）');
+      }, 12000);
+    }
+  }
+
+  function advanceTts(token) {
+    if (token !== ttsToken) return;
+    if (state.tts.status !== 'playing') return;
+    const next = state.tts.index + 1;
+    if (next < state.tts.chunks.length) {
+      state.tts.index = next;
+      speakTtsChunk();
+      return;
+    }
+    ttsToken += 1;
+    state.tts.status = 'done';
+    renderTtsBar();
+  }
+
+  function toggleTtsPlay() {
+    if (!state.tts.open) return { ok: false };
+    const status = state.tts.status;
+    if (status === 'playing') {
+      try {
+        speechEngine().pause();
+      } catch { /* 当已暂停 */ }
+      state.tts.status = 'paused';
+      renderTtsBar();
+      return { ok: true, action: 'pause' };
+    }
+    if (status === 'paused') {
+      try {
+        speechEngine().resume();
+      } catch { /* 当已继续 */ }
+      state.tts.status = 'playing';
+      renderTtsBar();
+      return { ok: true, action: 'resume' };
+    }
+    if (!state.tts.chunks.length) return { ok: false };
+    if (status === 'done') state.tts.index = 0;
+    speakTtsChunk();
+    return { ok: true, action: 'play' };
+  }
+
+  function ttsStep(delta) {
+    if (!state.tts.open || !state.tts.chunks.length) return { ok: false };
+    const next = Math.min(Math.max(0, state.tts.index + delta), state.tts.chunks.length - 1);
+    const active = state.tts.status === 'playing' || state.tts.status === 'paused';
+    state.tts.index = next;
+    if (active) {
+      speakTtsChunk();
+    } else {
+      state.tts.status = 'idle';
+      state.tts.error = '';
+      renderTtsBar();
+      if (state.tts.follow) selectTtsChunk(next);
+    }
+    return { ok: true, index: next };
+  }
+
+  // 语速 / 语音只对「之后发声」的 utterance 生效：正在读的这一段重念一遍
+  function setTtsRate(rate) {
+    state.tts.rate = ttsClampRate(rate);
+    renderTtsBar();
+    if (state.tts.status === 'playing' || state.tts.status === 'paused') speakTtsChunk();
+    return state.tts.rate;
+  }
+
+  function setTtsVoice(voiceURI) {
+    state.tts.voiceURI = String(voiceURI || '');
+    renderTtsBar();
+    if (state.tts.status === 'playing' || state.tts.status === 'paused') speakTtsChunk();
+    return state.tts.voiceURI;
+  }
+
+  function setTtsFollow(follow) {
+    state.tts.follow = Boolean(follow);
+    $('tts-follow').checked = state.tts.follow;
+    if (state.tts.follow) selectTtsChunk(state.tts.index);
+    return state.tts.follow;
+  }
+
+  // 切章 / 回书架：正在读的内容已经不是眼前这一章了，立刻停
+  function stopTtsForChapterChange() {
+    if (!state.tts.open && !state.tts.chunks.length) return;
+    closeTtsBar();
+    toast('已切换章节，朗读已停止');
+  }
+
+  // 测试专用：装一个假语音引擎（只在 ?test=1 的钩子里调用），E2E 用它验证播放状态机。
+  function installFakeSpeech() {
+    fakeSpeechState = { spoken: [], last: null, pending: null, speaking: false, paused: false };
+    fakeSpeechEngine = {
+      available: () => true,
+      voices: () => [
+        { name: '测试语音 A', lang: 'zh-CN', voiceURI: 'fake-voice-a' },
+        { name: '测试语音 B', lang: 'zh-CN', voiceURI: 'fake-voice-b' }
+      ],
+      speak(request, handlers) {
+        fakeSpeechState.spoken.push({ ...request });
+        fakeSpeechState.last = { ...request };
+        fakeSpeechState.pending = handlers;
+        fakeSpeechState.speaking = true;
+        setTimeout(() => {
+          if (fakeSpeechState.pending === handlers && handlers.start) handlers.start();
+        }, 0);
+        return true;
+      },
+      pause() {
+        fakeSpeechState.paused = true;
+      },
+      resume() {
+        fakeSpeechState.paused = false;
+      },
+      cancel() {
+        fakeSpeechState.pending = null;
+        fakeSpeechState.speaking = false;
+      }
+    };
+    if (state.tts.open) renderTtsVoices();
+    return true;
+  }
+
+  // 测试专用：让假引擎报「这一段念完了」/「出错」
+  function fakeFinishSpeech() {
+    const handlers = fakeSpeechState.pending;
+    fakeSpeechState.pending = null;
+    fakeSpeechState.speaking = false;
+    if (!handlers || !handlers.end) return false;
+    handlers.end();
+    return true;
+  }
+
+  function fakeErrorSpeech(code) {
+    const handlers = fakeSpeechState.pending;
+    fakeSpeechState.pending = null;
+    fakeSpeechState.speaking = false;
+    if (!handlers || !handlers.error) return false;
+    handlers.error({ error: String(code || 'synthesis-failed') });
+    return true;
+  }
+
   // ---------- 排版 ----------
   // 「智能排版/一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
   const DEFAULT_FORMAT_OPTIONS = {
@@ -4778,6 +5210,27 @@
     $('btn-proofread').addEventListener('click', openProofreadPanel);
     $('btn-proofread-run').addEventListener('click', runProofread);
     $('btn-proofread-close').addEventListener('click', closeProofreadPanel);
+    // 朗读本章（只读正文；悬浮小条：播放 / 暂停 / 停止 / 上一段 / 下一段 / 语速 / 语音 / 跟随高亮）
+    $('btn-tts').addEventListener('click', () => {
+      if (state.tts.open) closeTtsBar();
+      else openTtsBar();
+    });
+    $('btn-tts-play').addEventListener('click', () => toggleTtsPlay());
+    $('btn-tts-stop').addEventListener('click', () => {
+      if (state.tts.open && state.tts.chunks.length) stopTts();
+    });
+    $('btn-tts-prev').addEventListener('click', () => ttsStep(-1));
+    $('btn-tts-next').addEventListener('click', () => ttsStep(1));
+    $('btn-tts-close').addEventListener('click', closeTtsBar);
+    $('tts-rate').addEventListener('change', () => setTtsRate($('tts-rate').value));
+    $('tts-voice').addEventListener('change', () => setTtsVoice($('tts-voice').value));
+    $('tts-follow').addEventListener('change', () => setTtsFollow($('tts-follow').checked));
+    // 系统语音列表是异步加载的：加载完刷新一下下拉框（只在朗读条开着的时候）
+    if (typeof window.speechSynthesis !== 'undefined' && window.speechSynthesis.addEventListener) {
+      window.speechSynthesis.addEventListener('voiceschanged', () => {
+        if (state.tts.open) renderTtsVoices();
+      });
+    }
     $('proofread-scope').addEventListener('change', () => {
       state.proofreadScope = proofreadScope();
       // 换了范围就先收起旧结果，免得摘要写着「整本」、列表还是上一章的内容
@@ -5053,6 +5506,12 @@
       if (!$('sensitive-backdrop').classList.contains('hidden') && event.key === 'Escape') {
         event.preventDefault();
         closeSensitivePanel();
+        return;
+      }
+      // 朗读小条：Esc 停止并收起（它不是弹层，放在所有弹层之后，不抢弹层的 Esc）
+      if (state.tts.open && event.key === 'Escape') {
+        event.preventDefault();
+        closeTtsBar();
         return;
       }
       // 复制本章（平台格式）：Ctrl+Shift+C；不抢 Ctrl+C 的普通复制
@@ -5521,6 +5980,63 @@
       sensitiveSettingsPath: () => $('settings-sensitive-path').value,
       sensitiveSettingsStatus: () => $('settings-sensitive-status').textContent,
       sensitiveSettingsVisible: () => !$('settings-sensitive-field').classList.contains('hidden'),
+      // 朗读（提案 5.3；只读正文。E2E 换假语音引擎，不依赖系统装没装语音，也不会真的出声）
+      ttsInstallFakeSpeech: () => installFakeSpeech(),
+      ttsFakeFinish: () => fakeFinishSpeech(),
+      ttsFakeError: (code) => fakeErrorSpeech(code),
+      ttsFakeState: () => ({
+        spoken: fakeSpeechState.spoken.map((item) => ({ ...item })),
+        last: fakeSpeechState.last ? { ...fakeSpeechState.last } : null,
+        paused: fakeSpeechState.paused,
+        speaking: fakeSpeechState.speaking,
+        hasPending: Boolean(fakeSpeechState.pending)
+      }),
+      ttsSupported: () => speechEngine().available(),
+      async ttsOpen(options) {
+        return openTtsBar({ autoplay: !options || options.autoplay !== false });
+      },
+      ttsClose: () => closeTtsBar(),
+      ttsBarOpen: () => !$('tts-bar').classList.contains('hidden'),
+      ttsStatus: () => state.tts.status,
+      ttsStatusText: () => $('tts-status').textContent,
+      ttsStatusError: () => $('tts-status').classList.contains('error'),
+      ttsPreviewText: () => $('tts-preview').textContent,
+      ttsPreviewTitle: () => $('tts-preview').title,
+      ttsChunks: () =>
+        state.tts.chunks.map((chunk) => ({
+          start: chunk.start,
+          end: chunk.end,
+          text: chunk.text,
+          paragraph: chunk.paragraph,
+          line: chunk.line
+        })),
+      ttsIndex: () => state.tts.index,
+      ttsRate: () => state.tts.rate,
+      ttsVoice: () => state.tts.voiceURI,
+      ttsFollowState: () => state.tts.follow,
+      ttsPlayLabel: () => $('btn-tts-play').textContent,
+      ttsDisabled: (id) => Boolean($(id).disabled),
+      ttsVoiceOptions: () => Array.from($('tts-voice').options).map((option) => option.textContent),
+      ttsVoiceValue: () => $('tts-voice').value,
+      ttsPlay: () => toggleTtsPlay(),
+      ttsStop: () => {
+        stopTts();
+        return true;
+      },
+      ttsPrev: () => ttsStep(-1),
+      ttsNext: () => ttsStep(1),
+      ttsSetRate: (rate) => setTtsRate(rate),
+      ttsSetVoice: (voiceURI) => {
+        $('tts-voice').value = String(voiceURI == null ? '' : voiceURI);
+        return setTtsVoice($('tts-voice').value);
+      },
+      ttsSetFollow: (follow) => setTtsFollow(follow),
+      ttsSetCaret(position) {
+        const pos = Math.max(0, Math.min(Number(position) || 0, editorEl.value.length));
+        editorEl.focus();
+        editorEl.setSelectionRange(pos, pos);
+        return editorEl.selectionStart;
+      },
       selection: () => ({ start: editorEl.selectionStart || 0, end: editorEl.selectionEnd || 0 }),
       selectionText: () =>
         editorEl.value.slice(editorEl.selectionStart || 0, editorEl.selectionEnd || 0),

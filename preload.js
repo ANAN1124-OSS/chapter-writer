@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('api', {
   sensitiveCheckText: (text, options) => invoke('text:sensitive-check', text, options),
   sensitiveCheckBook: (bookPath, options, override) =>
     invoke('book:sensitive-check', bookPath, options, override),
+  // 朗读（提案 5.3）：只切分正文，发声在渲染层用系统语音；不读盘、不写盘
+  ttsChunks: (text, options) => invoke('text:tts-chunks', text, options),
   // Ctrl+G 跳章：章号 / 章名关键词的纯匹配（主进程只算不读盘）
   jumpMatch: (chapters, query, options) => invoke('jump:match', chapters, query, options),
   createChapter: (bookPath, insertIndex, name, volumeId) =>
