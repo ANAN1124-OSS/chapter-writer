@@ -122,7 +122,13 @@
     formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了；最多 50 步）
     replaceBackups: [], // 当前书的「整本替换」备份列表（查找面板里展示 / 还原用）
     bookDisplay: {}, // 当前书的显示设置覆盖（只覆盖改过的项）
+    recentBook: null, // 上次写作的书 / 章（书架顶部「继续上次写作」；主进程从 config 读）
     shelfQuery: '', // 书架搜索词（书名 / 章节名）
+    jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
+    jumpQuery: '', // 跳章输入框里的词
+    jumpOutOfRange: false, // 输入的是章号但超出本书章数
+    jumpToken: 0, // 丢弃过期的异步匹配结果
+    jumpTimer: null, // 输入防抖
     formatBookRunning: false, // 「一键整理本书」进行中（防重复触发）
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
@@ -388,6 +394,12 @@
 
   // ---------- 书架 ----------
   async function refreshShelf() {
+    // 上次写作位置每次回书架都重新取：在编辑页切章 / 保存后主进程已经更新了配置
+    try {
+      state.recentBook = await call(api.getRecentBook);
+    } catch {
+      state.recentBook = null;
+    }
     try {
       state.books = await call(api.listBooks);
     } catch (err) {
@@ -447,11 +459,54 @@
         : `搜索「${query}」：没有匹配的书（只搜书名和章节名，不搜正文；Esc 清除）`;
   }
 
+  // ---------- 继续上次写作 ----------
+  // 主进程在打开书 / 切章 / 保存时记 config.lastBook；这里只负责把它显示出来。
+  // 书架里已经找不到那本书（被删/改名）或是损坏书时，入口直接隐藏，不做任何猜测。
+  function continueTarget() {
+    const recent = state.recentBook;
+    if (!recent || !recent.path) return null;
+    const wanted = String(recent.path).toLowerCase();
+    const book = (state.books || []).find((item) => String(item.path || '').toLowerCase() === wanted);
+    if (!book || book.status === 'corrupt') return null;
+    return { book, recent };
+  }
+
+  function renderContinueWriting() {
+    const wrap = $('shelf-continue');
+    if (!wrap) return;
+    const target = continueTarget();
+    if (!target) {
+      wrap.classList.add('hidden');
+      return;
+    }
+    const { book, recent } = target;
+    const total = Math.max(0, Number(book.chapterCount) || 0);
+    let chapterIndex = Math.max(0, Math.round(Number(recent.chapterIndex) || 0));
+    if (total > 0) chapterIndex = Math.min(chapterIndex, total - 1);
+    const label = total > 0 ? chapterTitle(chapterIndex, recent.chapterName) : '';
+    const title = `继续写《${book.title}》${label ? ` · ${label}` : ''}`;
+    $('continue-title').textContent = title;
+    $('continue-title').title = title;
+    const metaParts = [];
+    if (recent.at) metaParts.push(`最后写作 ${formatRelativeTime(recent.at)}`);
+    if (total > 0) metaParts.push(`共 ${total} 章`);
+    $('continue-meta').textContent = metaParts.join(' · ');
+    wrap.classList.remove('hidden');
+  }
+
+  async function openContinueBook() {
+    const target = continueTarget();
+    if (!target) return { ok: false, message: '没有可继续的书' };
+    await openBookByPath(target.book.path);
+    return { ok: state.view === 'editor', index: state.index };
+  }
+
   function renderShelf() {
     $('books-root-label').textContent = state.config ? `书架：${state.config.booksRoot}` : '';
     $('books-root-label').title = state.config ? state.config.booksRoot : '';
     const grid = $('book-grid');
     grid.innerHTML = '';
+    renderContinueWriting();
 
     const query = shelfQueryText();
     const rows = shelfSearchResults();
@@ -1169,6 +1224,154 @@
     }
     await loadChapterAt(index);
     return { ok: true };
+  }
+
+  // ---------- Ctrl+G 跳章 ----------
+  // 匹配规则在主进程的 core/jump.js（单测覆盖）：输入纯章号按章号找，否则按章名关键词找。
+  // 这里只负责对话框、结果列表和「跳过去」；切章仍走 switchChapter，未保存拦截照常生效。
+  const JUMP_RESULT_LIMIT = 8;
+
+  function jumpChapterPayload() {
+    return (state.chapters || []).map((chapter) => ({
+      id: chapter.id,
+      name: chapter.name == null ? '' : String(chapter.name)
+    }));
+  }
+
+  function renderJumpMatches(result) {
+    const matches = (result && Array.isArray(result.matches)) ? result.matches : [];
+    const summary = $('jump-summary');
+    const list = $('jump-results');
+    const query = String(state.jumpQuery || '').trim();
+    const total = state.chapters.length;
+    list.innerHTML = '';
+    let text;
+    let warn = false;
+    if (!query) {
+      text = `共 ${total} 章。输入章号（如 12、第12章）或章名的一部分；回车跳转。`;
+    } else if (!matches.length) {
+      warn = true;
+      text = state.jumpOutOfRange
+        ? `本书共 ${total} 章，没有第 ${Number(result && result.number) || '?'} 章（可输入 1–${total}）。`
+        : `没有匹配「${query}」的章节。`;
+    } else if (result && result.number != null) {
+      text = `按章号跳转：${chapterTitle(matches[0].index, matches[0].name)}`;
+    } else {
+      const hitCount = Number(result && result.total) || matches.length;
+      text = `找到 ${hitCount} 章匹配${hitCount > matches.length ? `（列出前 ${matches.length} 章）` : ''}；回车跳第一条，也可以点下面任意一条。`;
+    }
+    summary.textContent = text;
+    summary.classList.toggle('warn', warn);
+
+    for (const match of matches) {
+      const chapter = state.chapters[match.index];
+      if (!chapter) continue;
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'jump-result';
+      row.dataset.index = String(match.index);
+      const label = document.createElement('span');
+      label.className = 'jump-chapter';
+      label.textContent = chapterTitle(match.index, match.name);
+      const status = document.createElement('span');
+      status.className = 'jump-status';
+      status.textContent = CHAPTER_STATUS_LABELS[chapterStatus(chapter)] || '';
+      row.appendChild(label);
+      row.appendChild(status);
+      row.addEventListener('click', () => jumpToIndex(match.index));
+      list.appendChild(row);
+    }
+    $('btn-jump-confirm').disabled = !matches.length;
+  }
+
+  async function refreshJumpMatches() {
+    if (!state.bookPath || !state.chapters.length) return;
+    const input = $('jump-input');
+    const query = input ? input.value : '';
+    state.jumpQuery = query;
+    const token = (state.jumpToken += 1);
+    if (!String(query).trim()) {
+      state.jumpMatches = [];
+      state.jumpOutOfRange = false;
+      renderJumpMatches({ matches: [], total: 0 });
+      return;
+    }
+    try {
+      const result = await call(api.jumpMatch, jumpChapterPayload(), query, { limit: JUMP_RESULT_LIMIT });
+      if (token !== state.jumpToken) return; // 输入已经又变了，旧结果丢掉
+      state.jumpMatches = (result && Array.isArray(result.matches)) ? result.matches : [];
+      state.jumpOutOfRange = Boolean(result && result.outOfRange);
+      renderJumpMatches(result || {});
+    } catch (err) {
+      if (token !== state.jumpToken) return;
+      state.jumpMatches = [];
+      state.jumpOutOfRange = false;
+      $('jump-summary').textContent = `查找章节失败：${err.message}`;
+      $('jump-summary').classList.add('warn');
+      $('jump-results').innerHTML = '';
+      $('btn-jump-confirm').disabled = true;
+    }
+  }
+
+  function scheduleJumpMatches(delay = 80) {
+    clearTimeout(state.jumpTimer);
+    state.jumpTimer = setTimeout(() => {
+      state.jumpTimer = null;
+      refreshJumpMatches();
+    }, delay);
+  }
+
+  function openJumpDialog() {
+    if (!state.bookPath || !state.chapters.length) return false;
+    state.jumpToken += 1;
+    clearTimeout(state.jumpTimer);
+    state.jumpTimer = null;
+    state.jumpMatches = [];
+    state.jumpQuery = '';
+    state.jumpOutOfRange = false;
+    $('jump-input').value = '';
+    $('jump-results').innerHTML = '';
+    $('jump-summary').classList.remove('warn');
+    renderJumpMatches({ matches: [], total: 0 });
+    $('jump-backdrop').classList.remove('hidden');
+    setTimeout(() => {
+      const input = $('jump-input');
+      if (!input || $('jump-backdrop').classList.contains('hidden')) return;
+      input.focus();
+      input.select();
+    }, 20);
+    return true;
+  }
+
+  function closeJumpDialog() {
+    clearTimeout(state.jumpTimer);
+    state.jumpTimer = null;
+    state.jumpToken += 1;
+    state.jumpMatches = [];
+    state.jumpQuery = '';
+    state.jumpOutOfRange = false;
+    $('jump-backdrop').classList.add('hidden');
+    $('jump-input').value = '';
+    $('jump-results').innerHTML = '';
+    $('jump-summary').textContent = '';
+  }
+
+  async function jumpToIndex(index) {
+    if (!state.bookPath || index < 0 || index >= state.chapters.length) {
+      return { ok: false, message: '章节不存在' };
+    }
+    // 先把对话框收起来，再走正常的切章流程（有未保存修改时由 switchChapter 弹窗拦截）
+    closeJumpDialog();
+    const res = await switchChapter(index);
+    return res;
+  }
+
+  async function confirmJumpFromDialog() {
+    if (!state.jumpMatches.length) {
+      $('jump-summary').classList.add('warn');
+      return { ok: false, message: '没有匹配的章节' };
+    }
+    return jumpToIndex(state.jumpMatches[0].index);
   }
 
   async function createChapterAt(insertIndex, nameOverride, volumeIdOverride) {
@@ -1890,6 +2093,7 @@
     hideFormatMenu();
     closeFormatDialog();
     if (!$('export-backdrop').classList.contains('hidden')) closeExportDialog();
+    if (!$('jump-backdrop').classList.contains('hidden')) closeJumpDialog();
     if (!$('settings-backdrop').classList.contains('hidden')) closeSettings();
     if (!state.dirty || !state.bookPath) {
       api.closeReady(true);
@@ -3091,6 +3295,7 @@
       }
     });
 
+    $('btn-continue-writing').addEventListener('click', () => openContinueBook());
     $('btn-back').addEventListener('click', backToShelf);
     $('btn-rename-book').addEventListener('click', renameBookFlow);
     $('btn-new-chapter').addEventListener('click', () => createChapterAt(state.chapters.length));
@@ -3139,6 +3344,17 @@
     $('export-to').addEventListener('input', () => scheduleExportSummary(120));
     $('btn-export-cancel').addEventListener('click', closeExportDialog);
     $('btn-export-confirm').addEventListener('click', () => confirmExportDialog());
+
+    // 跳章（Ctrl+G）
+    $('jump-input').addEventListener('input', () => scheduleJumpMatches());
+    $('jump-input').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        confirmJumpFromDialog();
+      }
+    });
+    $('btn-jump-cancel').addEventListener('click', closeJumpDialog);
+    $('btn-jump-confirm').addEventListener('click', () => confirmJumpFromDialog());
 
     // 排版：写作页「排版 ▾」
     $('btn-format').addEventListener('click', (event) => {
@@ -3283,6 +3499,13 @@
         }
         return;
       }
+      if (!$('jump-backdrop').classList.contains('hidden')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeJumpDialog();
+        }
+        return;
+      }
       // 查找面板：Esc 关、回车查找；其他按键继续往下走（Ctrl+S 仍可保存）
       if (!$('find-backdrop').classList.contains('hidden')) {
         if (event.key === 'Escape') {
@@ -3305,6 +3528,11 @@
         return;
       }
       const ctrl = event.ctrlKey && !event.altKey && !event.shiftKey;
+      if (ctrl && String(event.key).toLowerCase() === 'g') {
+        event.preventDefault();
+        if (state.view === 'editor' && state.bookPath) openJumpDialog();
+        return;
+      }
       if (ctrl && String(event.key).toLowerCase() === 'f') {
         event.preventDefault();
         if (state.view === 'editor' && state.bookPath) {
@@ -3494,6 +3722,42 @@
       },
       async backToShelf() {
         await backToShelf();
+      },
+      // 继续上次写作 / Ctrl+G 跳章
+      recentBook: () => ({ ...(state.recentBook || {}) }),
+      continueVisible: () => !$('shelf-continue').classList.contains('hidden'),
+      continueText: () => ($('continue-title') ? $('continue-title').textContent : ''),
+      continueMeta: () => ($('continue-meta') ? $('continue-meta').textContent : ''),
+      async clickContinue() {
+        return openContinueBook();
+      },
+      openJumpDialog: () => openJumpDialog(),
+      closeJumpDialog: () => closeJumpDialog(),
+      jumpDialogOpen: () => !$('jump-backdrop').classList.contains('hidden'),
+      jumpQuery: () => $('jump-input').value,
+      async setJumpQuery(query) {
+        $('jump-input').value = String(query == null ? '' : query);
+        state.jumpQuery = $('jump-input').value;
+        return refreshJumpMatches();
+      },
+      jumpSummary: () => $('jump-summary').textContent,
+      jumpResultTexts: () =>
+        Array.from(document.querySelectorAll('#jump-results .jump-result')).map((el) => el.textContent),
+      jumpMatches: () => state.jumpMatches.map((match) => ({ ...match })),
+      jumpConfirmDisabled: () => $('btn-jump-confirm').disabled,
+      async runJump() {
+        return confirmJumpFromDialog();
+      },
+      async clickJumpResult(index) {
+        const rows = document.querySelectorAll('#jump-results .jump-result');
+        if (!rows[index]) return false;
+        rows[index].click();
+        return true;
+      },
+      async refreshRecentBook() {
+        state.recentBook = await call(api.getRecentBook);
+        renderContinueWriting();
+        return state.recentBook;
       },
       shelfTitles: () => state.books.map((b) => b.title),
       shelfQuery: () => state.shelfQuery,

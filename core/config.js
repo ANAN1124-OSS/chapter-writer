@@ -45,7 +45,11 @@ const DEFAULTS = Object.freeze({
   // 「整理本章」上一次用过的规则，下次打开对话框沿用（不改正文，只是记住勾选）
   formatOptions: { ...formatLib.DEFAULT_OPTIONS },
   // 上次「导出 TXT」保存到的目录，下次导出默认还开在这里（目录没了会自动退回「文档」）
-  lastExportDir: ''
+  lastExportDir: '',
+  // 上次写作的书 + 章节（书架顶部「继续上次写作」用）。只是书架级记忆，书库里的
+  // lastOpenChapterId 仍是「打开这本书回到哪一章」的唯一事实来源。
+  // { path, title, chapterId, chapterIndex, chapterName, at }；没有写过 = null。
+  lastBook: null
 });
 
 function clampInt(value, min, max, fallback) {
@@ -111,6 +115,26 @@ function sanitizeBookDisplay(raw) {
   return out;
 }
 
+// 「继续上次写作」：只记书架级的位置，读的时候一律清洗；坏值/空值当作没记过（null），
+// 不影响旧配置文件（没有 lastBook 就显示不出入口，其余功能照常）。
+function sanitizeLastBook(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const bookPath = typeof raw.path === 'string' ? raw.path.trim() : '';
+  if (!bookPath || bookPath.length > 1000) return null;
+  const title = typeof raw.title === 'string' ? raw.title.trim().slice(0, 200) : '';
+  const chapterId = typeof raw.chapterId === 'string' ? raw.chapterId.trim().slice(0, 100) : '';
+  const chapterName = typeof raw.chapterName === 'string' ? raw.chapterName.trim().slice(0, 200) : '';
+  const at = Number(raw.at);
+  return {
+    path: bookPath,
+    title,
+    chapterId,
+    chapterIndex: clampInt(raw.chapterIndex, 0, 1000000, 0),
+    chapterName,
+    at: Number.isFinite(at) && at > 0 ? Math.round(at) : 0
+  };
+}
+
 function sanitize(raw) {
   const cfg = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
 
@@ -142,6 +166,7 @@ function sanitize(raw) {
   // 上次导出的目录：只做基本清洗，路径不存在时由主进程退回「文档」目录
   const lastExportDir = typeof cfg.lastExportDir === 'string' ? cfg.lastExportDir.trim() : '';
   cfg.lastExportDir = lastExportDir.length > 1000 ? '' : lastExportDir;
+  cfg.lastBook = sanitizeLastBook(cfg.lastBook);
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {
@@ -281,6 +306,7 @@ module.exports = {
   DEFAULTS,
   sanitize,
   sanitizeBookDisplayEntry,
+  sanitizeLastBook,
   FONTS,
   PAPER_THEMES,
   BOOK_DISPLAY_KEYS

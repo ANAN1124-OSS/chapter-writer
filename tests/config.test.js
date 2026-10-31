@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { createConfigStore, sanitize, DEFAULTS } = require('../core/config');
+const { createConfigStore, sanitize, sanitizeLastBook, DEFAULTS } = require('../core/config');
 
 async function mkTmp() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'cw-config-'));
@@ -205,6 +205,83 @@ test('导出目录记忆：默认空、去首尾空白、坏值回空', () => {
   assert.equal(sanitize({ lastExportDir: 123 }).lastExportDir, '');
   assert.equal(sanitize({ lastExportDir: null }).lastExportDir, '');
   assert.equal(sanitize({ lastExportDir: 'x'.repeat(2000) }).lastExportDir, '');
+});
+
+test('继续上次写作：lastBook 默认空，旧配置没有字段也能读；合法值清洗后保留', () => {
+  // 旧配置文件里没有 lastBook：当作没记过，不影响其它设置
+  assert.equal(DEFAULTS.lastBook, null);
+  const old = sanitize({ booksRoot: 'D:\\旧书架', editorFont: 'kai' });
+  assert.equal(old.lastBook, null);
+  assert.equal(old.booksRoot, 'D:\\旧书架');
+
+  assert.equal(sanitizeLastBook(null), null);
+  assert.equal(sanitizeLastBook('not-an-object'), null);
+  assert.equal(sanitizeLastBook([]), null);
+  assert.equal(sanitizeLastBook({ path: '   ' }), null, '没有路径就不算「上次写作」');
+  assert.equal(sanitizeLastBook({ path: 123 }), null, '非字符串路径直接作废');
+
+  const recent = sanitizeLastBook({
+    path: '  D:\\书架\\星海旅人  ',
+    title: ' 星海旅人 ',
+    chapterId: ' ch_012 ',
+    chapterIndex: 11,
+    chapterName: ' 夜雨 ',
+    at: 1760000000123.7
+  });
+  assert.deepEqual(recent, {
+    path: 'D:\\书架\\星海旅人',
+    title: '星海旅人',
+    chapterId: 'ch_012',
+    chapterIndex: 11,
+    chapterName: '夜雨',
+    at: 1760000000124
+  });
+});
+
+test('继续上次写作：lastBook 脏值兜底（越界下标/坏时间戳/超长文本）', () => {
+  const base = { path: 'D:\\书架\\书' };
+  assert.equal(sanitizeLastBook({ ...base, chapterIndex: -5 }).chapterIndex, 0);
+  assert.equal(sanitizeLastBook({ ...base, chapterIndex: 1e9 }).chapterIndex, 1000000);
+  assert.equal(sanitizeLastBook({ ...base, chapterIndex: 'x' }).chapterIndex, 0);
+  assert.equal(sanitizeLastBook({ ...base, chapterIndex: 2.6 }).chapterIndex, 3);
+  assert.equal(sanitizeLastBook({ ...base, at: 'abc' }).at, 0);
+  assert.equal(sanitizeLastBook({ ...base, at: -1 }).at, 0);
+  assert.equal(sanitizeLastBook({ ...base, at: '1760000000000' }).at, 1760000000000);
+  assert.equal(sanitizeLastBook({ ...base, title: 123 }).title, '');
+  assert.equal(sanitizeLastBook({ ...base, chapterName: 'x'.repeat(300) }).chapterName.length, 200);
+  assert.equal(sanitizeLastBook({ ...base, path: 'x'.repeat(2000) }), null);
+});
+
+test('继续上次写作：lastBook 写盘 / 读回 / 清空，且不动其它配置', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  const recent = {
+    path: 'D:\\书架\\星海旅人',
+    title: '星海旅人',
+    chapterId: 'ch_003',
+    chapterIndex: 2,
+    chapterName: '夜雨',
+    at: 1760000000000
+  };
+  await store.set({ lastBook: recent });
+  const cfg = await store.get();
+  assert.deepEqual(cfg.lastBook, recent);
+  assert.equal(cfg.editorPaper, 'paper', '写 lastBook 不能把其它配置冲掉');
+
+  // 真的落进了 config.json，重启后能读回
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.deepEqual(raw.lastBook, recent);
+  const reopened = await createConfigStore(dir).get();
+  assert.deepEqual(reopened.lastBook, recent);
+
+  // 坏值写入会被清成 null（不保留半条脏记录）
+  await store.set({ lastBook: { path: '', chapterId: 'x' } });
+  assert.equal((await store.get()).lastBook, null);
+
+  // null 可以清掉记录
+  await store.set({ lastBook: recent });
+  await store.set({ lastBook: null });
+  assert.equal((await createConfigStore(dir).get()).lastBook, null);
 });
 
 test('配置损坏：归档坏文件、回默认值，并给出一次提示', async () => {

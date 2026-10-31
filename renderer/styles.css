@@ -152,6 +152,51 @@ html, body {
 .shelf-search-clear:hover { background: var(--paper-deep); color: var(--ink); }
 .shelf-search-summary { margin-bottom: 12px; }
 
+/* 继续上次写作：书架顶部一条直达入口（只写配置里的 lastBook，不碰书库） */
+.shelf-continue { margin-bottom: 18px; }
+.continue-writing {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 13px 16px;
+  text-align: left;
+  font-family: var(--ui-font);
+  color: var(--ink);
+  background: var(--paper-soft);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: box-shadow .15s ease, transform .1s ease, border-color .15s ease;
+}
+.continue-writing:hover {
+  border-color: var(--accent-soft);
+  box-shadow: 0 8px 22px rgba(90, 70, 45, .12);
+  transform: translateY(-1px);
+}
+.continue-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  letter-spacing: .06em;
+  color: var(--accent);
+}
+.continue-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+}
+.continue-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
 .shelf-body { flex: 1; overflow: auto; padding: 26px 34px; }
 
 .book-grid {
@@ -740,6 +785,61 @@ body.resizing .editor {
   user-select: text;
 }
 .export-summary.warn { color: var(--danger); }
+
+/* ---------- 跳章（Ctrl+G） ---------- */
+.jump-modal {
+  width: min(560px, 90vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.jump-summary {
+  min-height: 18px;
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.jump-summary.warn { color: var(--danger); }
+.jump-results {
+  max-height: 260px;
+  margin-top: 8px;
+  overflow: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.jump-results:empty { display: none; }
+.jump-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.jump-result:last-child { border-bottom: none; }
+.jump-result:hover { background: var(--paper-deep); }
+.jump-chapter {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.jump-status {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
 .format-rules { margin-top: 12px; }
 .check-row-pair {
   display: flex;

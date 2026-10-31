@@ -886,14 +886,28 @@ async function trashBook(booksRoot, bookPath) {
   return dest;
 }
 
+// 记住「上次打开的是哪一章」（书目里的唯一事实来源）。
+// 返回 { ok, title, chapterId, chapterIndex, chapterName, changed } 给主进程同步书架级
+// 「继续上次写作」；不存在的 chapterId 不写盘（防止书目被写成永远指不到章节的 id）。
 async function setLastOpenChapter(bookPath, chapterId) {
   try {
     const meta = await readBookMeta(bookPath);
-    if (meta.lastOpenChapterId === chapterId) return true;
-    await writeBookMeta(bookPath, { ...meta, lastOpenChapterId: chapterId });
-    return true;
+    const list = Array.isArray(meta.chapters) ? meta.chapters : [];
+    const index = list.findIndex((chapter) => chapter && chapter.id === chapterId);
+    if (index < 0) return { ok: false, code: 'CHAPTER_NOT_FOUND', chapterCount: list.length };
+    const changed = meta.lastOpenChapterId !== chapterId;
+    if (changed) await writeBookMeta(bookPath, { ...meta, lastOpenChapterId: chapterId });
+    const chapter = list[index];
+    return {
+      ok: true,
+      changed,
+      title: String(meta.title == null ? '' : meta.title),
+      chapterId: chapter.id,
+      chapterIndex: index,
+      chapterName: String(chapter.name == null ? '' : chapter.name)
+    };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 

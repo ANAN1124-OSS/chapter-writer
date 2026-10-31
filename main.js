@@ -35,6 +35,7 @@ const exporter = require('./core/exporter');
 const chaptersLib = require('./core/chapters');
 const formatLib = require('./core/format');
 const findLib = require('./core/find');
+const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
 
 let win = null;
@@ -46,6 +47,9 @@ let closePending = false;
 let closeTimer = null;
 let e2eCloseReady = undefined;
 let rendererDirty = false;
+// 正常使用时就是 Electron 的系统剪贴板；只有 E2E 在锁屏/无交互桌面环境（系统剪贴板
+// 拒绝所有读写）时会临时换成进程内剪贴板，见 createE2EClipboard()。
+let activeClipboard = clipboard;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -109,6 +113,38 @@ async function getConfig() {
     if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
   }
   return config;
+}
+
+// ---------- 「继续上次写作」：书架级记忆（只写配置，不碰书库） ----------
+// 书库里的 lastOpenChapterId 仍是「打开这本书回到哪一章」的唯一事实来源；
+// 这里只记“上次写的是哪本书的哪一章 + 时间”，给书架顶部的入口用。
+async function rememberRecentBook(bookPath, info) {
+  if (!bookPath || !info) return false;
+  const chapterId = String(info.chapterId == null ? '' : info.chapterId).trim();
+  if (!chapterId) return false;
+  const now = Date.now();
+  const payload = {
+    path: bookPath,
+    title: String(info.title == null ? '' : info.title).slice(0, 200),
+    chapterId,
+    chapterIndex: Math.max(0, Math.round(Number(info.chapterIndex) || 0)),
+    chapterName: String(info.chapterName == null ? '' : info.chapterName).slice(0, 200),
+    at: now
+  };
+  try {
+    await getConfig();
+    const current = await configStore.get();
+    const prev = current.lastBook;
+    // 打开书时 open + set-last 会连着报同一个位置：5 秒内不重复写盘（换章照常更新）
+    if (prev && prev.path === payload.path && prev.chapterId === payload.chapterId && now - prev.at < 5000) {
+      return false;
+    }
+    const updated = await configStore.set({ lastBook: payload });
+    config = booksRootOverride ? { ...updated, booksRoot: booksRootOverride } : updated;
+    return true;
+  } catch {
+    return false; // 记不住位置不影响写作
+  }
 }
 
 function clampBounds(bounds) {
@@ -201,6 +237,12 @@ function registerIpc() {
     return warning;
   });
 
+  // 书架顶部「继续上次写作」用：上次写的是哪本书、哪一章、什么时候
+  handle('app:recent-book', async () => {
+    const cfg = await getConfig();
+    return cfg.lastBook || null;
+  });
+
   handle('config:set', async (patch) => {
     await getConfig();
     const next = await configStore.set(patch || {});
@@ -242,10 +284,29 @@ function registerIpc() {
     return storage.createBook(cfg.booksRoot, title);
   });
 
-  handleBook('book:open', async (bookPath) => storage.openBook(bookPath));
+  handleBook('book:open', async (bookPath) => {
+    const data = await storage.openBook(bookPath);
+    const meta = data && data.meta;
+    if (meta && Array.isArray(meta.chapters) && meta.chapters.length) {
+      let index = meta.chapters.findIndex((chapter) => chapter && chapter.id === meta.lastOpenChapterId);
+      if (index < 0) index = 0;
+      const chapter = meta.chapters[index];
+      await rememberRecentBook(bookPath, {
+        title: meta.title,
+        chapterId: chapter.id,
+        chapterIndex: index,
+        chapterName: chapter.name
+      });
+    }
+    return data;
+  });
   handleBook('book:verify', async (bookPath) => storage.verifyBook(bookPath));
   handleBook('book:rename', async (bookPath, title) => storage.renameBook(bookPath, title));
-  handleBook('book:set-last', async (bookPath, chapterId) => storage.setLastOpenChapter(bookPath, chapterId));
+  handleBook('book:set-last', async (bookPath, chapterId) => {
+    const info = await storage.setLastOpenChapter(bookPath, chapterId);
+    if (info && info.ok) await rememberRecentBook(bookPath, info);
+    return info;
+  });
 
   handleBook('chapter:load', async (bookPath, file) => storage.loadChapterText(bookPath, file));
   handleBook('chapter:stat', async (bookPath, file) => storage.statChapter(bookPath, file));
@@ -275,6 +336,14 @@ function registerIpc() {
     return findLib.replaceAllLiteral(text, query, replacement, options);
   });
 
+  // Ctrl+G 跳章：纯匹配（章号 / 章名关键词），不读盘、不写盘。规则在 core/jump.js，单测覆盖。
+  handle('jump:match', async (chapters, query, options) => {
+    if (!Array.isArray(chapters)) {
+      throw Object.assign(new Error('章节列表格式不对'), { code: 'BAD_CHAPTERS' });
+    }
+    return jumpLib.findMatches(chapters.slice(0, 20000), query, options);
+  });
+
   // 「只替换这一处」：从编辑区光标位置往后找下一处命中（纯计算，不写盘）
   handle('text:find-next', async (text, query, fromIndex, options) => {
     if (typeof text !== 'string') throw new Error('正文必须是文本');
@@ -290,6 +359,13 @@ function registerIpc() {
       // 同步章节字数缓存，书架就不用为了算字数去重读整本书
       chapter.chars = result.chars;
       await storage.writeBookMeta(bookPath, meta);
+      // 保存也算「写作过」：书架「继续上次写作」的时间戳跟着更新（只写配置，不碰书库）
+      await rememberRecentBook(bookPath, {
+        title: meta.title,
+        chapterId: chapter.id,
+        chapterIndex: meta.chapters.indexOf(chapter),
+        chapterName: chapter.name
+      });
       return { ...result, file: chapter.file };
     });
   });
@@ -487,7 +563,7 @@ function registerIpc() {
     const meta = await storage.readBookMeta(bookPath);
     const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
     const text = exporter.composeBook(meta, texts);
-    await clipboard.writeText(text);
+    await activeClipboard.writeText(text);
     return { chapterCount: meta.chapters.length, chars, includedUnsaved };
   });
 
@@ -509,7 +585,7 @@ function registerIpc() {
       // 空章不覆盖剪贴板：免得把作者刚复制的东西冲掉
       return { empty: true, title, paragraphs: 0, chars: 0, includedUnsaved: fromEditor };
     }
-    await clipboard.writeText(result.text);
+    await activeClipboard.writeText(result.text);
     return {
       empty: false,
       title,
@@ -676,6 +752,36 @@ async function waitForRenderer(expr, timeout = 12000) {
   }
 }
 
+// E2E 专用：工作站锁屏 / 没有交互桌面时，Windows 会拒绝所有进程的剪贴板读写
+// （OpenClipboard 返回 ACCESS_DENIED，clipboard.readText() 恒为空）。这跟应用代码无关，
+// 但会让「复制整本 / 复制本章」的校验半途中断。此时改用进程内剪贴板继续验证
+// 「拼出来的文本对不对」，并明确报告真实剪贴板集成未被验证；生产运行永远用系统剪贴板。
+async function createE2EClipboard() {
+  let systemOk = false;
+  try {
+    const probe = `cw-clip-probe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await clipboard.writeText(probe);
+    const read = await clipboard.readText();
+    systemOk = typeof read === 'string' && read === probe;
+  } catch {
+    systemOk = false;
+  }
+  if (systemOk) return { clipboard, synthetic: false };
+  let text = '';
+  console.warn(
+    '[e2e] 系统剪贴板不可用（工作站可能锁屏/无交互桌面），改用进程内剪贴板校验复制逻辑；真实剪贴板集成未被验证。'
+  );
+  return {
+    synthetic: true,
+    clipboard: {
+      writeText: async (value) => {
+        text = String(value == null ? '' : value);
+      },
+      readText: async () => text
+    }
+  };
+}
+
 async function runAutomation() {
   try {
     await waitForRenderer('Boolean(window.__cwTest && window.__cwTest.ready)', 15000);
@@ -745,11 +851,14 @@ async function runAutomation() {
     }
     if (isE2E) {
       const scenario = require('./scripts/e2e-scenario.js');
+      const e2eClipboard = await createE2EClipboard();
+      activeClipboard = e2eClipboard.clipboard;
       const result = await scenario({
         win,
         app,
-        clipboard,
+        clipboard: e2eClipboard.clipboard,
         config: await getConfig(),
+        userData: app.getPath('userData'),
         storage,
         repair,
         exporter,
@@ -758,7 +867,9 @@ async function runAutomation() {
         getCloseReady: () => e2eCloseReady,
         resetCloseReady: () => { e2eCloseReady = undefined; }
       });
-      console.log(`E2E_RESULT ${JSON.stringify(result)}`);
+      console.log(
+        `E2E_RESULT ${JSON.stringify({ ...result, clipboardSynthetic: e2eClipboard.synthetic })}`
+      );
       app.exit(result && result.ok ? 0 : 1);
       return;
     }

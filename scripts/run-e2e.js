@@ -61,6 +61,12 @@ child.on('close', (code) => {
     console.log(`${item.ok ? 'PASS' : 'FAIL'}  ${item.name}`);
   }
   console.log('');
+  if (result.clipboardSynthetic) {
+    console.warn(
+      '⚠ 系统剪贴板不可用（工作站可能锁屏/无交互桌面）：本轮用进程内剪贴板校验复制文本逻辑，' +
+        '真实剪贴板集成未被验证；解锁后重跑即可走真实剪贴板。'
+    );
+  }
   if (result.ok) {
     console.log(`端到端自检通过：${result.checks} 项全部通过。`);
     console.log(`临时书库：${books}`);

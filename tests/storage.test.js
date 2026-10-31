@@ -314,6 +314,37 @@ test('并发写操作串行化：改名不会被「记住上次章节」覆盖',
   assert.equal(after.chapters.length, 3, '插入不能被并发写覆盖');
 });
 
+test('记住上次章节：返回章节信息；不存在的 id 不写盘', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '上次章节测试');
+  await storage.createChapter(bookPath, 1, '夜雨');
+  const meta = await storage.readBookMeta(bookPath);
+  const target = meta.chapters[1];
+
+  const info = await storage.setLastOpenChapter(bookPath, target.id);
+  assert.equal(info.ok, true);
+  assert.equal(info.changed, true);
+  assert.equal(info.title, '上次章节测试');
+  assert.equal(info.chapterId, target.id);
+  assert.equal(info.chapterIndex, 1);
+  assert.equal(info.chapterName, '夜雨');
+  const saved = await storage.readBookMeta(bookPath);
+  assert.equal(saved.lastOpenChapterId, target.id);
+
+  // 再记一次同一章：不重复写盘，changed = false（主进程可以据此少写配置）
+  const again = await storage.setLastOpenChapter(bookPath, target.id);
+  assert.equal(again.ok, true);
+  assert.equal(again.changed, false);
+
+  // 不存在的章节 id：返回失败，书目里的 lastOpenChapterId 保持原值
+  const bad = await storage.setLastOpenChapter(bookPath, 'ch_999');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'CHAPTER_NOT_FOUND');
+  assert.equal(bad.chapterCount, 2);
+  const afterBad = await storage.readBookMeta(bookPath);
+  assert.equal(afterBad.lastOpenChapterId, target.id, '非法 id 不能覆盖已有记录');
+});
+
 test('整本书兜底删除：移入书架 _trash，扫描时不再出现', async () => {
   const root = await mkTmp();
   const { path: bookPath } = await storage.createBook(root, '待删的书');

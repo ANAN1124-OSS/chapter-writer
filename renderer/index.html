@@ -28,6 +28,13 @@
         </div>
       </header>
       <div class="shelf-body">
+        <div id="shelf-continue" class="shelf-continue hidden">
+          <button id="btn-continue-writing" class="continue-writing" type="button" title="打开这本书，回到上次编辑的章节">
+            <span class="continue-label">继续上次写作</span>
+            <span class="continue-main" id="continue-title"></span>
+            <span class="continue-meta" id="continue-meta"></span>
+          </button>
+        </div>
         <div id="shelf-search-summary" class="shelf-search-summary muted small hidden"></div>
         <div class="book-grid" id="book-grid"></div>
       </div>
@@ -89,6 +96,7 @@
           <span id="status-text">已保存</span>
           <span class="spacer"></span>
           <span id="char-count" class="muted small"></span>
+          <span class="kbd">Ctrl+G 跳章</span>
           <span class="kbd">Ctrl+S 保存</span>
         </footer>
       </main>
@@ -172,6 +180,23 @@
       <div class="modal-buttons">
         <button id="btn-export-cancel" class="btn ghost" type="button">取消</button>
         <button id="btn-export-confirm" class="btn primary" type="button">导出…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 跳章（Ctrl+G） ============ -->
+  <div id="jump-backdrop" class="backdrop hidden">
+    <div class="modal jump-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">跳到哪一章</h2>
+      <p class="modal-message">
+        输入章号（如 12、第12章）或章名的一部分，回车跳到那一章。跳章只切换当前章节，不改正文；有未保存内容时会照常先问你。
+      </p>
+      <input id="jump-input" class="modal-input" type="text" autocomplete="off" placeholder="章号，或章名关键词" />
+      <div class="jump-summary" id="jump-summary"></div>
+      <div class="jump-results" id="jump-results"></div>
+      <div class="modal-buttons">
+        <button id="btn-jump-cancel" class="btn ghost" type="button">取消</button>
+        <button id="btn-jump-confirm" class="btn primary" type="button" disabled>跳转</button>
       </div>
     </div>
   </div>

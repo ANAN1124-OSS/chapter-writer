@@ -12,6 +12,7 @@ async function invoke(channel, ...args) {
 contextBridge.exposeInMainWorld('api', {
   appVersion: () => invoke('app:version'),
   appWarning: () => invoke('app:warning'),
+  getRecentBook: () => invoke('app:recent-book'),
   listBooks: () => invoke('books:list'),
   createBook: (title) => invoke('book:create', title),
   openBook: (bookPath) => invoke('book:open', bookPath),
@@ -28,6 +29,8 @@ contextBridge.exposeInMainWorld('api', {
     invoke('text:find-next', text, query, fromIndex, options),
   replaceInText: (text, query, replacement, options) =>
     invoke('text:replace', text, query, replacement, options),
+  // Ctrl+G 跳章：章号 / 章名关键词的纯匹配（主进程只算不读盘）
+  jumpMatch: (chapters, query, options) => invoke('jump:match', chapters, query, options),
   createChapter: (bookPath, insertIndex, name, volumeId) =>
     invoke('chapter:create', bookPath, insertIndex, name, volumeId),
   renameChapter: (bookPath, chapterId, name) => invoke('chapter:rename', bookPath, chapterId, name),
