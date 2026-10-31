@@ -1232,7 +1232,10 @@
         if (report.missing && report.missing.length) {
           toast(`已保存当前章，但全书有 ${report.missing.length} 个章节文件缺失`, 'warn');
         }
-        if (!silent) toast(`已保存：${report.chapterCount} 章 · 本章 ${formatChars(data.chars)}`);
+        if (!silent) {
+          const snapshotNote = data.snapshot && data.snapshot.taken ? ' · 今日快照已留' : '';
+          toast(`已保存：${report.chapterCount} 章 · 本章 ${formatChars(data.chars)}${snapshotNote}`);
+        }
       } catch {
         if (!silent) toast('已保存当前章（全书校验失败）', 'warn');
       }
@@ -3470,12 +3473,26 @@
     setSelectValue('settings-padding-x', cfg.editorPaddingX, 56);
     setSelectValue('settings-page-width', cfg.editorPageWidth, 0);
     setSelectValue('settings-paper', cfg.editorPaper, 'paper');
+    $('settings-snapshot-enabled').checked = cfg.snapshotEnabled === true;
+    setSelectValue('settings-snapshot-days', cfg.snapshotKeepDays, 7);
+  }
+
+  function readSnapshotForm() {
+    return {
+      snapshotEnabled: $('settings-snapshot-enabled').checked === true,
+      snapshotKeepDays: Number($('settings-snapshot-days').value)
+    };
   }
 
   function updateSettingsScopeUi() {
     const isBook = state.settingsScope === 'book';
     const rootField = $('settings-root-field');
     if (rootField) rootField.classList.toggle('hidden', isBook);
+    // 每日快照是全局设置：按书覆盖没有意义，写作页里不显示
+    const snapshotField = $('settings-snapshot-field');
+    if (snapshotField) snapshotField.classList.toggle('hidden', isBook);
+    const snapshotDays = $('settings-snapshot-days-field');
+    if (snapshotDays) snapshotDays.classList.toggle('hidden', isBook);
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -3548,7 +3565,8 @@
       }
       const cfg = await call(api.setConfig, {
         booksRoot: $('settings-root').value.trim(),
-        ...form
+        ...form,
+        ...readSnapshotForm()
       });
       state.globalConfig = cfg;
       state.config = effectiveConfig();
@@ -4424,6 +4442,18 @@
       openSettings: () => openSettings(),
       settingsOpen: () => !$('settings-backdrop').classList.contains('hidden'),
       closeSettings: () => closeSettings(),
+      async saveSettings() {
+        return saveSettings();
+      },
+      setCheck(id, checked) {
+        const el = $(id);
+        el.checked = Boolean(checked);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      },
+      snapshotSettings: () => ({
+        enabled: $('settings-snapshot-enabled').checked === true,
+        keepDays: Number($('settings-snapshot-days').value)
+      }),
       setSelect(id, value) {
         const el = $(id);
         el.value = String(value);

@@ -316,3 +316,44 @@ test('配置并发写入：两个 set 的 patch 都不会被吞掉', async () =>
   assert.equal(cfg.editorPaper, 'night');
   assert.equal(cfg.editorFontSize, 22);
 });
+
+test('每日快照配置：默认关闭、保留 7 天，旧配置没有这两个键也照常启动', async () => {
+  const dir = await mkTmp();
+  // 模拟 v0.4.1 的旧配置：完全没有 snapshot 字段
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', editorFont: 'kai' }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.snapshotEnabled, false, '旧配置/缺字段必须按「关」处理');
+  assert.equal(cfg.snapshotKeepDays, 7);
+  assert.equal(cfg.editorFont, 'kai', '旧配置其它字段不受影响');
+});
+
+test('每日快照配置：脏值清洗（只认 true、天数夹到 1–90）', () => {
+  assert.equal(sanitize({ snapshotEnabled: 'true' }).snapshotEnabled, false);
+  assert.equal(sanitize({ snapshotEnabled: 1 }).snapshotEnabled, false);
+  assert.equal(sanitize({ snapshotEnabled: true }).snapshotEnabled, true);
+  assert.equal(sanitize({ snapshotKeepDays: 0 }).snapshotKeepDays, 1);
+  assert.equal(sanitize({ snapshotKeepDays: 999 }).snapshotKeepDays, 90);
+  assert.equal(sanitize({ snapshotKeepDays: 'abc' }).snapshotKeepDays, 7);
+  assert.equal(sanitize({ snapshotKeepDays: 14.6 }).snapshotKeepDays, 15);
+});
+
+test('每日快照配置：写盘 / 读回，不影响其它配置', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ snapshotEnabled: true, snapshotKeepDays: 3, editorFont: 'sans' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.snapshotEnabled, true);
+  assert.equal(reopened.snapshotKeepDays, 3);
+  assert.equal(reopened.editorFont, 'sans');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.snapshotEnabled, true);
+  assert.equal(raw.snapshotKeepDays, 3);
+
+  // 关掉后能真正清掉（不会残留 true）
+  await store.set({ snapshotEnabled: false });
+  assert.equal((await createConfigStore(dir).get()).snapshotEnabled, false);
+});

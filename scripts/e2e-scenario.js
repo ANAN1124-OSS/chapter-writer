@@ -2799,5 +2799,235 @@ module.exports = async function runScenario(ctx) {
   );
   await exec('window.__cwTest.closeHistory()');
 
+  // 43. 可选每日快照（v0.6-2，默认关）：Ctrl+S 时当天首次留上一版，按天数清理
+  const snapshotDefaults = await exec('window.api.getConfig()');
+  check(
+    '每日快照：默认关闭、保留 7 天（没有配置字段也按默认）',
+    snapshotDefaults &&
+      snapshotDefaults.ok &&
+      snapshotDefaults.data.snapshotEnabled === false &&
+      snapshotDefaults.data.snapshotKeepDays === 7,
+    snapshotDefaults && snapshotDefaults.data
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  const snapshotSettingsBefore = await exec('window.__cwTest.snapshotSettings()');
+  check(
+    '每日快照：设置里有开关，默认不勾、7 天',
+    snapshotSettingsBefore && snapshotSettingsBefore.enabled === false && snapshotSettingsBefore.keepDays === 7,
+    snapshotSettingsBefore
+  );
+  await exec("window.__cwTest.setCheck('settings-snapshot-enabled', true)");
+  await exec("window.__cwTest.setSelect('settings-snapshot-days', '3')");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor(
+    'window.api.getConfig().then((r) => r.ok && r.data.snapshotEnabled === true && r.data.snapshotKeepDays === 3)'
+  );
+  const snapshotCfgDisk = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check(
+    '每日快照：开关和保留天数真的落进 config.json',
+    snapshotCfgDisk.snapshotEnabled === true && snapshotCfgDisk.snapshotKeepDays === 3,
+    { enabled: snapshotCfgDisk.snapshotEnabled, days: snapshotCfgDisk.snapshotKeepDays }
+  );
+
+  // 43a. 打开一本 v0.4.1 形状的旧书（42j 刚去掉 schemaVersion），保存时留快照
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.switchTo(0)');
+  const snapshotLegacyRaw = JSON.parse(await fs.readFile(historyMetaPath, 'utf8'));
+  check(
+    '每日快照：v0.4.1 形状旧书目（没有 schemaVersion）照常打开',
+    snapshotLegacyRaw.schemaVersion === undefined && snapshotLegacyRaw.chapters.length === 2,
+    { version: snapshotLegacyRaw.schemaVersion, chapters: snapshotLegacyRaw.chapters.length }
+  );
+
+  const snapshotMeta = await storage.readBookMeta(historyBookPath);
+  const snapshotFile0 = snapshotMeta.chapters[0].file;
+  const snapshotFile1 = snapshotMeta.chapters[1].file;
+  const snapshotTrash = path.join(historyBookPath, '_trash');
+  const snapshotSource0 = await fs.readFile(path.join(historyBookPath, snapshotFile0));
+  const snapshotSource0Text = snapshotSource0.toString('utf8').replace(/^\uFEFF/, '');
+  const today = new Date();
+  const snapshotDay = `快照-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(
+    today.getDate()
+  ).padStart(2, '0')}`;
+  const snapshotTodayDir = path.join(snapshotTrash, snapshotDay);
+
+  await exec("window.__cwTest.setText('快照测试：第一版')");
+  const snapshotSave1 = await exec('window.__cwTest.save()');
+  check(
+    '每日快照：开启后第一次保存会留下当天快照',
+    snapshotSave1 &&
+      snapshotSave1.ok &&
+      snapshotSave1.data.snapshot &&
+      snapshotSave1.data.snapshot.taken === true &&
+      snapshotSave1.data.snapshot.dir === snapshotDay,
+    snapshotSave1 && snapshotSave1.data && snapshotSave1.data.snapshot
+  );
+  const snapshotPath0 = path.join(snapshotTodayDir, snapshotFile0);
+  check(
+    '每日快照：快照复制的是保存前的上一版（字节原样）',
+    (await fs.readFile(snapshotPath0)).equals(snapshotSource0)
+  );
+  check(
+    '每日快照：快照里不是刚保存的新正文',
+    !(await fs.readFile(snapshotPath0, 'utf8')).includes('快照测试：第一版')
+  );
+
+  const snapshotStat0 = await fs.stat(snapshotPath0);
+  await exec("window.__cwTest.setText('快照测试：第二版')");
+  const snapshotSave2 = await exec('window.__cwTest.save()');
+  check(
+    '每日快照：同一章当天第二次保存不再复制',
+    snapshotSave2 &&
+      snapshotSave2.ok &&
+      snapshotSave2.data.snapshot.taken === false &&
+      snapshotSave2.data.snapshot.reason === 'ALREADY_TODAY',
+    snapshotSave2 && snapshotSave2.data && snapshotSave2.data.snapshot
+  );
+  const snapshotStat0After = await fs.stat(snapshotPath0);
+  check(
+    '每日快照：当天快照仍是第一份，不被后来的保存覆盖',
+    (await fs.readFile(snapshotPath0)).equals(snapshotSource0) &&
+      snapshotStat0After.mtimeMs === snapshotStat0.mtimeMs &&
+      (await fs.readdir(snapshotTodayDir)).length === 1
+  );
+  check(
+    '每日快照：正文照常保存（快照不改变保存结果）',
+    (await storage.loadChapterText(historyBookPath, snapshotFile0)).text === '快照测试：第二版'
+  );
+  const snapshotLegacyAfter = JSON.parse(await fs.readFile(historyMetaPath, 'utf8'));
+  check(
+    '每日快照：旧书保存后补 schemaVersion，章节顺序/文件名不变',
+    snapshotLegacyAfter.schemaVersion === 1 &&
+      JSON.stringify(snapshotLegacyAfter.chapters.map((chapter) => chapter.file)) ===
+        JSON.stringify([snapshotFile0, snapshotFile1]),
+    snapshotLegacyAfter.chapters.map((chapter) => chapter.file)
+  );
+
+  // 43b. 和「本书历史」联动：能看到、能预览、能还原
+  await exec('window.__cwTest.openHistoryForCurrentBook()');
+  const snapshotGroupIndex = await exec("window.__cwTest.historyGroupIndexBySource('snapshot')");
+  const snapshotGroups = await exec('window.__cwTest.historyGroups()');
+  const snapshotGroup = snapshotGroupIndex >= 0 ? snapshotGroups[snapshotGroupIndex] : null;
+  const snapshotFileIndex = snapshotGroup
+    ? snapshotGroup.files.findIndex((file) => file.name === snapshotFile0)
+    : -1;
+  check(
+    '每日快照：本书历史里出现「每日快照」组，文件可还原',
+    snapshotGroup &&
+      snapshotGroup.sourceLabel === '每日快照' &&
+      snapshotGroup.fileCount === 1 &&
+      snapshotFileIndex >= 0 &&
+      snapshotGroup.files[snapshotFileIndex].restorable === true,
+    snapshotGroup
+  );
+  const snapshotPreview = await exec(
+    `window.__cwTest.previewHistoryAt(${snapshotGroupIndex}, ${snapshotFileIndex})`
+  );
+  check(
+    '每日快照：历史面板能预览快照原文（只读）',
+    snapshotPreview && snapshotPreview.text === snapshotSource0Text,
+    snapshotPreview && snapshotPreview.text
+  );
+  const snapshotRestorePromise = exec(
+    `window.__cwTest.restoreHistoryFileAt(${snapshotGroupIndex}, ${snapshotFileIndex})`
+  );
+  await waitFor('window.__cwTest.modalOpen()');
+  await exec("window.__cwTest.answerModal('ok')");
+  const snapshotRestore = await snapshotRestorePromise;
+  check(
+    '每日快照：能从本书历史还原当天快照',
+    snapshotRestore &&
+      snapshotRestore.ok &&
+      snapshotRestore.data &&
+      snapshotRestore.data.restored === 1 &&
+      snapshotRestore.data.sourceLabel === '每日快照',
+    snapshotRestore
+  );
+  check(
+    '每日快照：还原后正文回到快照内容，并留下还原前备份',
+    (await storage.loadChapterText(historyBookPath, snapshotFile0)).text ===
+      snapshotSource0Text.replace(/\r\n/g, '\n')
+  );
+  await exec('window.__cwTest.closeHistory()');
+
+  // 43c. 保留天数：只清理应用生成的「快照-YYYYMMDD」，旧目录删、其它都不动
+  const snapshotOldDir = path.join(snapshotTrash, '快照-20200101');
+  const snapshotFutureDir = path.join(snapshotTrash, '快照-29991231');
+  const snapshotUnknownDir = path.join(snapshotTrash, '我的备份-20200101');
+  for (const dir of [snapshotOldDir, snapshotFutureDir, snapshotUnknownDir]) {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'keep.txt'), '别动我\n', 'utf8');
+  }
+  await fs.writeFile(path.join(snapshotTrash, '快照-20200101.txt'), '散文件也别动\n', 'utf8');
+
+  await exec('window.__cwTest.switchTo(1)');
+  const snapshotSource1 = await fs.readFile(path.join(historyBookPath, snapshotFile1));
+  await exec("window.__cwTest.setText('第二章快照测试')");
+  const snapshotSave3 = await exec('window.__cwTest.save()');
+  check(
+    '每日快照：换一章当天也能各留一份',
+    snapshotSave3 && snapshotSave3.ok && snapshotSave3.data.snapshot.taken === true,
+    snapshotSave3 && snapshotSave3.data && snapshotSave3.data.snapshot
+  );
+  check(
+    '每日快照：第二章快照内容也是保存前的上一版',
+    (await fs.readFile(path.join(snapshotTodayDir, snapshotFile1))).equals(snapshotSource1)
+  );
+  check(
+    '每日快照：超出保留天数的旧快照目录被清理',
+    (await fs.readFile(path.join(snapshotTodayDir, snapshotFile1))).equals(snapshotSource1) &&
+      !(await fileExists(snapshotOldDir)) &&
+      snapshotSave3.data.snapshot.cleanup.removed.includes('快照-20200101'),
+    snapshotSave3.data.snapshot.cleanup
+  );
+  check(
+    '每日快照：未来日期、未知目录、散文件都原样保留',
+    (await fileExists(path.join(snapshotFutureDir, 'keep.txt'))) &&
+      (await fileExists(path.join(snapshotUnknownDir, 'keep.txt'))) &&
+      (await fileExists(path.join(snapshotTrash, '快照-20200101.txt')))
+  );
+  check(
+    '每日快照：当天快照目录里有这一章的两个文件',
+    (await fs.readdir(snapshotTodayDir)).sort().join('|') === [snapshotFile0, snapshotFile1].sort().join('|')
+  );
+
+  // 43d. 关掉开关：后续保存不再留快照；写作页设置里不显示全局快照项
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setCheck('settings-snapshot-enabled', false)");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.snapshotEnabled === false)');
+  const snapshotCfgOff = JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+  check('每日快照：关掉后 config.json 里是 false', snapshotCfgOff.snapshotEnabled === false);
+
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec("window.__cwTest.newChapter('关掉快照后')");
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '每日快照：写作页设置里不显示全局快照开关',
+    (await exec(
+      "document.getElementById('settings-snapshot-field').classList.contains('hidden') === true"
+    )) === true
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await exec("window.__cwTest.setText('关掉快照后的正文')");
+  const snapshotSave4 = await exec('window.__cwTest.save()');
+  check(
+    '每日快照：关掉开关后保存不再留快照',
+    snapshotSave4 &&
+      snapshotSave4.ok &&
+      snapshotSave4.data.snapshot.reason === 'DISABLED' &&
+      snapshotSave4.data.snapshot.taken === false,
+    snapshotSave4 && snapshotSave4.data && snapshotSave4.data.snapshot
+  );
+  check(
+    '每日快照：关掉后当天快照目录没有多出新章文件',
+    (await fs.readdir(snapshotTodayDir)).length === 2
+  );
+
   return { ok: true, checks: checks.length, details: checks };
 };

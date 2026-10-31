@@ -352,9 +352,30 @@ function registerIpc() {
 
   handleBook('chapter:save', async (bookPath, chapterId, text) => {
     return storage.withBookLock(bookPath, async () => {
+      const cfg = await getConfig();
       const meta = await storage.readBookMeta(bookPath);
       const chapter = meta.chapters.find((c) => c.id === chapterId);
       if (!chapter) throw new storage.StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+      // 可选每日快照：在写正文之前复制「上一版」。默认关；失败只记原因，绝不阻塞保存。
+      let snapshot = { taken: false, reason: 'DISABLED', dir: null, file: chapter.file, bytes: 0, cleanup: null };
+      if (cfg.snapshotEnabled) {
+        try {
+          snapshot = await storage.takeDailySnapshot(bookPath, chapter.file, {
+            keepDays: cfg.snapshotKeepDays,
+            now: new Date()
+          });
+        } catch (err) {
+          snapshot = {
+            taken: false,
+            reason: 'ERROR',
+            message: err.message,
+            dir: null,
+            file: chapter.file,
+            bytes: 0,
+            cleanup: null
+          };
+        }
+      }
       const result = await storage.saveChapterText(bookPath, chapter.file, String(text == null ? '' : text));
       // 同步章节字数缓存，书架就不用为了算字数去重读整本书
       chapter.chars = result.chars;
@@ -366,7 +387,7 @@ function registerIpc() {
         chapterIndex: meta.chapters.indexOf(chapter),
         chapterName: chapter.name
       });
-      return { ...result, file: chapter.file };
+      return { ...result, file: chapter.file, snapshot };
     });
   });
 
@@ -818,11 +839,19 @@ async function runAutomation() {
           true
         );
         await sleep(500);
-      } else if (screenshotDialog === 'settings') {
+      } else if (screenshotDialog === 'settings' || screenshotDialog === 'settings-snapshot') {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
           true
         );
+        if (screenshotDialog === 'settings-snapshot') {
+          // 开发截图用：设置弹层很长，滚到底展示「数据安全 / 每日快照」
+          await sleep(300);
+          await win.webContents.executeJavaScript(
+            `const sc = document.querySelector('.settings-scroll'); if (sc) sc.scrollTop = sc.scrollHeight;`,
+            true
+          );
+        }
         await sleep(500);
       } else if (screenshotDialog === 'bookmenu') {
         await win.webContents.executeJavaScript(

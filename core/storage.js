@@ -9,6 +9,7 @@ const formatLib = require('./format');
 const schemaLib = require('./schema');
 const conflictLib = require('./conflict');
 const historyLib = require('./history');
+const snapshotLib = require('./snapshot');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -901,6 +902,85 @@ async function restoreReplaceBackup(bookPath, backupName) {
   };
 }
 
+// ---------- 可选「每日快照」 ----------
+// 只在作者按 Ctrl+S、且设置里打开时发生；每章每天最多一份（当天第一次保存前的内容）。
+// 目录固定在书内 _trash/快照-YYYYMMDD/，写盘仍走 atomicWriteFile；
+// 清理只认严格合法的「快照-YYYYMMDD」目录，别的备份 / 文件 / 乱写目录一律不碰。
+
+// 删除超出保留天数的快照目录（只删本应用生成的快照目录）。
+async function cleanupSnapshots(bookPath, { keepDays = snapshotLib.DEFAULT_KEEP_DAYS, now = new Date() } = {}) {
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  let entries;
+  try {
+    entries = await fs.readdir(trashDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return { removed: [], failed: [], kept: 0 };
+    throw err;
+  }
+  // 只看目录；符号链接 / 联接点不动（避免把书库外面删掉）
+  const dirNames = entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => entry.name);
+  const expired = new Set(snapshotLib.selectExpiredSnapshotDirs(dirNames, now, keepDays));
+  if (!expired.size) return { removed: [], failed: [], kept: dirNames.length };
+  const removed = [];
+  const failed = [];
+  for (const name of dirNames) {
+    if (!expired.has(name)) continue;
+    const target = path.join(trashDir, name);
+    // 双保险：名字必须是 basename，且实际父目录就是书的 _trash
+    if (path.basename(name) !== name || path.dirname(target) !== trashDir) continue;
+    try {
+      await fs.rm(target, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      failed.push(name); // 被占用 / 权限问题：下次保存再试，不影响这次保存
+    }
+  }
+  return { removed, failed, kept: dirNames.length - removed.length };
+}
+
+// 保存前留一份当天快照。返回 { taken, reason, dir, file, bytes, cleanup }：
+// - TAKEN：这一次真的复制了；ALREADY_TODAY：今天已经有这一章的快照，不重复复制；
+// - MISSING：章节文件还不存在（不建空快照）；DISABLED 由调用方（main.js）处理。
+// 无论是否复制，都会顺手清理过期快照目录（只有开启该功能时才会被调用）。
+async function takeDailySnapshot(bookPath, file, { keepDays, now = new Date() } = {}) {
+  const raw = String(file == null ? '' : file).trim();
+  if (!raw || path.basename(raw) !== raw || !/\.txt$/i.test(raw)) {
+    throw new StorageError('BAD_SNAPSHOT_FILE', '只能给章节 txt 做快照');
+  }
+  const source = assertInside(bookPath, raw);
+  let buffer;
+  try {
+    buffer = await fs.readFile(source);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { taken: false, reason: 'MISSING', dir: null, file: raw, bytes: 0, cleanup: { removed: [], failed: [], kept: 0 } };
+    }
+    throw err;
+  }
+  const dir = snapshotLib.snapshotDirName(now);
+  if (!dir) throw new StorageError('BAD_SNAPSHOT_TIME', '快照时间不合法');
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  const snapshotDir = path.join(trashDir, dir);
+  const target = path.join(snapshotDir, raw);
+  let taken = false;
+  if (!(await exists(target))) {
+    await ensureDir(snapshotDir);
+    await atomicWriteFile(target, buffer); // 原样复制字节（CRLF / BOM 都不动）
+    taken = true;
+  }
+  const cleanup = await cleanupSnapshots(bookPath, { keepDays, now });
+  return {
+    taken,
+    reason: taken ? 'TAKEN' : 'ALREADY_TODAY',
+    dir,
+    file: raw,
+    bytes: buffer.length,
+    cleanup
+  };
+}
+
 // ---------- 「本书历史」：统一查看 / 还原 _trash 备份 ----------
 // 备份来源：替换备份-* / 整理备份-* / 还原前备份-* / 快照-* / 删章散文件 / 书目.json.bak。
 // 还原规则（安全优先）：
@@ -1165,6 +1245,8 @@ module.exports = {
   formatBook: locked(formatBook),
   listReplaceBackups,
   restoreReplaceBackup: locked(restoreReplaceBackup),
+  cleanupSnapshots,
+  takeDailySnapshot,
   listBookHistory,
   previewHistoryFile,
   restoreHistoryFile: locked(restoreHistoryFile),

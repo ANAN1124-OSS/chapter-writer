@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { writeJsonAtomic, stripBom } = require('./atomic');
 const formatLib = require('./format');
+const snapshotLib = require('./snapshot');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -49,7 +50,11 @@ const DEFAULTS = Object.freeze({
   // 上次写作的书 + 章节（书架顶部「继续上次写作」用）。只是书架级记忆，书库里的
   // lastOpenChapterId 仍是「打开这本书回到哪一章」的唯一事实来源。
   // { path, title, chapterId, chapterIndex, chapterName, at }；没有写过 = null。
-  lastBook: null
+  lastBook: null,
+  // 可选「每日快照」：默认关（不给作者添意外写盘）。开启后每次 Ctrl+S 成功时，
+  // 当天第一次保存会把这一章的上一版复制到书内 _trash/快照-YYYYMMDD/。
+  snapshotEnabled: false,
+  snapshotKeepDays: snapshotLib.DEFAULT_KEEP_DAYS
 });
 
 function clampInt(value, min, max, fallback) {
@@ -167,6 +172,13 @@ function sanitize(raw) {
   const lastExportDir = typeof cfg.lastExportDir === 'string' ? cfg.lastExportDir.trim() : '';
   cfg.lastExportDir = lastExportDir.length > 1000 ? '' : lastExportDir;
   cfg.lastBook = sanitizeLastBook(cfg.lastBook);
+  // 每日快照：只认真正的 true（缺字段 / 写错类型都按「关」，不会因为脏配置自动写盘）；
+  // 保留天数夹在 1–90 天，坏值回落 7 天。
+  cfg.snapshotEnabled = cfg.snapshotEnabled === true;
+  cfg.snapshotKeepDays = snapshotLib.normalizeKeepDays(
+    cfg.snapshotKeepDays,
+    snapshotLib.DEFAULT_KEEP_DAYS
+  );
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {
