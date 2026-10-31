@@ -49,7 +49,7 @@
           ]
         }
       ],
-      "artifactName": "章节写作器-${version}-安装包.${ext}"
+      "artifactName": "chapter-writer-${version}-win-x64-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,

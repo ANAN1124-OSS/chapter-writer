@@ -31,7 +31,9 @@
 
 ### 方式一：安装包（推荐，不用命令行）
 
-双击 `dist\章节写作器-0.1.0-安装包.exe`：
+**下载**：从 [GitHub Releases](https://github.com/ANAN1124-OSS/chapter-writer/releases/tag/v0.1.0) 下载 `chapter-writer-0.1.0-win-x64-setup.exe`，或者直接用本机打包产物 `dist\chapter-writer-0.1.0-win-x64-setup.exe`。
+
+安装：
 
 1. 安装包**没有代码签名**，Windows 可能弹「已保护你的电脑」→ 点「更多信息」→「仍要运行」。
 2. 可以自己选安装目录（默认装到当前用户目录，不需要管理员），安装完有**桌面快捷方式**和**开始菜单**入口。
@@ -70,7 +72,7 @@ pnpm start          # 启动应用
 
 ```bash
 pnpm run icon       # 重新生成图标（build/icon.ico / icon.png，纯 Pillow 绘制，需要 python）
-pnpm run dist       # 打 Windows 安装包 → dist\章节写作器-<版本>-安装包.exe（NSIS，x64）
+pnpm run dist       # 打 Windows 安装包 → dist\chapter-writer-<版本>-win-x64-setup.exe（NSIS，x64）
 pnpm run dist:dir   # 只打免安装目录 → dist\win-unpacked\章节写作器.exe（改完快速验证用）
 ```
 
@@ -80,6 +82,8 @@ pnpm run dist:dir   # 只打免安装目录 → dist\win-unpacked\章节写作�
   `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`。
 - 目前**没有代码签名**（个人自用省掉证书），所以每台新机器首次安装会看到 SmartScreen 提示。
 - 安装包产物在 `dist/`（已加进 `.gitignore`，不进仓库）；`build/icon.*` 是图标源文件，会进仓库。
+- 产物文件名用 **ASCII**（`chapter-writer-<版本>-win-x64-setup.exe`）：`gh` 在 Windows 上传中文文件名会被吞成 `-0.1.0-.exe`，所以发布资产别用中文名；安装后的程序显示名/快捷方式仍是「章节写作器」。
+- 发布到 GitHub：`gh release create v<版本> "dist/chapter-writer-<版本>-win-x64-setup.exe" --title "章节写作器 v<版本>" --notes-file <说明.md>`（`gh` 走 HTTPS，国内需 `HTTPS_PROXY`）。
 
 ## 数据在哪
 
