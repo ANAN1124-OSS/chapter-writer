@@ -68,6 +68,7 @@
           <div class="chapter-title" id="chapter-title"></div>
           <div class="editor-actions">
             <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
+            <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
             <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
             <div class="dropdown">
               <button id="btn-format" class="btn ghost" type="button" title="整理本章正文 / 调整正文显示">排版 ▾</button>
@@ -153,6 +154,41 @@
       </p>
       <div class="modal-buttons">
         <button id="btn-find-close" class="btn ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 校对（只报告，不改动） ============ -->
+  <div id="proofread-backdrop" class="backdrop hidden">
+    <div class="modal proofread-modal" role="dialog" aria-modal="true">
+      <h2 class="modal-title">校对</h2>
+      <p class="modal-message">
+        只把可疑的地方列出来，<strong>不改正文、不写盘</strong>：半角标点残留、超长段落、
+        同一个双字词在短距离内反复出现、连续标点、多余空行。点任意一条会跳到正文对应位置，
+        要不要改、怎么改都由你自己决定。
+      </p>
+      <div class="proofread-row">
+        <label class="field inline">
+          <span>范围</span>
+          <select id="proofread-scope" class="text-input">
+            <option value="current">当前这一章</option>
+            <option value="book">整本书</option>
+          </select>
+        </label>
+        <button id="btn-proofread-run" class="btn ghost" type="button">开始校对</button>
+        <span id="proofread-busy" class="muted small hidden">正在检查…</span>
+      </div>
+      <div class="proofread-summary" id="proofread-summary">
+        打开面板会自动检查当前章；切成整本后点「开始校对」。
+      </div>
+      <div class="proofread-results" id="proofread-results"></div>
+      <p class="muted small">
+        当前阈值：超长段落 500 字、重复用词 300 字内出现 3 次、连续标点 3 个及以上
+        （连排的「……」和「——」按一个标点算）。当前章未保存的内容也参与检查，但不会写盘；
+        整本检查只读磁盘，不改任何 txt 和 <code>书目.json</code>。
+      </p>
+      <div class="modal-buttons">
+        <button id="btn-proofread-close" class="btn ghost" type="button">关闭</button>
       </div>
     </div>
   </div>

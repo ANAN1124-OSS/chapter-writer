@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('api', {
     invoke('text:find-next', text, query, fromIndex, options),
   replaceInText: (text, query, replacement, options) =>
     invoke('text:replace', text, query, replacement, options),
+  // 校对（只报告、不改动）：当前章纯文本检查 / 整本逐章只读检查
+  proofreadText: (text, options) => invoke('text:proofread', text, options),
+  proofreadBook: (bookPath, options, override) =>
+    invoke('book:proofread', bookPath, options, override),
   // Ctrl+G 跳章：章号 / 章名关键词的纯匹配（主进程只算不读盘）
   jumpMatch: (chapters, query, options) => invoke('jump:match', chapters, query, options),
   createChapter: (bookPath, insertIndex, name, volumeId) =>

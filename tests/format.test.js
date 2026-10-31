@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { formatText, sanitizeOptions, DEFAULT_OPTIONS } = require('../core/format');
+const { formatText, sanitizeOptions, DEFAULT_OPTIONS, convertPunct } = require('../core/format');
 
 const F = (text, options) => formatText(text, options).text;
 
@@ -211,4 +211,30 @@ test('标点扩展：引号 + 省略号 + 全角标点同时开启', () => {
   assert.equal(res.stats.punctFixed, 1);
   assert.equal(res.stats.quotesFixed, 2);
   assert.equal(res.stats.ellipsisFixed, 1);
+});
+
+test('校对用：convertPunct 可选回调只报告位置，不改变转换结果', () => {
+  const line = '价格3.14元,时间12:30,他说"好"。';
+  const reported = [];
+  const withCallback = convertPunct(line, (index, from, to) => reported.push({ index, from, to }));
+  const without = convertPunct(line);
+  assert.deepEqual(withCallback, without);
+  assert.equal(reported.length, without.count);
+  assert.deepEqual(reported, [
+    { index: 7, from: ',', to: '，' },
+    { index: 15, from: ',', to: '，' }
+  ]);
+  // 回调拿到的是「原串里的位置」，可以直接用来在编辑区选中
+  for (const item of reported) assert.equal(line[item.index], item.from);
+});
+
+test('校对用：回调不会改变清理规则（数字 / 网址 / 英文里的标点仍不报）', () => {
+  const line = '版本 3.14，时间 12:30，网址 www.a.com，缩写 A.开头。';
+  let count = 0;
+  const res = convertPunct(line, () => {
+    count += 1;
+  });
+  assert.equal(count, 0);
+  assert.equal(res.count, 0);
+  assert.equal(res.text, line);
 });

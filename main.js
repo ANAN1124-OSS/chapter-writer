@@ -35,6 +35,7 @@ const exporter = require('./core/exporter');
 const chaptersLib = require('./core/chapters');
 const formatLib = require('./core/format');
 const findLib = require('./core/find');
+const proofreadLib = require('./core/proofread');
 const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
 const statsLib = require('./core/stats');
@@ -345,6 +346,13 @@ function registerIpc() {
     return formatLib.formatText(text, options);
   });
 
+  // 校对（提案 5.1）：只报告、不改动。当前章正文由渲染层传上来（和查找一样，不读盘）；
+  // 整本版走 book:proofread，逐章只读磁盘。index 是归一 CRLF 后的字符位置，可直接选中。
+  handle('text:proofread', async (text, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    return proofreadLib.proofreadText(text, options);
+  });
+
   // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
   handle('text:find', async (text, query, options) => {
     if (typeof text !== 'string') throw new Error('正文必须是文本');
@@ -510,6 +518,79 @@ function registerIpc() {
   // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
   handleBook('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
   handleBook('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
+
+  // 校对整本（提案 5.1）：逐章只读正文，按 core/proofread.js 的规则列出可疑位置；
+  // 全程不写盘。当前章未保存的内容用 override 传进来（和导出同一个惯例：只参与这一次检查）。
+  // 每章最多保留 maxIssues 条明细，整本明细上限 1500 条，但总数 / 各规则条数照实统计。
+  handleBook('book:proofread', async (bookPath, options, override) => {
+    const meta = await storage.readBookMeta(bookPath);
+    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    const limits = proofreadLib.sanitizeOptions(options);
+    const BOOK_ISSUE_LIMIT = 1500;
+    const byRule = {};
+    for (const rule of proofreadLib.RULE_ORDER) byRule[rule] = 0;
+    const chapters = [];
+    const issues = [];
+    let total = 0;
+    let truncated = false;
+    let skippedChapters = 0;
+    for (let index = 0; index < meta.chapters.length; index += 1) {
+      const chapter = meta.chapters[index];
+      let text;
+      if (index === overrideIndex) {
+        text = override.text;
+      } else {
+        try {
+          text = (await storage.loadChapterText(bookPath, chapter.file)).text;
+        } catch (err) {
+          if (err.code === 'CHAPTER_MISSING') {
+            skippedChapters += 1; // 缺文件的章节跳过，不让整本校对失败
+            continue;
+          }
+          throw err;
+        }
+      }
+      const result = proofreadLib.proofreadText(text, limits);
+      total += result.total;
+      for (const rule of proofreadLib.RULE_ORDER) byRule[rule] += result.byRule[rule] || 0;
+      if (result.total) {
+        chapters.push({
+          chapterId: chapter.id,
+          chapterIndex: index,
+          name: chapter.name,
+          total: result.total,
+          byRule: result.byRule,
+          truncated: result.truncated
+        });
+      }
+      if (result.truncated) truncated = true;
+      for (const issue of result.issues) {
+        if (issues.length >= BOOK_ISSUE_LIMIT) {
+          truncated = true;
+          break;
+        }
+        issues.push({
+          ...issue,
+          chapterId: chapter.id,
+          chapterIndex: index,
+          chapterName: chapter.name
+        });
+      }
+    }
+    return {
+      scope: 'book',
+      total,
+      byRule,
+      issues,
+      chapters,
+      chapterCount: meta.chapters.length,
+      // 有问题的章数（chapters 只收有问题的章）
+      chapterHitCount: chapters.length,
+      skippedChapters,
+      truncated: truncated || total > issues.length,
+      options: limits
+    };
+  });
 
   // 整本替换的还原：列出 / 还原书内 _trash/替换备份-*/（还原前把当前内容再备份一份）
   handleBook('book:list-replace-backups', async (bookPath) => storage.listReplaceBackups(bookPath));
@@ -989,6 +1070,14 @@ async function runAutomation() {
           true
         );
         await sleep(900);
+      } else if (screenshotDialog === 'proofread') {
+        // 开发截图用：打开校对面板，等当前章自动检查完，再切整本跑一遍（只读）
+        await win.webContents.executeJavaScript(`window.__cwTest.openProofreadPanel();`, true);
+        await sleep(800);
+        await win.webContents.executeJavaScript(`window.__cwTest.setProofreadScope('book');`, true);
+        await sleep(120);
+        await win.webContents.executeJavaScript(`window.__cwTest.proofreadRun();`, true);
+        await sleep(800);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',

@@ -133,6 +133,9 @@
     jumpToken: 0, // 丢弃过期的异步匹配结果
     jumpTimer: null, // 输入防抖
     formatBookRunning: false, // 「一键整理本书」进行中（防重复触发）
+    proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, ... }
+    proofreadScope: 'current', // 校对范围：current = 当前章；book = 整本
+    proofreadBusy: false, // 校对进行中（防重复触发）
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
@@ -2431,6 +2434,7 @@
     }
     hideFormatMenu();
     hideExportMenu();
+    if (!$('proofread-backdrop').classList.contains('hidden')) closeProofreadPanel();
     // 编辑器里选中了一段短文本时，直接带进查找框
     const selection = String(window.getSelection ? window.getSelection().toString() : '');
     if (selection && selection.length <= 60 && !selection.includes('\n')) {
@@ -3122,6 +3126,274 @@
       );
     } catch (err) {
       toast(`整本替换失败：${err.message}`, 'error');
+    }
+  }
+
+  // ---------- 校对（只报告，不改动；提案 5.1） ----------
+  // 规则 / 阈值都在主进程 core/proofread.js（单测覆盖）；这里只负责面板、结果列表和「点一条跳过去」。
+  // 和查找一样：当前章用编辑区里的内容（未保存也算，只参与检查）；整本由主进程逐章只读磁盘。
+  const PROOFREAD_ROW_LIMIT = 300;
+  const PROOFREAD_RULE_ORDER = ['halfwidth-punct', 'long-paragraph', 'repeat-word', 'punct-run', 'blank-lines'];
+  const PROOFREAD_RULE_LABELS = {
+    'halfwidth-punct': '半角标点',
+    'long-paragraph': '超长段落',
+    'repeat-word': '重复用词',
+    'punct-run': '连续标点',
+    'blank-lines': '多余空行'
+  };
+
+  function openProofreadPanel() {
+    if (!state.bookPath) {
+      toast('先打开一本书再校对', 'warn');
+      return false;
+    }
+    hideFormatMenu();
+    hideExportMenu();
+    if (!$('find-backdrop').classList.contains('hidden')) closeFindPanel();
+    $('proofread-scope').value = state.proofreadScope === 'book' ? 'book' : 'current';
+    $('proofread-backdrop').classList.remove('hidden');
+    // 打开就先检查一遍当前章，不用再点一次；整本要作者自己点「开始校对」
+    runProofread();
+    return true;
+  }
+
+  function closeProofreadPanel() {
+    $('proofread-backdrop').classList.add('hidden');
+  }
+
+  function proofreadScope() {
+    return $('proofread-scope').value === 'book' ? 'book' : 'current';
+  }
+
+  // 当前章的最新内容（未保存也算；只用于这一次检查，不写盘）
+  function currentChapterRef() {
+    const chapter = state.chapters[state.index];
+    if (!chapter) return null;
+    return { chapterId: chapter.id, chapterFile: chapter.file, text: editorEl.value };
+  }
+
+  function proofreadRuleSummary(counts) {
+    return PROOFREAD_RULE_ORDER.filter((rule) => counts && counts[rule])
+      .map((rule) => `${PROOFREAD_RULE_LABELS[rule]} ${counts[rule]}`)
+      .join(' · ');
+  }
+
+  function setProofreadBusy(busy) {
+    state.proofreadBusy = Boolean(busy);
+    $('proofread-busy').classList.toggle('hidden', !busy);
+    $('btn-proofread-run').disabled = Boolean(busy);
+  }
+
+  function proofreadChapterTitle(issue) {
+    let index = Number(issue.chapterIndex);
+    const byIndex =
+      Number.isInteger(index) && index >= 0 && state.chapters[index] && state.chapters[index].id === issue.chapterId;
+    if (!byIndex) index = state.chapters.findIndex((chapter) => chapter.id === issue.chapterId);
+    if (index < 0) return String(issue.chapterName || '').trim() || '（已删除的章节）';
+    return chapterTitle(index, issue.chapterName);
+  }
+
+  function proofreadPositionText(issue) {
+    const line = Number(issue.line);
+    const column = Number(issue.column);
+    if (!Number.isFinite(line) || !Number.isFinite(column)) return '';
+    return `第 ${line} 行 · 第 ${column} 字`;
+  }
+
+  function renderProofreadSummary() {
+    const payload = state.proofread;
+    const summary = $('proofread-summary');
+    if (!payload) {
+      summary.textContent = '';
+      return;
+    }
+    const rules = proofreadRuleSummary(payload.byRule);
+    const truncatedNote = payload.truncated ? '（明细只列出一部分，总数照实统计）' : '';
+    if (payload.scope === 'book') {
+      const hit = Number(payload.chapterHitCount) || 0;
+      const skipped = Number(payload.skippedChapters) || 0;
+      summary.textContent = payload.total
+        ? `全书 ${payload.chapterCount} 章共 ${payload.total} 处可疑，涉及 ${hit} 章：${rules}${truncatedNote}`
+        : `全书 ${payload.chapterCount} 章没有发现可疑的地方${
+            skipped ? `（跳过 ${skipped} 个缺文件的章节）` : ''
+          }`;
+      return;
+    }
+    summary.textContent = payload.total
+      ? `本章共 ${payload.total} 处可疑：${rules}${truncatedNote}`
+      : '本章没有发现可疑的地方（只检查空白、标点、段落长度和重复用词，不判断文字好坏）';
+  }
+
+  function renderProofreadResults() {
+    const box = $('proofread-results');
+    box.innerHTML = '';
+    const payload = state.proofread;
+    if (!payload) return;
+    if (!payload.issues.length) {
+      const empty = document.createElement('div');
+      empty.className = 'proofread-empty';
+      empty.textContent = payload.scope === 'book' ? '整本书没有发现可疑的地方' : '这一章没有发现可疑的地方';
+      box.appendChild(empty);
+      return;
+    }
+    const rows = payload.issues.slice(0, PROOFREAD_ROW_LIMIT);
+    for (const issue of rows) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'proofread-result';
+      row.dataset.rule = issue.rule;
+      row.dataset.chapterId = issue.chapterId == null ? '' : issue.chapterId;
+      row.dataset.index = String(issue.index);
+
+      const head = document.createElement('div');
+      head.className = 'proofread-head';
+      const rule = document.createElement('span');
+      rule.className = `proofread-rule rule-${issue.rule}`;
+      rule.textContent = PROOFREAD_RULE_LABELS[issue.rule] || '可疑';
+      head.appendChild(rule);
+      if (payload.scope === 'book') {
+        const chapter = document.createElement('span');
+        chapter.className = 'proofread-chapter';
+        chapter.textContent = proofreadChapterTitle(issue);
+        head.appendChild(chapter);
+      }
+      const pos = document.createElement('span');
+      pos.className = 'proofread-pos';
+      pos.textContent = proofreadPositionText(issue);
+      head.appendChild(pos);
+
+      const message = document.createElement('div');
+      message.className = 'proofread-message';
+      message.textContent = issue.message || '';
+
+      const snippet = document.createElement('div');
+      snippet.className = 'proofread-snippet';
+      if (issue.snippet) {
+        if (issue.snippet.ellipsisStart) snippet.appendChild(document.createTextNode('…'));
+        snippet.appendChild(document.createTextNode(issue.snippet.before || ''));
+        const mark = document.createElement('mark');
+        mark.textContent = issue.snippet.match || '';
+        snippet.appendChild(mark);
+        snippet.appendChild(document.createTextNode(issue.snippet.after || ''));
+        if (issue.snippet.ellipsisEnd) snippet.appendChild(document.createTextNode('…'));
+      }
+      row.append(head, message, snippet);
+      row.addEventListener('click', () => jumpToProofreadIssue(issue));
+      box.appendChild(row);
+    }
+    if (payload.issues.length > rows.length) {
+      const more = document.createElement('div');
+      more.className = 'proofread-more';
+      more.textContent = `还有 ${payload.issues.length - rows.length} 条没有显示（一次最多列 ${PROOFREAD_ROW_LIMIT} 条；可以先只校对当前章）`;
+      box.appendChild(more);
+    }
+  }
+
+  // 正文可能在上次检查之后被改过：先按位置核对，对不上就在附近再找一次，找不到就落回原位置
+  function proofreadRangeAt(text, issue) {
+    const source = String(text == null ? '' : text);
+    const match = String(issue.match || '');
+    const fallbackStart = Math.min(Math.max(0, Number(issue.index) || 0), source.length);
+    if (!match) {
+      const length = Math.max(1, Math.min(Number(issue.length) || 1, source.length - fallbackStart));
+      return { start: fallbackStart, end: fallbackStart + length };
+    }
+    if (source.slice(fallbackStart, fallbackStart + match.length) === match) {
+      return { start: fallbackStart, end: fallbackStart + match.length };
+    }
+    const near = source.indexOf(match, Math.max(0, fallbackStart - 500));
+    if (near >= 0) return { start: near, end: near + match.length };
+    return {
+      start: fallbackStart,
+      end: Math.min(source.length, fallbackStart + Math.max(match.length, 1))
+    };
+  }
+
+  async function jumpToProofreadIssue(issue) {
+    if (!state.bookPath) return { ok: false };
+    let index = Number(issue.chapterIndex);
+    const byIndex =
+      Number.isInteger(index) && index >= 0 && state.chapters[index] && state.chapters[index].id === issue.chapterId;
+    if (!byIndex) index = state.chapters.findIndex((chapter) => chapter.id === issue.chapterId);
+    // 兜底：当前章的结果万一没带章信息，就落在正在看的这一章
+    if (index < 0 && issue.chapterId == null) index = state.index;
+    if (index < 0) {
+      toast('这一章已经不存在了', 'warn');
+      return { ok: false };
+    }
+    closeProofreadPanel();
+    if (index !== state.index) {
+      const switched = await switchChapter(index);
+      if (!switched || switched.ok === false) {
+        return { ok: false, canceled: Boolean(switched && switched.canceled) };
+      }
+    }
+    const range = proofreadRangeAt(editorEl.value, issue);
+    editorEl.focus();
+    editorEl.setSelectionRange(range.start, range.end);
+    scrollCaretIntoView(range.start);
+    return { ok: true, start: range.start, end: range.end };
+  }
+
+  async function runProofread() {
+    if (!state.bookPath || !state.chapters.length) {
+      $('proofread-summary').textContent = '这本书里还没有章节';
+      return { ok: false, message: '没有章节' };
+    }
+    if (state.proofreadBusy) return { ok: false, message: '正在校对中' };
+    const scope = proofreadScope();
+    state.proofreadScope = scope;
+    setProofreadBusy(true);
+    $('proofread-summary').textContent =
+      scope === 'book' ? '正在通读全书（只读，不改正文）…' : '正在检查当前章…';
+    $('proofread-results').innerHTML = '';
+    try {
+      let payload;
+      if (scope === 'book') {
+        const override = currentChapterRef();
+        payload = await call(api.proofreadBook, state.bookPath, {}, override);
+        payload.scope = 'book';
+      } else {
+        const res = await call(api.proofreadText, editorEl.value, {});
+        const chapter = state.chapters[state.index];
+        // 当前章的结果也带上章信息，点结果时才能定位（和整本结果结构保持一致）
+        payload = {
+          ...res,
+          issues: res.issues.map((issue) => ({
+            ...issue,
+            chapterId: chapter ? chapter.id : null,
+            chapterIndex: state.index,
+            chapterName: chapter ? chapter.name : ''
+          })),
+          scope: 'current',
+          chapterId: chapter ? chapter.id : null,
+          chapterIndex: state.index,
+          chapterName: chapter ? chapter.name : '',
+          chapters: res.total
+            ? [
+                {
+                  chapterId: chapter ? chapter.id : null,
+                  chapterIndex: state.index,
+                  name: chapter ? chapter.name : '',
+                  total: res.total,
+                  byRule: res.byRule,
+                  truncated: res.truncated
+                }
+              ]
+            : []
+        };
+      }
+      state.proofread = payload;
+      renderProofreadSummary();
+      renderProofreadResults();
+      return { ok: true, total: payload.total, scope: payload.scope };
+    } catch (err) {
+      state.proofread = null;
+      $('proofread-summary').textContent = `校对失败：${err.message}`;
+      $('proofread-results').innerHTML = '';
+      return { ok: false, message: err.message };
+    } finally {
+      setProofreadBusy(false);
     }
   }
 
@@ -3855,6 +4127,20 @@
     $('btn-find-replace-one').addEventListener('click', runReplaceOne);
     $('btn-find-replace').addEventListener('click', runReplaceAll);
     $('btn-find-close').addEventListener('click', closeFindPanel);
+    // 校对（只报告，不改动）
+    $('btn-proofread').addEventListener('click', openProofreadPanel);
+    $('btn-proofread-run').addEventListener('click', runProofread);
+    $('btn-proofread-close').addEventListener('click', closeProofreadPanel);
+    $('proofread-scope').addEventListener('change', () => {
+      state.proofreadScope = proofreadScope();
+      // 换了范围就先收起旧结果，免得摘要写着「整本」、列表还是上一章的内容
+      state.proofread = null;
+      $('proofread-results').innerHTML = '';
+      $('proofread-summary').textContent =
+        state.proofreadScope === 'book'
+          ? '已切到整本书：点「开始校对」通读全书（只读，缺文件的章节会跳过）。'
+          : '已切到当前这一章：点「开始校对」检查编辑区里的最新内容。';
+    });
     $('btn-restore-replace').addEventListener('click', () => restoreReplaceBackupFlow());
     $('find-query').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -4083,6 +4369,12 @@
           runFind();
           return;
         }
+      }
+      // 校对面板：Esc 关闭；其他按键继续往下走（Ctrl+S 仍可保存）
+      if (!$('proofread-backdrop').classList.contains('hidden') && event.key === 'Escape') {
+        event.preventDefault();
+        closeProofreadPanel();
+        return;
       }
       // 复制本章（平台格式）：Ctrl+Shift+C；不抢 Ctrl+C 的普通复制
       if (event.ctrlKey && event.shiftKey && !event.altKey && String(event.key).toLowerCase() === 'c') {
@@ -4438,7 +4730,55 @@
       async findReplaceOne() {
         return runReplaceOne();
       },
+      // 校对（只报告，不改动）
+      openProofreadPanel: () => openProofreadPanel(),
+      closeProofreadPanel: () => closeProofreadPanel(),
+      proofreadPanelOpen: () => !$('proofread-backdrop').classList.contains('hidden'),
+      setProofreadScope(scope) {
+        $('proofread-scope').value = scope === 'book' ? 'book' : 'current';
+        state.proofreadScope = proofreadScope();
+        return state.proofreadScope;
+      },
+      async proofreadRun() {
+        return runProofread();
+      },
+      proofreadSummary: () => $('proofread-summary').textContent,
+      proofreadRowCount: () => $('proofread-results').querySelectorAll('.proofread-result').length,
+      proofreadRuleTexts: () =>
+        Array.from($('proofread-results').querySelectorAll('.proofread-rule')).map((el) => el.textContent),
+      proofreadRowTexts: () =>
+        Array.from($('proofread-results').querySelectorAll('.proofread-result')).map((el) => el.textContent),
+      proofreadPayload: () =>
+        state.proofread
+          ? {
+              scope: state.proofread.scope,
+              total: state.proofread.total,
+              byRule: { ...state.proofread.byRule },
+              truncated: state.proofread.truncated,
+              chapterCount: state.proofread.chapterCount,
+              chapterHitCount: state.proofread.chapterHitCount,
+              issues: state.proofread.issues.map((issue) => ({
+                rule: issue.rule,
+                index: issue.index,
+                length: issue.length,
+                line: issue.line,
+                column: issue.column,
+                message: issue.message,
+                chapterId: issue.chapterId,
+                chapterIndex: issue.chapterIndex
+              }))
+            }
+          : null,
+      clickProofreadRow(index) {
+        const rows = $('proofread-results').querySelectorAll('.proofread-result');
+        const row = rows[index];
+        if (!row) return false;
+        row.click();
+        return true;
+      },
       selection: () => ({ start: editorEl.selectionStart || 0, end: editorEl.selectionEnd || 0 }),
+      selectionText: () =>
+        editorEl.value.slice(editorEl.selectionStart || 0, editorEl.selectionEnd || 0),
       async refreshReplaceBackups() {
         return refreshReplaceBackups();
       },

@@ -3643,5 +3643,258 @@ module.exports = async function runScenario(ctx) {
     { version: epubLegacyAfter.schemaVersion, names: epubLegacyZip.names }
   );
 
+  // 46. 校对面板（v0.7-2，提案 5.1）：只报告、不改动；当前章 / 整本都能跑，点一条跳到正文
+  await exec("window.__cwTest.newBook('校对测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const pfBookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '海边')");
+  await exec("window.__cwTest.newChapter('长夜')");
+  await exec("window.__cwTest.newChapter('尾声')");
+  // 第 1 章：半角逗号 1 处、3 次「突然」、连续标点「？！？」、3 个连续空行
+  const pfCh1 = '他走在海边,风很大。\n突然下雨了，突然又停了，突然又下起来。\n他喊：「？！？」\n\n\n';
+  // 第 2 章：一段 520 字的超长段落（字符互不相同，避免顺手触发重复用词）
+  const pfLongText = Array.from({ length: 520 }, (_v, i) =>
+    String.fromCharCode(0x4e00 + ((i * 61 + 7) % 1500))
+  ).join('');
+  // 第 3 章：干净正文（只有 1 个空行，不算多余空行）
+  const pfClean = '雨停了。\n\n他收起伞。';
+  const pfTexts = [pfCh1, pfLongText, pfClean];
+  for (let i = 0; i < pfTexts.length; i += 1) {
+    await exec(`window.__cwTest.switchTo(${i}, 'discard')`);
+    await exec(`window.__cwTest.setText(${JSON.stringify(pfTexts[i])})`);
+    await exec('window.__cwTest.save()');
+  }
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  const pfMetaBefore = await storage.readBookMeta(pfBookPath);
+  const pfDiskBefore = [];
+  const pfStatBefore = [];
+  for (const chapter of pfMetaBefore.chapters) {
+    const filePath = path.join(pfBookPath, chapter.file);
+    pfDiskBefore.push((await storage.loadChapterText(pfBookPath, chapter.file)).text);
+    const stat = await fs.stat(filePath);
+    pfStatBefore.push({ size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  check(
+    '校对：准备了一本 3 章的书（第 1 章有 4 类可疑、第 2 章超长段落、第 3 章干净）',
+    JSON.stringify(pfDiskBefore) === JSON.stringify(pfTexts) &&
+      pfLongText.length === 520 &&
+      (await exec('window.__cwTest.chapterTitles()')).join(',') === '第1章：海边,第2章：长夜,尾声',
+    {
+      texts: pfDiskBefore.map((text) => text.length),
+      diskEqual: JSON.stringify(pfDiskBefore) === JSON.stringify(pfTexts),
+      titles: await exec('window.__cwTest.chapterTitles()')
+    }
+  );
+
+  // 46a. 入口 + 打开面板自动检查当前章（只读，不写盘）
+  check(
+    '校对：写作页顶栏有「校对」按钮',
+    (await exec("document.getElementById('btn-proofread').textContent")) === '校对'
+  );
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 4 处可疑')");
+  const pfCurrent = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对：打开面板自动检查当前章，4 类问题各 1 条',
+    pfCurrent &&
+      pfCurrent.scope === 'current' &&
+      pfCurrent.total === 4 &&
+      pfCurrent.byRule['halfwidth-punct'] === 1 &&
+      pfCurrent.byRule['repeat-word'] === 1 &&
+      pfCurrent.byRule['punct-run'] === 1 &&
+      pfCurrent.byRule['blank-lines'] === 1 &&
+      pfCurrent.byRule['long-paragraph'] === 0 &&
+      (await exec('window.__cwTest.proofreadRowCount()')) === 4,
+    pfCurrent
+  );
+  check(
+    '校对：结果按规则分类、带行号 / 位置 / 上下文片段',
+    (await exec('window.__cwTest.proofreadRuleTexts()')).join(',') ===
+      '半角标点,重复用词,连续标点,多余空行' &&
+      (await exec('window.__cwTest.proofreadRowTexts()')).every((text) =>
+        /第 \d+ 行 · 第 \d+ 字/.test(text)
+      ) &&
+      (await exec('window.__cwTest.proofreadRowTexts()')).some((text) =>
+        text.includes('半角标点「,」建议改成「，」')
+      ),
+    await exec('window.__cwTest.proofreadRowTexts()')
+  );
+  check(
+    '校对：检查过程只读——当前章仍是已保存状态',
+    (await exec('window.__cwTest.dirty()')) === false &&
+      (await exec('window.__cwTest.text()')) === pfCh1 &&
+      (await exec('window.__cwTest.proofreadSummary()')).includes('半角标点 1')
+  );
+
+  // 46b. 点结果跳到正文：选中那一处标点，面板关闭，正文不变
+  const pfCommaIssue = pfCurrent.issues.find((issue) => issue.rule === 'halfwidth-punct');
+  const pfCommaRow = pfCurrent.issues.indexOf(pfCommaIssue);
+  await exec(`window.__cwTest.clickProofreadRow(${pfCommaRow})`);
+  await waitFor('window.__cwTest.proofreadPanelOpen() === false');
+  const pfCommaSelection = await exec('window.__cwTest.selection()');
+  const pfCommaText = await exec('window.__cwTest.selectionText()');
+  check(
+    '校对：点「半角标点」结果会选中正文里的那一处并关闭面板',
+    pfCommaIssue.index === pfCh1.indexOf(',') &&
+      pfCommaSelection.start === pfCh1.indexOf(',') &&
+      pfCommaSelection.end === pfCh1.indexOf(',') + 1 &&
+      pfCommaText === ',' &&
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await storage.loadChapterText(pfBookPath, pfMetaBefore.chapters[0].file)).text === pfCh1,
+    { issue: pfCommaIssue, selection: pfCommaSelection, text: pfCommaText }
+  );
+
+  // 46c. 整本校对：列出涉及哪几章，点长段落结果会切章并定位
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 4 处可疑')");
+  await exec("window.__cwTest.setProofreadScope('book')");
+  const pfBookRun = await exec('window.__cwTest.proofreadRun()');
+  const pfBook = await exec('window.__cwTest.proofreadPayload()');
+  const pfLongIssue = pfBook && pfBook.issues.find((issue) => issue.rule === 'long-paragraph');
+  check(
+    '校对：整本模式通读全书（3 章），共 5 处：第 1 章 4 处 + 第 2 章超长段落',
+    pfBookRun &&
+      pfBookRun.ok === true &&
+      pfBookRun.scope === 'book' &&
+      pfBook &&
+      pfBook.scope === 'book' &&
+      pfBook.chapterCount === 3 &&
+      pfBook.chapterHitCount === 2 &&
+      pfBook.total === 5 &&
+      pfBook.byRule['long-paragraph'] === 1 &&
+      Boolean(pfLongIssue) &&
+      pfLongIssue.chapterIndex === 1 &&
+      pfLongIssue.message.includes('520 字') &&
+      (await exec('window.__cwTest.proofreadSummary()')).includes('全书 3 章共 5 处可疑，涉及 2 章'),
+    { run: pfBookRun, payload: pfBook }
+  );
+  check(
+    '校对：整本结果带章名（长夜），干净的第 3 章没有结果',
+    (await exec('window.__cwTest.proofreadRowTexts()')).some((text) => text.includes('第2章：长夜')) &&
+      !(await exec('window.__cwTest.proofreadRowTexts()')).some((text) => text.includes('尾声')) &&
+      pfBook.issues.every((issue) => issue.chapterIndex !== 2)
+  );
+  const pfLongRow = pfBook.issues.indexOf(pfLongIssue);
+  await exec(`window.__cwTest.clickProofreadRow(${pfLongRow})`);
+  await waitFor(
+    `window.__cwTest.currentTitle().includes('长夜') && window.__cwTest.selectionText() === ${JSON.stringify(
+      pfLongText.slice(0, 24)
+    )}`
+  );
+  const pfLongSelectionText = await exec('window.__cwTest.selectionText()');
+  check(
+    '校对：点整本里的「超长段落」会切到那一章并选中段首',
+    (await exec('window.__cwTest.currentTitle()')).includes('第2章：长夜') &&
+      pfLongSelectionText === pfLongText.slice(0, 24) &&
+      (await exec('window.__cwTest.proofreadPanelOpen()')) === false &&
+      (await exec('window.__cwTest.dirty()')) === false,
+    pfLongSelectionText
+  );
+
+  // 46d. 当前章未保存的内容参与检查，但绝不写盘
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec("window.__cwTest.setProofreadScope('current')");
+  const pfUnsavedText = `${pfCh1}还没有保存的半角逗号,`;
+  await exec(`window.__cwTest.setText(${JSON.stringify(pfUnsavedText)})`);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 5 处可疑')");
+  const pfUnsaved = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对：当前章未保存的内容也参与检查（多出一处半角逗号），磁盘没被改',
+    pfUnsaved &&
+      pfUnsaved.total === 5 &&
+      pfUnsaved.byRule['halfwidth-punct'] === 2 &&
+      (await exec('window.__cwTest.dirty()')) === true &&
+      (await storage.loadChapterText(pfBookPath, pfMetaBefore.chapters[0].file)).text === pfCh1,
+    { payload: pfUnsaved }
+  );
+  // 丢弃未保存内容，回到磁盘上的正文
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  check(
+    '校对：放弃未保存内容后正文回到磁盘版本（校对没有偷偷保存）',
+    (await exec('window.__cwTest.text()')) === pfCh1 && (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 46e. 连续标点不误报「……」；Esc 关闭面板
+  await exec(`window.__cwTest.setText(${JSON.stringify('他……没说完。\n\n他喊：「？！？」')})`);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 1 处可疑')");
+  const pfPunct = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '校对：省略号不误报，连续标点只报「？！？」这一处',
+    pfPunct &&
+      pfPunct.total === 1 &&
+      pfPunct.byRule['punct-run'] === 1 &&
+      pfPunct.issues[0].message === '连续 3 个标点「？！？」',
+    pfPunct
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  check('校对：Esc 关闭面板', (await exec('window.__cwTest.proofreadPanelOpen()')) === false);
+  // 把正文恢复成磁盘上的第 1 章（未保存的测试改动直接丢弃）
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+
+  // 46f. 干净章：0 条结果 + 明确提示
+  await exec("window.__cwTest.switchTo(2, 'discard')");
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章没有发现可疑的地方')");
+  check(
+    '校对：干净章显示 0 条结果与「没有发现可疑」提示',
+    (await exec('window.__cwTest.proofreadPayload()')).total === 0 &&
+      (await exec('window.__cwTest.proofreadRowCount()')) === 0 &&
+      (await exec("document.querySelector('#proofread-results .proofread-empty').textContent")) ===
+        '这一章没有发现可疑的地方'
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+
+  // 46g. 全程只读：章节 txt 大小 / mtime、书目 chapters、_trash 都没变化
+  let pfFilesUntouched = true;
+  for (let i = 0; i < pfMetaBefore.chapters.length; i += 1) {
+    const stat = await fs.stat(path.join(pfBookPath, pfMetaBefore.chapters[i].file));
+    if (stat.size !== pfStatBefore[i].size || stat.mtimeMs !== pfStatBefore[i].mtimeMs) {
+      pfFilesUntouched = false;
+    }
+  }
+  const pfMetaAfter = await storage.readBookMeta(pfBookPath);
+  check(
+    '校对：章节 txt 与书目 chapters 都没被改写，也没有生成 _trash（纯读）',
+    pfFilesUntouched &&
+      JSON.stringify(pfMetaAfter.chapters) === JSON.stringify(pfMetaBefore.chapters) &&
+      !(await fileExists(path.join(pfBookPath, '_trash'))),
+    { untouched: pfFilesUntouched }
+  );
+
+  // 46h. 旧数据兼容：v0.4.1 形状（没有 schemaVersion、章节没有 status/note）照常校对
+  await exec("window.__cwTest.newBook('校对旧书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const pfLegacyBookPath = await exec('window.__cwTest.bookPathValue()');
+  const pfLegacyMetaPath = path.join(pfLegacyBookPath, '书目.json');
+  await exec("window.__cwTest.renameChapterAt(0, '起风')");
+  await exec(`window.__cwTest.setText(${JSON.stringify('旧书正文,有一个半角逗号。')})`);
+  await exec('window.__cwTest.save()');
+  const pfLegacyRaw = JSON.parse(await fs.readFile(pfLegacyMetaPath, 'utf8'));
+  delete pfLegacyRaw.schemaVersion;
+  for (const chapter of pfLegacyRaw.chapters) {
+    delete chapter.status;
+    delete chapter.note;
+  }
+  await fs.writeFile(pfLegacyMetaPath, JSON.stringify(pfLegacyRaw, null, 2), 'utf8');
+  await exec('window.__cwTest.backToShelf()');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(pfLegacyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章共 1 处可疑')");
+  const pfLegacyAfter = JSON.parse(await fs.readFile(pfLegacyMetaPath, 'utf8'));
+  check(
+    '校对：没有 schemaVersion 的旧书照常打开并校对，书目不被补字段',
+    (await exec('window.__cwTest.currentTitle()')).includes('起风') &&
+      (await exec('window.__cwTest.proofreadPayload()')).total === 1 &&
+      pfLegacyAfter.schemaVersion === undefined &&
+      pfLegacyAfter.chapters.every((chapter) => chapter.status === undefined && chapter.note === undefined),
+    { version: pfLegacyAfter.schemaVersion }
+  );
+  await exec('window.__cwTest.closeProofreadPanel()');
+
   return { ok: true, checks: checks.length, details: checks };
 };

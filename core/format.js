@@ -47,9 +47,12 @@ const stripTrailing = (line) => line.replace(/[ \t\u3000\u00a0]+$/, '');
 
 // 半角标点 → 全角：仅当旁边是中文（或已转换过的全角标点，处理「什么?!」这种连排）。
 // 数字、英文缩写、URL、时间里的半角标点保持原样（3.14 / www.a.com / 12:30 / A. 开头）。
-function convertPunct(text) {
+// onConvert 可选：(index, 半角字符, 全角字符)，用于「校对」只报告不改动（见 core/proofread.js）；
+// 不传时行为与以前完全一致。
+function convertPunct(text, onConvert) {
   let count = 0;
   let out = '';
+  const report = typeof onConvert === 'function' ? onConvert : null;
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
     const full = PUNCT_MAP[ch];
@@ -72,6 +75,7 @@ function convertPunct(text) {
       }
       out += full;
       count += 1;
+      if (report) report(i, ch, full);
       continue;
     }
     const nearHan = HAN_RE.test(prev) || HAN_RE.test(next) || FULL_PUNCT.has(prev) || FULL_PUNCT.has(next);
@@ -81,6 +85,7 @@ function convertPunct(text) {
     }
     out += full;
     count += 1;
+    if (report) report(i, ch, full);
   }
   return { text: out, count };
 }
