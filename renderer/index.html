@@ -19,7 +19,7 @@
         </div>
         <div class="topbar-right">
           <div class="shelf-search">
-            <input id="shelf-search" class="text-input" type="text" placeholder="搜索书名 / 章节名（Ctrl+F）" autocomplete="off" />
+            <input id="shelf-search" class="text-input" type="text" placeholder="搜索书名 / 章节名 / 正文（Ctrl+F）" autocomplete="off" />
             <button id="btn-shelf-search-clear" class="shelf-search-clear hidden" type="button" title="清除搜索（Esc）">×</button>
           </div>
           <span id="books-root-label" class="muted small"></span>
@@ -42,6 +42,14 @@
           </button>
         </div>
         <div id="shelf-search-summary" class="shelf-search-summary muted small hidden"></div>
+        <!-- 正文命中（提案 7.3）：书名 / 章节名之外，再按索引把正文里命中的章节列出来 -->
+        <div id="shelf-content" class="shelf-content hidden" aria-busy="false">
+          <div class="shelf-content-head">
+            <span id="shelf-content-summary" class="shelf-content-summary muted small"></span>
+            <button id="btn-shelf-content-more" class="btn ghost tiny hidden" type="button">显示更多</button>
+          </div>
+          <div id="shelf-content-list" class="shelf-content-list"></div>
+        </div>
         <div class="book-grid" id="book-grid"></div>
       </div>
       <footer class="shelf-footer muted small">

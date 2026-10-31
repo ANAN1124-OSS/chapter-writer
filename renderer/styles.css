@@ -152,6 +152,53 @@ html, body {
 .shelf-search-clear:hover { background: var(--paper-deep); color: var(--ink); }
 .shelf-search-summary { margin-bottom: 12px; }
 
+/* 书架「正文命中」（提案 7.3）：搜索结果面板，点一条打开那本书的那一章 */
+.shelf-content {
+  margin: -2px 0 16px;
+  padding: 10px 12px 6px;
+  background: var(--paper-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.shelf-content-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.shelf-content-summary { flex: 1; min-width: 0; }
+.shelf-content-list { display: flex; flex-direction: column; }
+.shelf-content-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 8px;
+  text-align: left;
+  font-family: var(--ui-font);
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.shelf-content-row:first-child { border-top: none; }
+.shelf-content-row:hover { background: var(--paper-deep); }
+.shelf-content-row:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.shelf-content-title { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; color: var(--ink-soft); }
+.shelf-content-book { font-weight: 600; color: var(--ink); }
+.shelf-content-chapter { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shelf-content-snippet {
+  font-size: 13px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shelf-content-snippet mark {
+  background: #ffe9a8;
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.shelf-content-empty { padding: 6px 4px 8px; }
+
 /* 继续上次写作：书架顶部一条直达入口（只写配置里的 lastBook，不碰书库） */
 .shelf-continue { margin-bottom: 18px; }
 .continue-writing {

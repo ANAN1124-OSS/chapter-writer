@@ -99,6 +99,10 @@ contextBridge.exposeInMainWorld('api', {
   // 诊断日志（提案 7.4）：只读目录清单 + 让主进程打开日志文件夹；渲染层仍然没有 fs 权限
   logInfo: () => invoke('logs:info'),
   openLogFolder: () => invoke('logs:open-folder'),
+  // 正文全文搜索（提案 7.3）：索引在 userData，渲染层只拿状态和搜索结果（拿不到正文文件）
+  searchIndexStatus: () => invoke('search:index-status'),
+  ensureSearchIndex: (options) => invoke('search:ensure-index', options),
+  searchContent: (query, options) => invoke('search:content', query, options),
 
   onCloseRequested: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());
@@ -112,6 +116,10 @@ contextBridge.exposeInMainWorld('api', {
   // 主进程内部错误（崩溃 / 未处理的 Promise）：界面只弹一句固定提示，错误细节只在日志里
   onInternalError: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:internal-error', (_event, info) => cb(info));
+  },
+  // 正文索引的建 / 校验进度（只用于书架搜索提示）
+  onSearchProgress: (cb) => {
+    if (typeof cb === 'function') ipcRenderer.on('search:progress', (_event, info) => cb(info));
   },
   reportDirty: (dirty) => ipcRenderer.send('app:dirty', Boolean(dirty)),
   closeReady: (allowed) => ipcRenderer.send('app:close-ready', Boolean(allowed))

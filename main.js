@@ -44,6 +44,7 @@ const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
 const ttsLib = require('./core/tts');
 const logsLib = require('./core/logs');
+const searchIndexLib = require('./core/search-index');
 
 let win = null;
 let configStore = null;
@@ -145,6 +146,31 @@ function logStartup() {
     });
   } catch {
     /* 忽略 */
+  }
+}
+
+// ---------- 正文全文搜索索引（提案 7.3） ----------
+// 索引文件只在 userData（不进书库、不改正文）；建索引 / 校验都是异步的，渲染层只拿搜索结果。
+let searchIndexStore = null;
+let searchProgressAt = 0;
+
+function getSearchIndexStore() {
+  if (!searchIndexStore) {
+    searchIndexStore = searchIndexLib.createSearchStore({ userDataDir: app.getPath('userData') });
+  }
+  return searchIndexStore;
+}
+
+function sendSearchProgress(info) {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return;
+  const now = Date.now();
+  // 进度事件很密：除「完成」外 120ms 合并一次（渲染层只需要大致进度）
+  if (info && info.phase !== 'done' && now - searchProgressAt < 120) return;
+  searchProgressAt = now;
+  try {
+    win.webContents.send('search:progress', info);
+  } catch {
+    /* 进度事件丢了不影响建索引 */
   }
 }
 
@@ -580,6 +606,12 @@ function registerIpc() {
       // 同步章节字数缓存，书架就不用为了算字数去重读整本书
       chapter.chars = result.chars;
       await storage.writeBookMeta(bookPath, meta);
+      // 正文变了：告诉搜索索引这本书要重建（不 await，索引更新绝不能拖慢 / 挡住保存）
+      try {
+        getSearchIndexStore().markDirty(bookPath);
+      } catch {
+        /* 索引不可用时忽略 */
+      }
       // 每日字数统计：只记这次保存带来的正字数增量（删字不扣今天的进度）。
       // 统计写盘失败绝不影响正文保存，只把原因带回去（界面不提示）。
       let stats = null;
@@ -1124,6 +1156,35 @@ function registerIpc() {
     if (err) throw new storage.StorageError('OPEN_FAILED', err);
     return { dir: store.dir, opened: true };
   });
+
+  // 正文全文搜索（提案 7.3）：书架搜索升级成能搜正文。
+  // 索引存 userData/search-index.json，只含「双字哈希位图 + 每章 mtime/size」，不含正文；
+  // 书 / 章一动（保存、改名、删除、外部改 txt）由下一次校验自动增量更新，作者不需要手动操作。
+  handle('search:index-status', async () => {
+    await getConfig();
+    return getSearchIndexStore().status();
+  });
+
+  handle('search:ensure-index', async (options) => {
+    const cfg = await getConfig();
+    return getSearchIndexStore().ensure({
+      booksRoot: cfg.booksRoot,
+      force: Boolean(options && options.force),
+      // 回书架时做深度校验（逐章 stat，发现外部改过的 txt）；搜索自己只用轻量校验
+      deep: !(options && options.deep === false),
+      onProgress: sendSearchProgress
+    });
+  });
+
+  handle('search:content', async (query, options) => {
+    const cfg = await getConfig();
+    return getSearchIndexStore().search({
+      booksRoot: cfg.booksRoot,
+      query,
+      limit: options && options.limit,
+      onProgress: sendSearchProgress
+    });
+  });
 }
 
 // ---------- 窗口 ----------
@@ -1425,6 +1486,14 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'shelf-search') {
+        // 开发截图用：书架搜正文（真实走 userData 里的索引；只读，不碰书库）
+        const query = argValue('search-query') || '青柠色';
+        await win.webContents.executeJavaScript(
+          `window.__cwTest.setShelfQuery(${JSON.stringify(query)});`,
+          true
+        );
+        await sleep(1800);
       } else if (screenshotDialog === 'conflict') {
         const folder = await win.webContents.executeJavaScript(
           'window.__cwTest.firstConflictBookFolder()',

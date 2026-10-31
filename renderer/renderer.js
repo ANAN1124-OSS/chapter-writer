@@ -14,6 +14,11 @@
   const LONG_PARAGRAPH_THRESHOLD = editorLogic.LONG_PARAGRAPH_DEFAULT;
   // 专注模式的纯逻辑（打字机滚动的换算），在 focus-logic.js 里、Node 单测覆盖
   const focusLogic = window.CWFocusLogic;
+  // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
+  const CONTENT_SEARCH_DEBOUNCE = 320;
+  const CONTENT_SEARCH_MIN_CHARS = 2;
+  const CONTENT_PAGE_SIZE = 8;
+  const CONTENT_RESULT_LIMIT = 40;
 
   // ---------- 小工具 ----------
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -131,7 +136,19 @@
     recentBook: null, // 上次写作的书 / 章（书架顶部「继续上次写作」；主进程从 config 读）
     conflictBook: null, // 正在看「同步冲突副本」弹层的那本书（只用于打开文件夹）
     history: null, // 正在看的「本书历史」：{ path, title, groups, preview, loading, error, token }
-    shelfQuery: '', // 书架搜索词（书名 / 章节名）
+    shelfQuery: '', // 书架搜索词（书名 / 章节名 / 正文）
+    // 书架「正文命中」结果（提案 7.3）：搜索走主进程索引，这里只存展示用的结果
+    shelfContent: {
+      query: '', // 这批结果对应的查询词
+      token: 0, // 丢弃过期结果（快速改词时）
+      loading: false, // 正在查正文
+      timer: null, // 输入防抖
+      results: [], // [{ bookPath, bookTitle, chapterIndex, chapterName, matchIndex, snippet }]
+      meta: null, // 主进程回报的统计：candidateBooks / scannedBooks / truncated / 索引状态
+      error: null, // 搜索失败的原因（只影响正文结果，不影响书名过滤）
+      shown: CONTENT_PAGE_SIZE, // 已经展示几条（「显示更多」每次 +8）
+      indexStatus: null // 索引状态 / 建索引进度（只用于提示，不落盘）
+    },
     stats: null, // 每日字数摘要：{ day, todayChars, goal, goalPercent, goalMet, recentTotal, days[] }
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
@@ -478,10 +495,14 @@
       toast(`读取书架失败：${err.message}`, 'error');
     }
     renderShelf();
+    // 正文索引：回书架时顺手让主进程校验 / 增量更新（后台，不 await、不挡书架显示）。
+    // 第一次打开大书架会建索引，进度通过 search:progress 回到这里显示。
+    void ensureSearchIndex();
+    if (shelfQueryText().length >= CONTENT_SEARCH_MIN_CHARS) scheduleContentSearch();
   }
 
-  // ---------- 书架搜索（书名 + 章节名） ----------
-  // 只搜书名和章名，不读正文：281 本书也能输入即出结果。
+  // ---------- 书架搜索（书名 + 章节名 + 正文） ----------
+  // 书名 / 章节名是内存过滤（输入即出）；正文走主进程的搜索索引，防抖后异步查。
   function shelfQueryText() {
     return String(state.shelfQuery || '').trim();
   }
@@ -512,6 +533,111 @@
     return rows;
   }
 
+  function shelfContentActive() {
+    return state.view === 'shelf' && shelfQueryText().length >= CONTENT_SEARCH_MIN_CHARS;
+  }
+
+  function renderShelfContent() {
+    const wrap = $('shelf-content');
+    if (!wrap) return;
+    const content = state.shelfContent;
+    if (!shelfContentActive()) {
+      wrap.classList.add('hidden');
+      wrap.setAttribute('aria-busy', 'false');
+      return;
+    }
+    wrap.classList.remove('hidden');
+    wrap.setAttribute('aria-busy', content.loading ? 'true' : 'false');
+    const status = $('shelf-content-summary');
+    const list = $('shelf-content-list');
+    const more = $('btn-shelf-content-more');
+    if (!status || !list || !more) return;
+
+    const meta = content.meta;
+    const parts = [];
+    if (content.loading) {
+      parts.push('正在正文里查找…');
+    } else if (content.error) {
+      parts.push(`正文搜索暂时不可用：${content.error}`);
+    } else if (meta && meta.tooShort) {
+      parts.push(`正文搜索至少 ${CONTENT_SEARCH_MIN_CHARS} 个字`);
+    } else if (meta && meta.results && meta.results.length) {
+      const shown = Math.min(content.shown, meta.results.length);
+      parts.push(
+        `正文命中 ${meta.results.length} 处（显示 ${shown} 条）` +
+          (meta.truncated ? ' · 只查了最近的一部分书' : '') +
+          ` · 已查 ${meta.scannedBooks}/${meta.candidateBooks} 本`
+      );
+    } else if (meta) {
+      parts.push(
+        `正文没有找到「${content.query}」` + (meta.truncated ? '（只查了最近的一部分书）' : '')
+      );
+    }
+    const idx = content.indexStatus;
+    if (idx && (idx.building || idx.ready === false)) {
+      const progress = idx.progress && idx.progress.total
+        ? `（${idx.progress.book || ''} ${idx.progress.books || 0}/${idx.progress.total} 本）`
+        : '';
+      parts.push(`正在为书架建正文索引${progress}，建好后自动更新结果`);
+    }
+    status.textContent = parts.join(' · ');
+
+    list.innerHTML = '';
+    const results = Array.isArray(content.results) ? content.results : [];
+    const visible = results.slice(0, content.shown);
+    for (let i = 0; i < visible.length; i += 1) {
+      const row = visible[i];
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'shelf-content-row';
+      item.dataset.index = String(i);
+      const head = document.createElement('span');
+      head.className = 'shelf-content-title';
+      const bookName = document.createElement('span');
+      bookName.className = 'shelf-content-book';
+      bookName.textContent = row.bookTitle || '';
+      const chapterName = document.createElement('span');
+      chapterName.className = 'shelf-content-chapter';
+      chapterName.textContent = chapterTitle(Number(row.chapterIndex) || 0, row.chapterName || '');
+      head.appendChild(bookName);
+      head.appendChild(chapterName);
+      const snippet = document.createElement('span');
+      snippet.className = 'shelf-content-snippet';
+      const snip = row.snippet || {};
+      if (snip.cutBefore) snippet.appendChild(document.createTextNode('…'));
+      snippet.appendChild(document.createTextNode(snip.before || ''));
+      const mark = document.createElement('mark');
+      mark.textContent = snip.match || '';
+      snippet.appendChild(mark);
+      snippet.appendChild(document.createTextNode(snip.after || ''));
+      if (snip.cutAfter) snippet.appendChild(document.createTextNode('…'));
+      item.appendChild(head);
+      item.appendChild(snippet);
+      item.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openContentResult(row);
+      });
+      list.appendChild(item);
+    }
+
+    if (visible.length && results.length > content.shown) {
+      more.classList.remove('hidden');
+      more.textContent = `显示更多（还有 ${results.length - content.shown} 条）`;
+    } else {
+      more.classList.add('hidden');
+    }
+    if (!visible.length && !content.loading && !content.error && (!meta || !meta.results || !meta.results.length)) {
+      const empty = document.createElement('div');
+      empty.className = 'shelf-content-empty muted small';
+      empty.textContent =
+        meta && meta.truncated
+          ? '最近的一部分书里没有找到；试试更具体一点的词。'
+          : '书名、章节名和正文里都没找到。';
+      list.appendChild(empty);
+    }
+  }
+
   function updateShelfSearchUi(matchedCount) {
     const summary = $('shelf-search-summary');
     const clear = $('btn-shelf-search-clear');
@@ -524,10 +650,102 @@
       return;
     }
     summary.classList.remove('hidden');
+    const content = state.shelfContent;
+    const contentNote = content.loading
+      ? ' · 正在搜正文…'
+      : content.meta && content.meta.results && content.meta.results.length
+        ? ` · 正文命中 ${content.meta.results.length} 处`
+        : '';
     summary.textContent =
       matchedCount > 0
-        ? `搜索「${query}」：${matchedCount} / ${state.books.length} 本（回车打开第一本，Esc 清除）`
-        : `搜索「${query}」：没有匹配的书（只搜书名和章节名，不搜正文；Esc 清除）`;
+        ? `搜索「${query}」：${matchedCount} / ${state.books.length} 本书名或章节名命中${contentNote}（回车打开第一本，Esc 清除）`
+        : `搜索「${query}」：没有匹配的书名 / 章节名${contentNote || '，正文也没有找到'}（Esc 清除）`;
+  }
+
+  // ---------- 书架正文搜索（提案 7.3：索引在主进程，绝不读正文到界面） ----------
+  function resetShelfContent(keepQuery = false) {
+    const content = state.shelfContent;
+    content.token += 1;
+    if (content.timer) {
+      clearTimeout(content.timer);
+      content.timer = null;
+    }
+    content.loading = false;
+    content.results = [];
+    content.meta = null;
+    content.error = null;
+    content.shown = CONTENT_PAGE_SIZE;
+    if (!keepQuery) content.query = '';
+    renderShelfContent();
+  }
+
+  function scheduleContentSearch() {
+    const content = state.shelfContent;
+    if (content.timer) {
+      clearTimeout(content.timer);
+      content.timer = null;
+    }
+    content.token += 1;
+    const token = content.token;
+    const query = shelfQueryText();
+    if (!shelfContentActive()) {
+      resetShelfContent(true);
+      return;
+    }
+    content.query = query;
+    content.loading = true;
+    content.results = [];
+    content.meta = null;
+    content.error = null;
+    content.shown = CONTENT_PAGE_SIZE;
+    renderShelfContent();
+    content.timer = setTimeout(() => {
+      content.timer = null;
+      void runContentSearch(query, token);
+    }, CONTENT_SEARCH_DEBOUNCE);
+  }
+
+  async function runContentSearch(query, token) {
+    const content = state.shelfContent;
+    try {
+      const data = await call(api.searchContent, query, { limit: CONTENT_RESULT_LIMIT });
+      if (token !== content.token || state.view !== 'shelf') return;
+      content.loading = false;
+      content.results = Array.isArray(data.results) ? data.results : [];
+      content.meta = data;
+      content.error = null;
+      content.indexStatus = data.index || content.indexStatus;
+      renderShelf();
+    } catch (err) {
+      if (token !== content.token) return;
+      content.loading = false;
+      content.error = err.message;
+      content.meta = null;
+      renderShelf();
+    }
+  }
+
+  async function ensureSearchIndex(options = {}) {
+    try {
+      const status = await call(api.ensureSearchIndex, {
+        force: Boolean(options.force),
+        deep: options.deep !== false
+      });
+      state.shelfContent.indexStatus = status;
+      if (state.view === 'shelf') renderShelfContent();
+      return status;
+    } catch {
+      return null; // 索引不可用不影响书架和搜索（正文结果会显示为空 / 提示）
+    }
+  }
+
+  async function openContentResult(row) {
+    if (!row || !row.bookPath) return;
+    await openBookByPath(row.bookPath, {
+      chapterId: row.chapterId,
+      matchIndex: row.matchIndex,
+      matchLength: row.matchLength
+    });
   }
 
   // ---------- 继续上次写作 ----------
@@ -618,7 +836,14 @@
     } else if (!rows.length) {
       const empty = document.createElement('div');
       empty.className = 'shelf-empty';
-      empty.textContent = `没有找到匹配「${query}」的书（只搜书名和章节名，不搜正文）。`;
+      const content = state.shelfContent;
+      const contentHits = content.meta && content.meta.results ? content.meta.results.length : 0;
+      const contentNote = content.loading
+        ? '书名 / 章节名没有匹配，正在正文里找…'
+        : contentHits > 0
+          ? `书名 / 章节名没有匹配；正文找到 ${contentHits} 处，见上方「正文命中」。`
+          : `没有找到匹配「${query}」的书（书名 / 章节名 / 正文都没有）。`;
+      empty.textContent = contentNote;
       grid.appendChild(empty);
     }
 
@@ -729,6 +954,7 @@
     }
 
     updateWindowTitle();
+    renderShelfContent();
   }
 
   async function onNewBookClick() {
@@ -753,7 +979,9 @@
   }
 
   // ---------- 打开书 / 修复 ----------
-  async function openBookByPath(bookPath) {
+  // target 可选：{ chapterId, matchIndex, matchLength } —— 从书架「正文命中」点进来时
+  // 直接打开那一章并选中命中位置（只移动光标 / 选区 + 滚动，不改正文、不写盘）
+  async function openBookByPath(bookPath, target = null) {
     let data;
     try {
       data = await call(api.openBook, bookPath);
@@ -788,11 +1016,28 @@
     // 套用这本书自己的显示设置（没有单独设置过就沿用全局）
     await applyBookDisplay(data.meta.id);
 
-    const startIndex = Math.max(
+    let startIndex = Math.max(
       0,
       state.chapters.findIndex((c) => c.id === data.meta.lastOpenChapterId)
     );
+    if (target && target.chapterId) {
+      const targetIndex = state.chapters.findIndex((c) => c.id === target.chapterId);
+      if (targetIndex >= 0) startIndex = targetIndex;
+    }
     await loadChapterAt(startIndex);
+    if (target && Number.isFinite(Number(target.matchIndex))) {
+      selectEditorRange(Number(target.matchIndex), Number(target.matchLength) || 0);
+    }
+  }
+
+  // 把编辑区选区放到命中位置（正文命中点进来用）：只改光标 / 选区与滚动，不改内容
+  function selectEditorRange(index, length) {
+    const size = editorEl.value.length;
+    const pos = Math.max(0, Math.min(Math.round(Number(index) || 0), size));
+    const end = Math.max(pos, Math.min(pos + Math.max(1, Math.round(Number(length) || 0)), size));
+    editorEl.focus();
+    editorEl.setSelectionRange(pos, end);
+    scrollCaretIntoView(pos);
   }
 
   async function openRepair(book) {
@@ -5811,30 +6056,44 @@
     $('btn-fragment-insert').addEventListener('click', () => insertSelectedFragment());
     $('btn-fragments-refresh').addEventListener('click', () => refreshFragments());
 
-    // 书架搜索：输入即过滤；Esc 清除；回车打开第一本匹配的书
+    // 书架搜索：书名 / 章节名输入即过滤；正文防抖后异步查；Esc 清除；回车打开第一本匹配的书
     $('shelf-search').addEventListener('input', () => {
       state.shelfQuery = $('shelf-search').value;
       renderShelf();
+      scheduleContentSearch();
     });
     $('shelf-search').addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         state.shelfQuery = '';
         $('shelf-search').value = '';
+        resetShelfContent();
         renderShelf();
         return;
       }
       if (event.key === 'Enter') {
         event.preventDefault();
         const rows = shelfSearchResults();
-        if (rows.length) openBookByPath(rows[0].book.path);
+        if (rows.length) {
+          openBookByPath(rows[0].book.path);
+          return;
+        }
+        // 书名 / 章名没有命中时，回车的含义就是「打开第一条正文命中」
+        const content = state.shelfContent;
+        const first = content.meta && content.meta.results ? content.meta.results[0] : null;
+        if (first) void openContentResult(first);
       }
     });
     $('btn-shelf-search-clear').addEventListener('click', () => {
       state.shelfQuery = '';
       $('shelf-search').value = '';
+      resetShelfContent();
       renderShelf();
       $('shelf-search').focus();
+    });
+    $('btn-shelf-content-more').addEventListener('click', () => {
+      state.shelfContent.shown += CONTENT_PAGE_SIZE;
+      renderShelfContent();
     });
 
     $('book-menu').addEventListener('click', async (event) => {
@@ -6109,6 +6368,25 @@
       showFormatBookProgress(
         `正在整理整本书：${Math.min(progress.done, progress.total)}/${progress.total} 章`
       );
+    });
+
+    // 正文搜索索引的建 / 校验进度：只更新书架搜索提示（不阻塞任何操作）
+    api.onSearchProgress((info) => {
+      if (!info) return;
+      const content = state.shelfContent;
+      content.indexStatus = {
+        ...(content.indexStatus || {}),
+        building: info.phase !== 'done',
+        books: Number.isFinite(info.books) ? info.books : (content.indexStatus && content.indexStatus.books) || 0,
+        chapters: Number.isFinite(info.chapters)
+          ? info.chapters
+          : (content.indexStatus && content.indexStatus.chapters) || 0,
+        ready: Boolean(content.indexStatus && content.indexStatus.ready),
+        progress: info
+      };
+      if (state.view === 'shelf' && shelfQueryText().length >= CONTENT_SEARCH_MIN_CHARS) {
+        renderShelfContent();
+      }
     });
 
     document.addEventListener('click', (event) => {
@@ -6530,6 +6808,52 @@
         const input = $('shelf-search');
         if (input) input.value = state.shelfQuery;
         renderShelf();
+        scheduleContentSearch();
+      },
+      // 书架正文搜索（提案 7.3）：自检只看得到「结果 + 状态」，正文本身仍只在主进程里读
+      shelfContentState: () => {
+        const content = state.shelfContent;
+        const meta = content.meta;
+        return {
+          query: content.query,
+          loading: content.loading,
+          error: content.error,
+          shown: content.shown,
+          results: Array.isArray(content.results) ? content.results.map((row) => ({ ...row })) : [],
+          tooShort: Boolean(meta && meta.tooShort),
+          truncated: Boolean(meta && meta.truncated),
+          candidateBooks: meta ? meta.candidateBooks : 0,
+          scannedBooks: meta ? meta.scannedBooks : 0,
+          elapsedMs: meta ? meta.elapsedMs : 0,
+          indexReady: Boolean(content.indexStatus && content.indexStatus.ready),
+          indexBuilding: Boolean(content.indexStatus && content.indexStatus.building),
+          summary: $('shelf-content-summary').textContent,
+          visible: !$('shelf-content').classList.contains('hidden'),
+          rowCount: $('shelf-content-list').querySelectorAll('.shelf-content-row').length,
+          moreVisible: !$('btn-shelf-content-more').classList.contains('hidden'),
+          indexFile: content.indexStatus && content.indexStatus.file ? content.indexStatus.file : ''
+        };
+      },
+      shelfContentRowTexts: () =>
+        Array.from($('shelf-content-list').querySelectorAll('.shelf-content-row')).map((el) =>
+          el.textContent
+        ),
+      clickShelfContentResult(index) {
+        const rows = $('shelf-content-list').querySelectorAll('.shelf-content-row');
+        const row = rows[index];
+        if (!row) return false;
+        row.click();
+        return true;
+      },
+      clickShelfContentMore: () => {
+        $('btn-shelf-content-more').click();
+        return state.shelfContent.shown;
+      },
+      async searchIndexStatus() {
+        return call(api.searchIndexStatus);
+      },
+      async ensureSearchIndex(options) {
+        return ensureSearchIndex(options || {});
       },
       sidebarWidth: () => state.sidebarWidth,
       setSidebarWidth: (width) => applySidebarWidth(width),
