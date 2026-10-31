@@ -2032,6 +2032,22 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'reading') {
+        // 开发截图用：整本只读通读（字号 / 行距 / 目录 / 上一章 / 下一章；只读，不写盘）
+        await automationWin.webContents.executeJavaScript('window.__cwTest.openReading();', true);
+        try {
+          await waitForRenderer('window.__cwTest.readingState().blockCount > 0', 10000);
+        } catch {
+          console.log('[screenshot] 阅读模式没有读到章节');
+        }
+        await sleep(500);
+        if (argValue('reading-chapter') != null) {
+          await automationWin.webContents.executeJavaScript(
+            `window.__cwTest.readingJump(${Number(argValue('reading-chapter'))});`,
+            true
+          );
+          await sleep(600);
+        }
       } else if (screenshotDialog === 'shelf-search') {
         // 开发截图用：书架搜正文（真实走 userData 里的索引；只读，不碰书库）
         const query = argValue('search-query') || '青柠色';

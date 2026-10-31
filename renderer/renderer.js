@@ -14,6 +14,9 @@
   const LONG_PARAGRAPH_THRESHOLD = editorLogic.LONG_PARAGRAPH_DEFAULT;
   // 专注模式的纯逻辑（打字机滚动的换算），在 focus-logic.js 里、Node 单测覆盖
   const focusLogic = window.CWFocusLogic;
+  // 阅读模式的纯逻辑（字号 / 行距档位、进度、当前章、接近底部、上一章 / 下一章），
+  // 在 reading-logic.js 里、Node 单测覆盖；阅读模式本身只读，不写盘。
+  const readingLogic = window.CWReadingLogic;
   // 书籍信息（作者 / 简介 / 分组 / 标签）的清洗与匹配，core/bookinfo.js 里、Node 单测覆盖
   const bookInfoLib = window.CWBookInfo;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
@@ -238,6 +241,21 @@
       savedCaretOffset: null, // 进入时「光标行顶端 - 滚动位置」，退出时用它把视线放回原处
       timer: null // 打字机对齐的防抖定时器
     },
+    // 阅读模式（v0.8-4，提案 N4）：整本只读通读。正文只从 chapter:load 读，不写正文 /
+    // 书目 / 配置、不生成 _trash；字号 / 行距 / 阅读位置只记在内存里。
+    reading: {
+      open: false, // 阅读视图是否开着
+      startIndex: 0, // 这次进入时从哪一章开始（当前写作章）
+      index: 0, // 当前阅读章（上一章 / 下一章 / 目录以它为准；手动滚动时按视野中线更新）
+      programmaticScrollTop: -1, // 刚由程序设置的滚动位置，用来避免把「跳章滚动」误当成用户滚动
+      loading: false, // 正在读一章（防重复读盘）
+      token: 0, // 丢弃过期的加载结果（退出 / 跳章时）
+      timer: null // 滚动时算进度 / 自动接下一章的防抖定时器
+    },
+    readingPrefs: {
+      fontLevel: readingLogic.READING_FONT_DEFAULT, // 字号档位（只记内存）
+      lineLevel: readingLogic.READING_LINE_DEFAULT // 行距档位（只记内存）
+    },
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
@@ -354,13 +372,14 @@
     state.view = view;
     $('shelf-view').classList.toggle('hidden', view !== 'shelf');
     $('editor-view').classList.toggle('hidden', view !== 'editor');
+    $('reading-view').classList.toggle('hidden', view !== 'reading');
     updateWindowTitle();
     renderStatsUi();
-    // 离开写作页就停表（先把没上报的整秒记下）：回书架 / 关书不会把闲逛时间算成写作
+    // 离开写作页就停表（先把没上报的整秒记下）：回书架 / 关书 / 去阅读都不会把闲逛时间算成写作
     if (view !== 'editor' && (state.writeTimer.running || state.writeTimer.sessionMs > 0 || state.writeTimer.unsentMs > 0)) {
       void resetWriteTimer({ flush: true });
     }
-    // 标记层只在写作页显示；切回书架就收起（开关状态保留，回来还在）
+    // 标记层只在写作页显示；切回书架 / 阅读页就收起（开关状态保留，回来还在）
     if (view === 'editor') scheduleMarksRender(0);
     else hideEditorMarks();
     renderSelectionStats();
@@ -368,8 +387,11 @@
   }
 
   function updateWindowTitle() {
-    const bookName = state.view === 'editor' && state.meta ? ` - ${state.meta.title}` : '';
-    document.title = `${state.dirty ? '* ' : ''}章节写作器${bookName}`;
+    const inBookView = state.view === 'editor' || state.view === 'reading';
+    const readingSuffix = state.view === 'reading' ? '（阅读）' : '';
+    const bookName = inBookView && state.meta ? ` - ${state.meta.title}${readingSuffix}` : '';
+    // 阅读模式是只读视图：标题不显示未保存星号（修改还在编辑区，退出后照常显示）
+    document.title = `${state.view === 'editor' && state.dirty ? '* ' : ''}章节写作器${bookName}`;
   }
 
   // 显示排版（字体/字号/行间距/字间距/边距/宽度/背景）只改 CSS 变量，绝不改正文
@@ -2238,6 +2260,450 @@
     return state.focus.typewriter;
   }
 
+  // ---------- 阅读模式（v0.8-4，提案 N4） ----------
+  // 整本只读通读：正文全部通过 chapter:load 从磁盘读（只读 IPC），不写正文 / 书目 / 配置，
+  // 不生成 _trash，也不改「上次打开章节」。连续滚动时滚到接近底部自动接下一章；
+  // 字号 / 行距只改阅读视图的 CSS 变量（只记内存，不写配置）。
+  const READING_AUTO_FILL_MAX = 8; // 一次自动补齐最多接 8 章（很多空章时也不会无限读盘）
+
+  function readingScrollEl() {
+    return $('reading-scroll');
+  }
+
+  function readingBlockElements() {
+    const content = $('reading-content');
+    return content ? Array.from(content.querySelectorAll('.reading-chapter')) : [];
+  }
+
+  function readingBlockIndexAt(el) {
+    if (!el || !el.dataset) return -1;
+    const index = Number(el.dataset.index);
+    return Number.isFinite(index) ? index : -1;
+  }
+
+  function readingLoadedIndexes() {
+    return readingBlockElements()
+      .map((el) => readingBlockIndexAt(el))
+      .filter((index) => index >= 0);
+  }
+
+  // 每章区块顶端相对滚动内容顶部的位置（用来算「当前看到第几章」）
+  function readingMeasureBlocks() {
+    const scroll = readingScrollEl();
+    if (!scroll) return [];
+    const scrollRect = scroll.getBoundingClientRect();
+    return readingBlockElements()
+      .map((el) => ({
+        index: readingBlockIndexAt(el),
+        top: el.getBoundingClientRect().top - scrollRect.top + scroll.scrollTop
+      }))
+      .filter((block) => block.index >= 0);
+  }
+
+  function readingCurrentIndex() {
+    if (!state.reading.open) return -1;
+    const total = state.chapters.length;
+    if (!total) return -1;
+    return Math.max(0, Math.min(Math.floor(Number(state.reading.index) || 0), total - 1));
+  }
+
+  // 手动滚动时用：视野中线落在哪一章（章太短、顶不到屏幕顶时也能保持直觉）
+  function readingVisibleIndex() {
+    const scroll = readingScrollEl();
+    const blocks = readingMeasureBlocks();
+    if (!scroll || !blocks.length) return readingCurrentIndex();
+    const line = Math.max(0, scroll.clientHeight / 2);
+    const visible = readingLogic.blockAtScroll(blocks, scroll.scrollTop, line);
+    return visible >= 0 ? visible : readingCurrentIndex();
+  }
+
+  function readingHasBlock(index) {
+    return readingBlockElements().some((el) => readingBlockIndexAt(el) === index);
+  }
+
+  function readingSummaryText() {
+    const total = state.chapters.length;
+    const chars = readingLogic.bookChars(state.chapters);
+    return `共 ${total} 章${chars > 0 ? ` · 约 ${formatChars(chars)}` : ''}`;
+  }
+
+  function setReadingLoading(on) {
+    const loading = $('reading-loading');
+    if (loading) loading.classList.toggle('hidden', !on);
+    const content = $('reading-content');
+    if (content) content.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+
+  function readingNearBottom() {
+    const scroll = readingScrollEl();
+    if (!scroll) return false;
+    return readingLogic.nearBottom({
+      scrollTop: scroll.scrollTop,
+      scrollHeight: scroll.scrollHeight,
+      clientHeight: scroll.clientHeight
+    });
+  }
+
+  function renderReadingToc(selected) {
+    const toc = $('reading-toc');
+    if (!toc) return;
+    const fragment = document.createDocumentFragment();
+    state.chapters.forEach((chapter, index) => {
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = chapterTitle(index, chapter.name);
+      fragment.appendChild(option);
+    });
+    toc.innerHTML = '';
+    toc.appendChild(fragment);
+    const maxIndex = Math.max(0, state.chapters.length - 1);
+    const safe = Math.max(0, Math.min(Math.floor(Number(selected) || 0), maxIndex));
+    toc.value = String(safe);
+  }
+
+  // 只改阅读视图的 CSS 变量；不写 config.json
+  function readingApplyStyle() {
+    const fontLevel = readingLogic.fontLevel(state.readingPrefs.fontLevel);
+    const lineLevel = readingLogic.lineLevel(state.readingPrefs.lineLevel);
+    state.readingPrefs.fontLevel = fontLevel;
+    state.readingPrefs.lineLevel = lineLevel;
+    const root = document.documentElement.style;
+    root.setProperty('--reading-font-size', `${readingLogic.fontSize(fontLevel)}px`);
+    root.setProperty('--reading-line-height', String(readingLogic.lineHeight(lineLevel)));
+    const fontSelect = $('reading-font-level');
+    const lineSelect = $('reading-line-level');
+    if (fontSelect) fontSelect.value = String(fontLevel);
+    if (lineSelect) lineSelect.value = String(lineLevel);
+    if (state.reading.open) scheduleReadingScrollCheck(60);
+  }
+
+  function setReadingPref(kind, value) {
+    if (kind === 'font') state.readingPrefs.fontLevel = readingLogic.fontLevel(value);
+    else state.readingPrefs.lineLevel = readingLogic.lineLevel(value);
+    readingApplyStyle();
+    return kind === 'font' ? state.readingPrefs.fontLevel : state.readingPrefs.lineLevel;
+  }
+
+  function updateReadingUi() {
+    if (!state.reading.open) return;
+    const total = state.chapters.length;
+    const current = readingCurrentIndex();
+    const progress = readingLogic.readingProgress(current, total);
+    const progressEl = $('reading-progress');
+    if (progressEl) progressEl.textContent = progress.text;
+    const toc = $('reading-toc');
+    if (toc && document.activeElement !== toc) toc.value = String(Math.max(0, progress.index));
+    const prevBtn = $('btn-reading-prev');
+    const nextBtn = $('btn-reading-next');
+    if (prevBtn) prevBtn.disabled = current <= 0;
+    if (nextBtn) nextBtn.disabled = current < 0 || current >= total - 1;
+    const loaded = readingLoadedIndexes();
+    const end = $('reading-end');
+    if (end) {
+      end.classList.toggle('hidden', !(loaded.length && total > 0 && loaded[loaded.length - 1] === total - 1));
+    }
+    const summary = $('reading-summary');
+    if (summary) summary.textContent = readingSummaryText();
+  }
+
+  function readingScrollToBlock(index) {
+    const scroll = readingScrollEl();
+    const el = readingBlockElements().find((node) => readingBlockIndexAt(node) === index);
+    if (!scroll || !el) return false;
+    const scrollRect = scroll.getBoundingClientRect();
+    const top = el.getBoundingClientRect().top - scrollRect.top + scroll.scrollTop;
+    scroll.scrollTop = Math.max(0, Math.round(top) - 4);
+    // 跳章时以目标章为准；章太短、滚不到顶时滚动位置会被浏览器夹到底部，
+    // 进度仍显示用户点的这一章（不会被「视野中线」算回上一章）
+    state.reading.index = index;
+    state.reading.programmaticScrollTop = scroll.scrollTop;
+    return true;
+  }
+
+  function onReadingScroll() {
+    if (!state.reading.open) return;
+    const scroll = readingScrollEl();
+    if (!scroll) return;
+    if (Math.abs(scroll.scrollTop - state.reading.programmaticScrollTop) >= 1) {
+      state.reading.index = readingVisibleIndex();
+    }
+    scheduleReadingScrollCheck(140);
+  }
+
+  // 一次阅读会话最多留 40 章在 DOM 里；超了只从最前面移除（不动当前正在看的章）
+  function pruneReadingBlocks() {
+    const content = $('reading-content');
+    const scroll = readingScrollEl();
+    if (!content || !scroll) return;
+    const nodes = readingBlockElements();
+    if (nodes.length <= readingLogic.MAX_LOADED_BLOCKS) return;
+    const current = readingCurrentIndex();
+    let remove = nodes.length - readingLogic.MAX_LOADED_BLOCKS;
+    for (const node of nodes) {
+      if (remove <= 0) break;
+      const index = readingBlockIndexAt(node);
+      if (index >= current - 1) break;
+      const before = scroll.scrollHeight;
+      node.remove();
+      const after = scroll.scrollHeight;
+      scroll.scrollTop = Math.max(0, scroll.scrollTop - Math.max(0, before - after));
+      remove -= 1;
+    }
+  }
+
+  function createReadingBlock(index, text, options = {}) {
+    const chapter = state.chapters[index] || {};
+    const block = document.createElement('section');
+    block.className = 'reading-chapter';
+    block.dataset.index = String(index);
+    const title = document.createElement('h2');
+    title.className = 'reading-chapter-title';
+    title.textContent = chapterTitle(index, chapter.name);
+    block.appendChild(title);
+    if (options.error) {
+      const error = document.createElement('div');
+      error.className = 'reading-chapter-error';
+      error.textContent = `读取失败：${options.error}（章节文件可能被移动或删除了；阅读模式不会重建文件）`;
+      block.appendChild(error);
+      return block;
+    }
+    const body = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    if (!body.trim()) {
+      const empty = document.createElement('div');
+      empty.className = 'reading-chapter-empty';
+      empty.textContent = '（本章暂无正文）';
+      block.appendChild(empty);
+      return block;
+    }
+    const content = document.createElement('div');
+    content.className = 'reading-chapter-text';
+    content.textContent = body;
+    block.appendChild(content);
+    return block;
+  }
+
+  async function fetchReadingBlock(index, token) {
+    const chapter = state.chapters[index];
+    if (!chapter) return null;
+    try {
+      const data = await call(api.loadChapter, state.bookPath, chapter.file);
+      if (!state.reading.open || token !== state.reading.token) return null;
+      return createReadingBlock(index, data.text);
+    } catch (err) {
+      if (!state.reading.open || token !== state.reading.token) return null;
+      return createReadingBlock(index, '', { error: err.message });
+    }
+  }
+
+  // 换一批内容（跳章 / 进入阅读时用）：先清空，只留目标章
+  async function readingReplaceAt(index) {
+    if (state.reading.loading) return null;
+    const token = state.reading.token + 1;
+    state.reading.token = token;
+    state.reading.loading = true;
+    setReadingLoading(true);
+    $('reading-content').innerHTML = '';
+    try {
+      const node = await fetchReadingBlock(index, token);
+      if (!node) return null;
+      $('reading-content').appendChild(node);
+      const scroll = readingScrollEl();
+      if (scroll) scroll.scrollTop = 0;
+      state.reading.index = index;
+      state.reading.programmaticScrollTop = 0;
+      updateReadingUi();
+      scheduleReadingScrollCheck(40);
+      return node;
+    } finally {
+      if (token === state.reading.token) {
+        state.reading.loading = false;
+        setReadingLoading(false);
+      }
+    }
+  }
+
+  async function readingAppendNext() {
+    if (state.reading.loading) return null;
+    const loaded = readingLoadedIndexes();
+    const last = loaded.length ? loaded[loaded.length - 1] : -1;
+    if (last < 0 || last >= state.chapters.length - 1) return null;
+    const token = state.reading.token;
+    state.reading.loading = true;
+    setReadingLoading(true);
+    try {
+      const node = await fetchReadingBlock(last + 1, token);
+      if (!node) return null;
+      $('reading-content').appendChild(node);
+      pruneReadingBlocks();
+      updateReadingUi();
+      return node;
+    } finally {
+      if (token === state.reading.token) {
+        state.reading.loading = false;
+        setReadingLoading(false);
+      }
+    }
+  }
+
+  async function readingPrependPrev() {
+    if (state.reading.loading) return null;
+    const loaded = readingLoadedIndexes();
+    const first = loaded.length ? loaded[0] : -1;
+    if (first <= 0) return null;
+    const token = state.reading.token;
+    state.reading.loading = true;
+    setReadingLoading(true);
+    try {
+      const node = await fetchReadingBlock(first - 1, token);
+      if (!node) return null;
+      const content = $('reading-content');
+      content.insertBefore(node, content.firstChild);
+      updateReadingUi();
+      return node;
+    } finally {
+      if (token === state.reading.token) {
+        state.reading.loading = false;
+        setReadingLoading(false);
+      }
+    }
+  }
+
+  // 连续滚动：在接近底部时自动把下一章接在后面
+  async function autoFillReading() {
+    if (!state.reading.open || state.reading.loading) return 0;
+    let added = 0;
+    for (let i = 0; i < READING_AUTO_FILL_MAX; i += 1) {
+      if (!state.reading.open || state.reading.loading || !readingNearBottom()) break;
+      const loaded = readingLoadedIndexes();
+      const last = loaded.length ? loaded[loaded.length - 1] : -1;
+      if (last < 0 || last >= state.chapters.length - 1) break;
+      const node = await readingAppendNext();
+      if (!node) break;
+      added += 1;
+    }
+    if (added) updateReadingUi();
+    return added;
+  }
+
+  function scheduleReadingScrollCheck(delay = 140) {
+    if (!state.reading.open) return;
+    if (state.reading.timer) clearTimeout(state.reading.timer);
+    state.reading.timer = setTimeout(() => {
+      state.reading.timer = null;
+      if (!state.reading.open) return;
+      updateReadingUi();
+      void autoFillReading();
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  async function readingGo(direction) {
+    if (!state.reading.open) return { ok: false, message: '不在阅读模式' };
+    if (state.reading.loading) return { ok: false, busy: true };
+    const total = state.chapters.length;
+    const current = readingCurrentIndex();
+    const target = readingLogic.stepIndex(current, total, direction);
+    if (target == null) {
+      updateReadingUi();
+      return { ok: false, edge: true, index: current };
+    }
+    if (readingHasBlock(target)) {
+      readingScrollToBlock(target);
+      updateReadingUi();
+      scheduleReadingScrollCheck(60);
+      return { ok: true, index: target };
+    }
+    // 相邻章还没加载：往前翻就补在最前面，往后翻就接在最后面
+    const node = target > current ? await readingAppendNext() : await readingPrependPrev();
+    if (!node) {
+      updateReadingUi();
+      return { ok: false, message: '读取章节失败' };
+    }
+    readingScrollToBlock(target);
+    updateReadingUi();
+    scheduleReadingScrollCheck(60);
+    return { ok: true, index: target };
+  }
+
+  async function readingJumpTo(index) {
+    if (!state.reading.open) return { ok: false, message: '不在阅读模式' };
+    const total = state.chapters.length;
+    if (!total) return { ok: false, message: '没有章节' };
+    const target = Math.max(0, Math.min(Math.floor(Number(index) || 0), total - 1));
+    if (readingHasBlock(target)) {
+      readingScrollToBlock(target);
+      updateReadingUi();
+      scheduleReadingScrollCheck(60);
+      return { ok: true, index: target };
+    }
+    if (state.reading.loading) return { ok: false, busy: true };
+    await readingReplaceAt(target);
+    const scroll = readingScrollEl();
+    if (scroll) scroll.focus({ preventScroll: true });
+    return { ok: true, index: target };
+  }
+
+  async function openReadingMode() {
+    if (!state.bookPath || !state.meta) return { ok: false, message: '先打开一本书' };
+    if (state.reading.open) return { ok: true, already: true };
+    if (!state.chapters.length) {
+      toast('这本书还没有章节，没法进入阅读模式', 'warn');
+      return { ok: false, message: '没有章节' };
+    }
+    hideContextMenu();
+    hideVolumeMenu();
+    hideFormatMenu();
+    hideExportMenu();
+    hideBookMenu();
+    state.reading.open = true;
+    state.reading.startIndex = Math.max(0, Math.min(state.index < 0 ? 0 : state.index, state.chapters.length - 1));
+    state.reading.index = state.reading.startIndex;
+    state.reading.programmaticScrollTop = 0;
+    state.reading.loading = false;
+    state.reading.token += 1;
+    const title = state.meta.title || '';
+    $('reading-book-title').textContent = title;
+    $('reading-book-title').title = title;
+    const dirtyNote = state.dirty
+      ? '当前章有未保存的修改：阅读视图显示的是磁盘上的内容，你的修改还留在编辑区，退出阅读后照常可以保存。'
+      : '';
+    $('reading-note').textContent = dirtyNote;
+    $('reading-note').classList.toggle('hidden', !dirtyNote);
+    renderReadingToc(state.reading.startIndex);
+    readingApplyStyle();
+    $('reading-content').innerHTML = '';
+    $('reading-end').classList.add('hidden');
+    $('reading-summary').textContent = readingSummaryText();
+    showView('reading');
+    const scroll = readingScrollEl();
+    if (scroll) scroll.scrollTop = 0;
+    await readingReplaceAt(state.reading.startIndex);
+    if (state.reading.open && scroll) scroll.focus({ preventScroll: true });
+    return { ok: true, startIndex: state.reading.startIndex };
+  }
+
+  function exitReadingMode() {
+    if (!state.reading.open) return false;
+    state.reading.open = false;
+    state.reading.loading = false;
+    state.reading.token += 1;
+    if (state.reading.timer) {
+      clearTimeout(state.reading.timer);
+      state.reading.timer = null;
+    }
+    setReadingLoading(false);
+    $('reading-content').innerHTML = '';
+    $('reading-end').classList.add('hidden');
+    $('reading-note').classList.add('hidden');
+    $('reading-toc').innerHTML = '';
+    // 回到写作页：不重新加载章节、不移动正文、不写盘；未保存内容原样还在编辑区
+    showView('editor');
+    scheduleMarksRender(0);
+    try {
+      editorEl.focus({ preventScroll: true });
+    } catch { /* 焦点回不去不影响正文 */ }
+    return true;
+  }
+
   // ---------- 每日字数统计（提案 3.2） ----------
   // 只统计「保存动作」带来的新增字数：没保存的编辑不计数，删字也不会倒扣今天。
   // 日期 / 增量都在主进程算，渲染层只负责显示；统计文件在 userData，不碰书库。
@@ -3817,7 +4283,7 @@
   window.addEventListener('focus', async () => {
     const since = Date.now() - lastBlurAt;
     lastBlurAt = 0;
-    if (!state.bookPath || state.index < 0 || state.loading || state.saving || state.modal || since < 500) return;
+    if (!state.bookPath || state.index < 0 || state.loading || state.saving || state.modal || state.reading.open || since < 500) return;
     const chapter = state.chapters[state.index];
     if (!chapter) return;
     try {
@@ -6905,6 +7371,24 @@
     $('btn-focus').addEventListener('click', () => toggleFocusMode());
     $('btn-focus-exit').addEventListener('click', () => setFocusMode(false));
     $('btn-focus-typewriter').addEventListener('click', () => setFocusTypewriter(!state.focus.typewriter));
+    // 阅读模式（v0.8-4，提案 N4）：入口 / 退出 / 从头 / 上一章 / 下一章 / 目录 / 字号 / 行距
+    $('btn-reading').addEventListener('click', () => void openReadingMode());
+    $('btn-reading-exit').addEventListener('click', () => exitReadingMode());
+    $('btn-reading-first').addEventListener('click', () => void readingJumpTo(0));
+    $('btn-reading-prev').addEventListener('click', () => void readingGo(-1));
+    $('btn-reading-next').addEventListener('click', () => void readingGo(1));
+    $('reading-font-level').addEventListener('change', () =>
+      setReadingPref('font', $('reading-font-level').value)
+    );
+    $('reading-line-level').addEventListener('change', () =>
+      setReadingPref('line', $('reading-line-level').value)
+    );
+    $('reading-toc').addEventListener('change', () =>
+      void readingJumpTo(Number($('reading-toc').value))
+    );
+    $('reading-scroll').addEventListener('scroll', onReadingScroll, {
+      passive: true
+    });
     $('btn-find-run').addEventListener('click', runFind);
     $('btn-find-replace-one').addEventListener('click', runReplaceOne);
     $('btn-find-replace').addEventListener('click', runReplaceAll);
@@ -7260,6 +7744,12 @@
         closeTtsBar();
         return;
       }
+      // 阅读模式：Esc 退出，回到写作页（阅读页没有自己的弹层；排在所有弹层 / 朗读之后）
+      if (state.view === 'reading' && event.key === 'Escape') {
+        event.preventDefault();
+        exitReadingMode();
+        return;
+      }
       // 专注模式（提案 3.5）：F11 来回切换（只在写作页；不写配置、不写盘）
       if (event.key === 'F11') {
         if (state.view === 'editor' && state.bookPath) {
@@ -7334,6 +7824,7 @@
       hideBookMenu();
       applySidebarWidth(state.sidebarWidth);
       scheduleMarksRender(40);
+      if (state.reading.open) scheduleReadingScrollCheck(80);
       if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(60);
     });
   }
@@ -8100,6 +8591,137 @@
       },
       focusDispatchKey(key) {
         document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+        return true;
+      },
+      // 阅读模式（v0.8-4，提案 N4）：入口 / 状态 / 导航 / 显示档位；只读，不写盘
+      readingButtonText: () => $('btn-reading').textContent,
+      async openReading() {
+        return openReadingMode();
+      },
+      closeReading: () => exitReadingMode(),
+      readingOpen: () => state.reading.open,
+      readingViewVisible: () => !$('reading-view').classList.contains('hidden'),
+      readingState() {
+        const total = state.chapters.length;
+        const current = readingCurrentIndex();
+        const loaded = readingLoadedIndexes();
+        const note = $('reading-note');
+        return {
+          open: state.reading.open,
+          view: state.view,
+          bookTitle: $('reading-book-title').textContent,
+          current,
+          total,
+          loaded,
+          progress: $('reading-progress').textContent,
+          summary: $('reading-summary').textContent,
+          fontLevel: state.readingPrefs.fontLevel,
+          lineLevel: state.readingPrefs.lineLevel,
+          prevDisabled: $('btn-reading-prev').disabled,
+          nextDisabled: $('btn-reading-next').disabled,
+          endVisible: !$('reading-end').classList.contains('hidden'),
+          note: note.textContent,
+          noteVisible: !note.classList.contains('hidden'),
+          loading: state.reading.loading,
+          errorBlocks: $('reading-content').querySelectorAll('.reading-chapter-error').length,
+          blockCount: loaded.length,
+          tocCount: $('reading-toc').options.length,
+          tocValue: $('reading-toc').value,
+          dirty: state.dirty,
+          editorText: editorEl.value,
+          title: document.title
+        };
+      },
+      readingBlocks() {
+        return readingBlockElements().map((el) => {
+          const titleEl = el.querySelector('.reading-chapter-title');
+          const textEl = el.querySelector('.reading-chapter-text');
+          const emptyEl = el.querySelector('.reading-chapter-empty');
+          const errorEl = el.querySelector('.reading-chapter-error');
+          return {
+            index: readingBlockIndexAt(el),
+            title: titleEl ? titleEl.textContent : '',
+            text: textEl ? textEl.textContent : '',
+            empty: Boolean(emptyEl),
+            error: errorEl ? errorEl.textContent : ''
+          };
+        });
+      },
+      async readingNext() {
+        return readingGo(1);
+      },
+      async readingPrev() {
+        return readingGo(-1);
+      },
+      async readingJump(index) {
+        return readingJumpTo(index);
+      },
+      readingSetFontLevel(level) {
+        return setReadingPref('font', level);
+      },
+      readingSetLineLevel(level) {
+        return setReadingPref('line', level);
+      },
+      readingScrollToBottom() {
+        const scroll = readingScrollEl();
+        if (!scroll) return 0;
+        scroll.scrollTop = scroll.scrollHeight;
+        state.reading.index = readingVisibleIndex();
+        updateReadingUi();
+        scheduleReadingScrollCheck(0);
+        return scroll.scrollTop;
+      },
+      readingScrollToTop() {
+        const scroll = readingScrollEl();
+        if (!scroll) return 0;
+        scroll.scrollTop = 0;
+        state.reading.index = readingVisibleIndex();
+        updateReadingUi();
+        scheduleReadingScrollCheck(0);
+        return 0;
+      },
+      readingJumpToBlock(index) {
+        const ok = readingScrollToBlock(Number(index));
+        updateReadingUi();
+        scheduleReadingScrollCheck(0);
+        return ok;
+      },
+      readingMetrics() {
+        const scroll = readingScrollEl();
+        const sample = $('reading-content').querySelector('.reading-chapter-text');
+        const styles = sample ? getComputedStyle(sample) : null;
+        return {
+          fontSize: styles ? styles.fontSize : '',
+          lineHeight: styles ? parseFloat(styles.lineHeight) : 0,
+          fontFamily: styles ? styles.fontFamily : '',
+          userSelect: styles ? styles.userSelect : '',
+          scrollTop: scroll ? scroll.scrollTop : 0,
+          scrollHeight: scroll ? scroll.scrollHeight : 0,
+          clientHeight: scroll ? scroll.clientHeight : 0,
+          nearBottom: readingNearBottom(),
+          chapterCount: readingBlockElements().length
+        };
+      },
+      readingScrollInfo() {
+        const scroll = readingScrollEl();
+        return {
+          scrollTop: scroll ? scroll.scrollTop : null,
+          scrollHeight: scroll ? scroll.scrollHeight : null,
+          clientHeight: scroll ? scroll.clientHeight : null,
+          current: readingCurrentIndex(),
+          blocks: readingMeasureBlocks()
+        };
+      },
+      readingSelectToc(index) {
+        const toc = $('reading-toc');
+        toc.value = String(index);
+        toc.dispatchEvent(new Event('change', { bubbles: true }));
+        return toc.value;
+      },
+      readingClick(id) {
+        const el = $(id);
+        if (!el) return false;
+        el.click();
         return true;
       },
       // 灵感箱（碎片速记）

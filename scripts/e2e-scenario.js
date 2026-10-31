@@ -4033,6 +4033,329 @@ module.exports = async function runScenario(ctx) {
       JSON.stringify(infoContentFiles(await fs.readdir(infoBookPath))) === JSON.stringify(infoDirBefore)
   );
 
+  // 44k. 阅读模式（v0.8-4，提案 N4）：整本只读通读。
+  // 连续滚动 / 目录 / 字号行距 / 上一章下一章；只读：不写正文、书目、配置，不生成 _trash。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('阅读模式测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const readBookPath = await exec('window.__cwTest.bookPathValue()');
+  const readMetaPath = path.join(readBookPath, '书目.json');
+  const readLongText = Array.from(
+    { length: 80 },
+    (_, i) => `第${i + 1}段：风从海面吹来，他收起了帆，远处有灯一明一暗。`
+  ).join('\n\n');
+  const readTexts = [readLongText, '夜雨敲着窗。\n\n她把伞靠在门边。', '清晨的街道很安静。'];
+  await exec("window.__cwTest.renameChapterAt(0, '开端')");
+  await exec(`window.__cwTest.setText(${JSON.stringify(readTexts[0])})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.newChapter('夜雨')");
+  await waitFor("window.__cwTest.currentTitle() === '第2章：夜雨'");
+  await exec(`window.__cwTest.setText(${JSON.stringify(readTexts[1])})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  await exec("window.__cwTest.newChapter('尾声')");
+  await waitFor("window.__cwTest.currentTitle() === '尾声'");
+  await exec(`window.__cwTest.setText(${JSON.stringify(readTexts[2])})`);
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  const readMeta = await storage.readBookMeta(readBookPath);
+  const readTxtPaths = readMeta.chapters.map((chapter) => path.join(readBookPath, chapter.file));
+  const readTxtBefore = [];
+  for (const filePath of readTxtPaths) {
+    readTxtBefore.push({ bytes: await fs.readFile(filePath), stat: await fs.stat(filePath) });
+  }
+  const readDirBefore = (await fs.readdir(readBookPath)).sort();
+  check(
+    '阅读模式：准备 3 章测试书（第 1 章较长，方便验证连续滚动）',
+    readMeta.chapters.length === 3 && readTexts[0].length > 2000,
+    { chapters: readMeta.chapters.length, longChars: readTexts[0].length }
+  );
+
+  // 44k-1. 入口：从当前写作章（第 2 章）进入阅读视图，正文只读自磁盘
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await waitFor("window.__cwTest.currentTitle() === '第2章：夜雨'");
+  // 切章会更新书目里的「上次打开章节」/ 配置里的 lastBook，快照要在切完之后取
+  const readMetaBefore = await fs.readFile(readMetaPath);
+  const readConfigBefore = await fs.readFile(path.join(userData, 'config.json'));
+  check('阅读模式：写作页顶栏有「阅读」按钮', (await exec('window.__cwTest.readingButtonText()')) === '阅读');
+  await exec("window.__cwTest.readingClick('btn-reading')");
+  await waitFor('window.__cwTest.readingState().open === true && window.__cwTest.readingState().loading === false');
+  const readEntry = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：进入后切到只读视图（编辑器隐藏、窗口标题带「（阅读）」）',
+    readEntry.view === 'reading' &&
+      readEntry.open === true &&
+      (await exec("document.getElementById('editor-view').classList.contains('hidden')")) === true &&
+      (await exec('window.__cwTest.readingViewVisible()')) === true &&
+      readEntry.title.includes('（阅读）'),
+    readEntry
+  );
+  check(
+    '阅读模式：从当前写作章开始（第 2 / 3 章）',
+    readEntry.current === 1 &&
+      readEntry.progress === '第 2 / 3 章 · 66.7%' &&
+      readEntry.bookTitle === '阅读模式测试书' &&
+      readEntry.total === 3,
+    readEntry
+  );
+  const readEntryBlocks = await exec('window.__cwTest.readingBlocks()');
+  check(
+    '阅读模式：正文来自磁盘、章名正确、编辑区一个字没动',
+    readEntryBlocks[0].index === 1 &&
+      readEntryBlocks[0].title === '第2章：夜雨' &&
+      readEntryBlocks[0].text === readTexts[1] &&
+      (await exec('window.__cwTest.text()')) === readTexts[1] &&
+      (await exec('window.__cwTest.dirty()')) === false,
+    readEntryBlocks[0]
+  );
+  const readMetricsDefault = await exec('window.__cwTest.readingMetrics()');
+  check(
+    '阅读模式：默认字号 22px / 行距 2.0，正文可以选中复制',
+    parseFloat(readMetricsDefault.fontSize) === 22 &&
+      Math.abs(readMetricsDefault.lineHeight / parseFloat(readMetricsDefault.fontSize) - 2) < 0.02 &&
+      readMetricsDefault.userSelect === 'text',
+    readMetricsDefault
+  );
+
+  // 44k-2. 字号 / 行距：只改阅读视图的 CSS，不写配置（档位有单测覆盖）
+  await exec('window.__cwTest.readingSetFontLevel(3)');
+  await exec('window.__cwTest.readingSetLineLevel(0)');
+  const readMetricsBig = await exec('window.__cwTest.readingMetrics()');
+  check(
+    '阅读模式：切「特大 + 紧凑」只改显示（25px / 1.7 倍行距）',
+    parseFloat(readMetricsBig.fontSize) === 25 &&
+      Math.abs(readMetricsBig.lineHeight / parseFloat(readMetricsBig.fontSize) - 1.7) < 0.02 &&
+      readMetricsBig.fontFamily === readMetricsDefault.fontFamily,
+    readMetricsBig
+  );
+  await exec('window.__cwTest.readingSetFontLevel(2)');
+  await exec('window.__cwTest.readingSetLineLevel(1)');
+
+  // 44k-3. 上一章会向前补一章；下一章跳回来；Esc 退出不改编辑区
+  const readPrevToFirst = await exec('window.__cwTest.readingPrev()');
+  await waitFor('window.__cwTest.readingState().current === 0');
+  const readAtFirst = await exec('window.__cwTest.readingState()');
+  const readFirstBlock = (await exec('window.__cwTest.readingBlocks()'))[0];
+  check(
+    '阅读模式：上一章向前补载第 1 章（只读加载，章节文件不动）',
+    readPrevToFirst.ok === true &&
+      readAtFirst.current === 0 &&
+      readFirstBlock.index === 0 &&
+      readFirstBlock.text === readTexts[0] &&
+      readAtFirst.prevDisabled === true,
+    { result: readPrevToFirst, state: readAtFirst }
+  );
+  const readNextResult = await exec('window.__cwTest.readingNext()');
+  await waitFor('window.__cwTest.readingState().current === 1');
+  const readNextState = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：下一章从第 1 章回到第 2 章',
+    readNextResult.ok === true && readNextState.current === 1,
+    { result: readNextResult, state: readNextState }
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '阅读模式：Esc 退出回到写作页，编辑区内容与未保存状态原样保留',
+    (await exec('window.__cwTest.readingOpen()')) === false &&
+      (await exec("document.getElementById('editor-view').classList.contains('hidden')")) === false &&
+      (await exec('window.__cwTest.text()')) === readTexts[1] &&
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await exec('window.__cwTest.title()')).includes('（阅读）') === false
+  );
+
+  // 44k-4. 只读校验：阅读期间书目 / 章节 txt / 配置一个字节都没改，也没有 _trash
+  const readMetaAfter = await fs.readFile(readMetaPath);
+  for (let i = 0; i < readTxtPaths.length; i += 1) {
+    check(
+      `阅读模式：第 ${i + 1} 章 txt 字节与 mtime 没变（只读）`,
+      JSON.stringify(await fs.readFile(readTxtPaths[i])) === JSON.stringify(readTxtBefore[i].bytes) &&
+        (await fs.stat(readTxtPaths[i])).mtimeMs === readTxtBefore[i].stat.mtimeMs
+    );
+  }
+  check(
+    '阅读模式：书目逐字节没变（不改章节顺序 / 不改上次打开章节）',
+    JSON.stringify(readMetaAfter) === JSON.stringify(readMetaBefore)
+  );
+  const readConfigAfter = await fs.readFile(path.join(userData, 'config.json'));
+  check(
+    '阅读模式：config.json 逐字节没变（字号 / 行距不写配置）',
+    JSON.stringify(readConfigAfter) === JSON.stringify(readConfigBefore)
+  );
+  const readDirAfter = (await fs.readdir(readBookPath)).sort();
+  check(
+    '阅读模式：书文件夹没有多出文件，也没有生成 _trash',
+    JSON.stringify(readDirAfter) === JSON.stringify(readDirBefore) &&
+      readDirAfter.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')),
+    readDirAfter
+  );
+
+  // 44k-5. 连续滚动：第 1 章很长，先只加载当前章；滚到底自动接第 2、3 章
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor("window.__cwTest.currentTitle() === '第1章：开端'");
+  const readMetaStable = await fs.readFile(readMetaPath);
+  await exec('window.__cwTest.openReading()');
+  await waitFor('window.__cwTest.readingState().open === true && window.__cwTest.readingState().loading === false');
+  const readLong = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：第 1 章很长时先只加载当前章（不下子把全书读进来）',
+    readLong.current === 0 &&
+      readLong.loaded.length === 1 &&
+      readLong.loaded[0] === 0 &&
+      readLong.progress === '第 1 / 3 章 · 33.3%',
+    readLong
+  );
+  await exec('window.__cwTest.readingScrollToBottom()');
+  await waitFor('window.__cwTest.readingState().loaded.includes(1)');
+  const readScrolled = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：滚到接近底部自动接下一章（连续滚动）',
+    readScrolled.loaded.includes(1) && readScrolled.blockCount >= 2,
+    readScrolled
+  );
+  await exec('window.__cwTest.readingScrollToBottom()');
+  await waitFor('window.__cwTest.readingState().loaded.includes(2)');
+  await exec('window.__cwTest.readingJump(2)');
+  await waitFor('window.__cwTest.readingState().current === 2 && window.__cwTest.readingState().endVisible === true');
+  const readEnd = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：接完最后一章显示「全书完」、下一章置灰',
+    readEnd.endVisible === true && readEnd.current === 2 && readEnd.nextDisabled === true,
+    readEnd
+  );
+
+  // 44k-6. 上一章 / 下一章 / 目录 / 从头
+  const readPrevAtEnd = await exec('window.__cwTest.readingPrev()');
+  await waitFor('window.__cwTest.readingState().current === 1');
+  const readAtSecond = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：上一章回到第 2 章，下一章按钮恢复可用',
+    readPrevAtEnd.ok === true && readAtSecond.current === 1 && readAtSecond.nextDisabled === false,
+    readAtSecond
+  );
+  await exec('window.__cwTest.readingPrev()');
+  await waitFor('window.__cwTest.readingState().current === 0');
+  check(
+    '阅读模式：到章首后上一章置灰，再点不会越界',
+    (await exec('window.__cwTest.readingState()')).prevDisabled === true &&
+      (await exec('window.__cwTest.readingPrev()')).edge === true
+  );
+  await exec('window.__cwTest.readingNext()');
+  await waitFor('window.__cwTest.readingState().current === 1');
+  await exec('window.__cwTest.readingNext()');
+  await waitFor('window.__cwTest.readingState().current === 2');
+  check(
+    '阅读模式：下一章可以连续走到最后一章',
+    (await exec('window.__cwTest.readingState()')).current === 2 &&
+      (await exec('window.__cwTest.readingState()')).nextDisabled === true
+  );
+  const readTocState = await exec('window.__cwTest.readingState()');
+  check(
+    '阅读模式：目录列出全书章节并跟着当前位置走',
+    readTocState.tocCount === 3 && readTocState.tocValue === '2',
+    readTocState
+  );
+  await exec('window.__cwTest.readingSelectToc(1)');
+  await waitFor('window.__cwTest.readingState().current === 1');
+  check(
+    '阅读模式：目录可以跳到任意一章（第 2 章）',
+    (await exec('window.__cwTest.readingState()')).tocValue === '1'
+  );
+  await exec("window.__cwTest.readingClick('btn-reading-first')");
+  await waitFor('window.__cwTest.readingState().current === 0');
+  check(
+    '阅读模式：「从头」回到第 1 章',
+    (await exec('window.__cwTest.readingState()')).current === 0
+  );
+  await exec('window.__cwTest.closeReading()');
+  await waitFor("window.__cwTest.view() === 'editor'");
+
+  // 44k-7. 章节文件被挪走：阅读视图给错误块，不崩、不重建、不改书目
+  const readMissingPath = readTxtPaths[2];
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await fs.rename(readMissingPath, `${readMissingPath}.missing`);
+  try {
+    await exec('window.__cwTest.openReading()');
+    await waitFor('window.__cwTest.readingState().open === true && window.__cwTest.readingState().loading === false');
+    await exec('window.__cwTest.readingNext()');
+    await waitFor('window.__cwTest.readingState().loaded.includes(1)');
+    await exec('window.__cwTest.readingNext()');
+    await waitFor('window.__cwTest.readingState().errorBlocks === 1');
+    const readErrorState = await exec('window.__cwTest.readingState()');
+    const readErrorBlock = (await exec('window.__cwTest.readingBlocks()')).find(
+      (block) => block.index === 2
+    );
+    check(
+      '阅读模式：章节文件被挪走时显示错误块，不崩、不重建文件',
+      readErrorState.errorBlocks === 1 &&
+        Boolean(
+          readErrorBlock &&
+            readErrorBlock.error.includes('读取失败') &&
+            readErrorBlock.error.includes('不会重建文件')
+        ) &&
+        (await fileExists(readMissingPath)) === false,
+      { state: readErrorState, block: readErrorBlock }
+    );
+    check(
+      '阅读模式：读不到的那一章仍在书里（书目不被改动）',
+      JSON.stringify(await fs.readFile(readMetaPath)) === JSON.stringify(readMetaStable) &&
+        (await fileExists(`${readMissingPath}.missing`)) === true
+    );
+    await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+    await waitFor("window.__cwTest.view() === 'editor'");
+  } finally {
+    await fs.rename(`${readMissingPath}.missing`, readMissingPath);
+  }
+
+  // 44k-8. 进入阅读不写盘：有未保存修改时只显示磁盘内容，退出后修改还在、仍可照常保存
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  const readDirtyEditor = '这段还没保存：阅读模式不该动它。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(readDirtyEditor)})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  const readDirtyTxtBefore = await fs.readFile(readTxtPaths[0]);
+  const readDirtyMetaBefore = await fs.readFile(readMetaPath);
+  await exec('window.__cwTest.openReading()');
+  await waitFor('window.__cwTest.readingState().open === true && window.__cwTest.readingState().loading === false');
+  const readDirtyState = await exec('window.__cwTest.readingState()');
+  const readDirtyBlocks = await exec('window.__cwTest.readingBlocks()');
+  check(
+    '阅读模式：有未保存修改时只显示磁盘内容，并明确提示「你的修改还在编辑区」',
+    readDirtyState.dirty === true &&
+      readDirtyState.noteVisible === true &&
+      readDirtyState.note.includes('未保存') &&
+      readDirtyBlocks[0].text === readTexts[0] &&
+      (await exec('window.__cwTest.text()')) === readDirtyEditor,
+    readDirtyState
+  );
+  check(
+    '阅读模式：此时进入 / 阅读都不写盘（章节 txt / 书目字节不变）',
+    JSON.stringify(await fs.readFile(readTxtPaths[0])) === JSON.stringify(readDirtyTxtBefore) &&
+      JSON.stringify(await fs.readFile(readMetaPath)) === JSON.stringify(readDirtyMetaBefore)
+  );
+  await exec('window.__cwTest.closeReading()');
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '阅读模式：退出后未保存内容还在编辑区、仍是未保存状态',
+    (await exec('window.__cwTest.text()')) === readDirtyEditor &&
+      (await exec('window.__cwTest.dirty()')) === true
+  );
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  const readDirtySaved = await storage.loadChapterText(readBookPath, readMeta.chapters[0].file);
+  check(
+    '阅读模式：退出后照常可以保存（阅读模式没有锁住编辑）',
+    readDirtySaved.text === readDirtyEditor &&
+      (await exec('window.__cwTest.view()')) === 'editor'
+  );
+  check(
+    '阅读模式：最终书文件夹没有 _trash / 临时文件',
+    (await fs.readdir(readBookPath)).every(
+      (name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')
+    )
+  );
+
   // 45. 导出 EPUB（v0.7-1）：整本书 → EPUB 3；分卷做目录级、一章一个 XHTML、纯文字封面
   await exec("window.__cwTest.newBook('EPUB导出测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");

@@ -84,6 +84,7 @@
           <div class="editor-actions">
             <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
             <button id="btn-focus" class="btn ghost" type="button" title="专注模式：隐藏左栏与顶栏，只留正文（F11 进出，Esc 退出；不写配置）">专注</button>
+            <button id="btn-reading" class="btn ghost" type="button" title="阅读模式：把整本书当只读稿子连续读（字号 / 行距 / 目录 / 上一章 / 下一章；不改字、不写盘、不改书目，Esc 退出）">阅读</button>
             <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
             <button id="btn-tts" class="btn ghost" type="button" title="朗读本章：用 Windows 自带语音读正文，只读不改、不写盘（Esc 停止）">朗读</button>
             <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
@@ -151,6 +152,55 @@
           <span class="kbd">Ctrl+S 保存</span>
         </footer>
       </main>
+    </section>
+
+    <!-- ============ 阅读模式（v0.8-4，提案 N4）：整本只读通读，纯显示层，不写盘 ============ -->
+    <section id="reading-view" class="view reading-view hidden">
+      <header class="reading-header">
+        <div class="reading-head-left">
+          <button id="btn-reading-exit" class="btn ghost" type="button" title="退出阅读模式，回到写作页（Esc）">← 退出阅读</button>
+          <div class="reading-book">
+            <div id="reading-book-title" class="reading-book-title"></div>
+            <div id="reading-progress" class="reading-progress muted small"></div>
+          </div>
+        </div>
+        <div class="reading-head-right">
+          <button id="btn-reading-first" class="btn ghost tiny" type="button" title="从第 1 章开始读">从头</button>
+          <label class="reading-field">字号
+            <select id="reading-font-level" class="text-input reading-select" title="只改阅读视图的显示，不写配置">
+              <option value="0">小</option>
+              <option value="1">中</option>
+              <option value="2" selected>大</option>
+              <option value="3">特大</option>
+            </select>
+          </label>
+          <label class="reading-field">行距
+            <select id="reading-line-level" class="text-input reading-select" title="只改阅读视图的显示，不写配置">
+              <option value="0">紧凑</option>
+              <option value="1" selected>标准</option>
+              <option value="2">宽松</option>
+            </select>
+          </label>
+          <label class="reading-field reading-toc-field">目录
+            <select id="reading-toc" class="text-input reading-select reading-toc" title="跳到任意一章（只切换阅读位置）"></select>
+          </label>
+          <button id="btn-reading-prev" class="btn ghost tiny" type="button" title="上一章">‹ 上一章</button>
+          <button id="btn-reading-next" class="btn ghost tiny" type="button" title="下一章">下一章 ›</button>
+        </div>
+      </header>
+      <div id="reading-note" class="reading-note muted small hidden"></div>
+      <main class="reading-main">
+        <div id="reading-scroll" class="reading-scroll" tabindex="0">
+          <article id="reading-content" class="reading-content"></article>
+          <div id="reading-end" class="reading-end hidden">— 全书完 —</div>
+          <div id="reading-loading" class="reading-loading muted small hidden">正在读取…</div>
+        </div>
+      </main>
+      <footer class="reading-footer">
+        <span class="muted small">只读模式：这里显示磁盘上的正文，不改字、不写盘、不改书目；按 Esc 或「退出阅读」回到写作页。</span>
+        <span class="spacer"></span>
+        <span id="reading-summary" class="muted small"></span>
+      </footer>
     </section>
   </div>
 
@@ -785,6 +835,7 @@
   <script src="../core/bookinfo.js"></script>
   <script src="editor-logic.js"></script>
   <script src="focus-logic.js"></script>
+  <script src="reading-logic.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>
