@@ -213,6 +213,8 @@ async function listBooks(booksRoot) {
         status: 'ok',
         title: meta.title || folder,
         chapterCount: meta.chapters.length,
+        // 章节名给书架搜索用（只搜书名/章节名，不搜正文）
+        chapterNames: meta.chapters.map((chapter) => chapter.name || ''),
         totalChars: stats.totalChars,
         lastModified: stats.latestMtime,
         missing: []
@@ -225,6 +227,7 @@ async function listBooks(booksRoot) {
         status: 'corrupt',
         title: folder,
         chapterCount: 0,
+        chapterNames: [],
         totalChars: 0,
         lastModified: 0,
         reason: err.message,

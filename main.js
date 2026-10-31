@@ -168,6 +168,28 @@ function registerIpc() {
     return config;
   });
 
+  // 每本书的显示设置覆盖（写作页里改的字体/背景/间距/章节栏宽度只影响这本书）
+  handle('book:get-display', async (bookId) => {
+    await getConfig();
+    return configStore.getBookDisplay(bookId);
+  });
+
+  handle('book:set-display', async (bookId, patch) => {
+    await getConfig();
+    const display = await configStore.setBookDisplay(bookId, patch || {});
+    config = await configStore.get();
+    if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
+    return display;
+  });
+
+  handle('book:reset-display', async (bookId) => {
+    await getConfig();
+    await configStore.resetBookDisplay(bookId);
+    config = await configStore.get();
+    if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
+    return true;
+  });
+
   handle('books:list', async () => {
     const cfg = await getConfig();
     return storage.listBooks(cfg.booksRoot);

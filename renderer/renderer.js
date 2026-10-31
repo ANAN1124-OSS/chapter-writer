@@ -78,11 +78,13 @@
 
   // ---------- 状态 ----------
   const state = {
-    config: null,
+    config: null, // 显示设置的「生效值」= 全局 + 当前书覆盖
+    globalConfig: null, // 全局显示设置（书架 →「设置」里改的那份）
     books: [],
     view: 'shelf',
     bookPath: null,
     meta: null,
+    bookId: null, // 当前书的 meta.id（按书记忆显示设置的 key）
     chapters: [],
     index: -1,
     baseText: '',
@@ -101,6 +103,9 @@
     sidebarDragging: false,
     formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了；最多 50 步）
     replaceBackups: [], // 当前书的「整本替换」备份列表（查找面板里展示 / 还原用）
+    bookDisplay: {}, // 当前书的显示设置覆盖（只覆盖改过的项）
+    shelfQuery: '', // 书架搜索词（书名 / 章节名）
+    settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
     suppressChapterClick: 0, // 拖拽结束后短暂屏蔽 click，避免误切章
@@ -289,6 +294,42 @@
     return state.sidebarWidth;
   }
 
+  // 显示设置的生效值 = 全局设置 + 当前书的覆盖
+  function effectiveConfig() {
+    return { ...(state.globalConfig || state.config || {}), ...(state.bookDisplay || {}) };
+  }
+
+  // 章节栏宽度：开着书就记到这本书，否则记全局
+  async function persistSidebarWidth(width) {
+    try {
+      if (state.bookId) {
+        const display = await call(api.setBookDisplay, state.bookId, { editorSidebarWidth: width });
+        state.bookDisplay = display || {};
+        state.config = effectiveConfig();
+      } else {
+        state.globalConfig = await call(api.setConfig, { editorSidebarWidth: width });
+        state.config = effectiveConfig();
+      }
+    } catch { /* 记不住宽度不影响使用 */ }
+  }
+
+  // 打开一本书后套用这本书的显示设置（没有单独设置过就沿用全局）
+  async function applyBookDisplay(bookId) {
+    let display = {};
+    try {
+      display = (await call(api.getBookDisplay, bookId)) || {};
+    } catch {
+      display = {};
+    }
+    state.bookDisplay = display;
+    state.config = effectiveConfig();
+    if (state.config.editorFont === 'custom' && state.config.editorCustomFontPath) {
+      await loadCustomFont(state.config.editorCustomFontPath, { silent: true });
+    }
+    applyEditorStyle();
+    applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
+  }
+
   function setupSidebarResizer() {
     const resizer = $('sidebar-resizer');
     if (!resizer) return;
@@ -316,17 +357,13 @@
       state.sidebarDragging = false;
       resizer.classList.remove('dragging');
       document.body.classList.remove('resizing');
-      try {
-        state.config = await call(api.setConfig, { editorSidebarWidth: state.sidebarWidth });
-      } catch { /* 记不住宽度不影响使用 */ }
+      await persistSidebarWidth(state.sidebarWidth);
     });
 
-    // 双击恢复默认宽度
+    // 双击恢复默认宽度（这本书恢复成 250）
     resizer.addEventListener('dblclick', async () => {
       applySidebarWidth(250);
-      try {
-        state.config = await call(api.setConfig, { editorSidebarWidth: 250 });
-      } catch { /* 忽略 */ }
+      await persistSidebarWidth(250);
     });
   }
 
@@ -341,20 +378,79 @@
     renderShelf();
   }
 
+  // ---------- 书架搜索（书名 + 章节名） ----------
+  // 只搜书名和章名，不读正文：281 本书也能输入即出结果。
+  function shelfQueryText() {
+    return String(state.shelfQuery || '').trim();
+  }
+
+  function matchBookForSearch(book, queryLower) {
+    if (!queryLower) return { visible: true, titleMatch: false, chapterHits: [] };
+    const title = String(book.title || '').toLowerCase();
+    const folder = String(book.folder || '').toLowerCase();
+    if (title.includes(queryLower) || folder.includes(queryLower)) {
+      return { visible: true, titleMatch: true, chapterHits: [] };
+    }
+    const names = Array.isArray(book.chapterNames) ? book.chapterNames : [];
+    const chapterHits = [];
+    for (let i = 0; i < names.length && chapterHits.length < 3; i += 1) {
+      const name = String(names[i] || '');
+      if (name && name.toLowerCase().includes(queryLower)) chapterHits.push({ index: i, name });
+    }
+    return { visible: chapterHits.length > 0, titleMatch: false, chapterHits };
+  }
+
+  function shelfSearchResults() {
+    const queryLower = shelfQueryText().toLowerCase();
+    const rows = [];
+    for (const book of state.books) {
+      const info = matchBookForSearch(book, queryLower);
+      if (info.visible) rows.push({ book, info });
+    }
+    return rows;
+  }
+
+  function updateShelfSearchUi(matchedCount) {
+    const summary = $('shelf-search-summary');
+    const clear = $('btn-shelf-search-clear');
+    const query = shelfQueryText();
+    if (clear) clear.classList.toggle('hidden', !query);
+    if (!summary) return;
+    if (!query) {
+      summary.classList.add('hidden');
+      summary.textContent = '';
+      return;
+    }
+    summary.classList.remove('hidden');
+    summary.textContent =
+      matchedCount > 0
+        ? `搜索「${query}」：${matchedCount} / ${state.books.length} 本（回车打开第一本，Esc 清除）`
+        : `搜索「${query}」：没有匹配的书（只搜书名和章节名，不搜正文；Esc 清除）`;
+  }
+
   function renderShelf() {
     $('books-root-label').textContent = state.config ? `书架：${state.config.booksRoot}` : '';
     $('books-root-label').title = state.config ? state.config.booksRoot : '';
     const grid = $('book-grid');
     grid.innerHTML = '';
 
+    const query = shelfQueryText();
+    const rows = shelfSearchResults();
+    updateShelfSearchUi(rows.length);
+
     if (!state.books.length) {
       const empty = document.createElement('div');
       empty.className = 'shelf-empty';
       empty.textContent = '这里还没有书。点右边（或下面）的「新建一本书」开始，或者把已有的书文件夹放进书架目录。';
       grid.appendChild(empty);
+    } else if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'shelf-empty';
+      empty.textContent = `没有找到匹配「${query}」的书（只搜书名和章节名，不搜正文）。`;
+      grid.appendChild(empty);
     }
 
-    for (const book of state.books) {
+    for (const { book, info } of rows) {
       const card = document.createElement('div');
       card.className = 'book-card' + (book.status === 'corrupt' ? ' corrupt' : '');
       card.dataset.path = book.path;
@@ -371,6 +467,16 @@
           ? `书目损坏：${book.reason || '无法读取'}`
           : `${book.chapterCount} 章 · ${formatChars(book.totalChars)}`;
       card.appendChild(meta);
+
+      // 书名没命中、靠章名命中时，把命中的章名列出来
+      if (info.chapterHits && info.chapterHits.length) {
+        const hitLine = document.createElement('div');
+        hitLine.className = 'book-card-match';
+        hitLine.textContent = `章节命中：${info.chapterHits
+          .map((hit) => chapterTitle(hit.index, hit.name))
+          .join('、')}`;
+        card.appendChild(hitLine);
+      }
 
       const time = document.createElement('div');
       time.className = 'book-card-time';
@@ -413,18 +519,21 @@
       grid.appendChild(card);
     }
 
-    const add = document.createElement('button');
-    add.type = 'button';
-    add.className = 'book-card new-book';
-    const plus = document.createElement('span');
-    plus.className = 'plus';
-    plus.textContent = '＋';
-    const addLabel = document.createElement('span');
-    addLabel.textContent = '新建一本书';
-    add.appendChild(plus);
-    add.appendChild(addLabel);
-    add.addEventListener('click', onNewBookClick);
-    grid.appendChild(add);
+    // 搜索时不再显示「新建一本书」，避免挡结果
+    if (!query) {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'book-card new-book';
+      const plus = document.createElement('span');
+      plus.className = 'plus';
+      plus.textContent = '＋';
+      const addLabel = document.createElement('span');
+      addLabel.textContent = '新建一本书';
+      add.appendChild(plus);
+      add.appendChild(addLabel);
+      add.addEventListener('click', onNewBookClick);
+      grid.appendChild(add);
+    }
 
     updateWindowTitle();
   }
@@ -473,6 +582,7 @@
 
     state.bookPath = bookPath;
     state.meta = data.meta;
+    state.bookId = data.meta.id;
     state.chapters = data.meta.chapters;
     state.dirty = false;
     state.saveError = null;
@@ -481,6 +591,8 @@
     $('book-title').title = data.meta.title;
     showView('editor');
     renderChapterList();
+    // 套用这本书自己的显示设置（没有单独设置过就沿用全局）
+    await applyBookDisplay(data.meta.id);
 
     const startIndex = Math.max(
       0,
@@ -1090,12 +1202,18 @@
     state.view = 'shelf';
     state.bookPath = null;
     state.meta = null;
+    state.bookId = null;
+    state.bookDisplay = {};
     state.chapters = [];
     state.index = -1;
     state.dirty = false;
     state.saveError = null;
     state.baseText = '';
     editorEl.value = '';
+    // 回到书架就切回全局显示设置
+    state.config = effectiveConfig();
+    applyEditorStyle();
+    applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
     showView('shelf');
     await refreshShelf();
   }
@@ -1918,9 +2036,18 @@
     const preset = DISPLAY_PRESETS[name];
     if (!preset) return;
     try {
-      state.config = await call(api.setConfig, preset.patch);
-      applyEditorStyle();
-      toast(`正文显示已切换为「${preset.label}」（正文没动）`);
+      if (state.bookId) {
+        const display = await call(api.setBookDisplay, state.bookId, preset.patch);
+        state.bookDisplay = display || {};
+        state.config = effectiveConfig();
+        applyEditorStyle();
+        toast(`本书正文显示已切换为「${preset.label}」（只影响这本书）`);
+      } else {
+        state.globalConfig = await call(api.setConfig, preset.patch);
+        state.config = effectiveConfig();
+        applyEditorStyle();
+        toast(`正文显示已切换为「${preset.label}」（全局默认）`);
+      }
     } catch (err) {
       toast(`切换显示失败：${err.message}`, 'error');
     }
@@ -1934,14 +2061,12 @@
     if (el.value !== wanted) el.value = String(fallback); // 值不在选项里时回到默认
   }
 
-  function previewSettings() {
-    if (!state.settingsBackup) return;
-    applyEditorStyle({ ...state.settingsBackup, ...readDisplayForm() });
+  function settingsScopeForView() {
+    return state.view === 'editor' && state.bookId ? 'book' : 'global';
   }
 
-  function openSettings() {
-    const cfg = state.config || {};
-    state.settingsBackup = state.config ? { ...state.config } : null;
+  // 设置弹层里各输入框按给定配置回填
+  function fillSettingsFields(cfg) {
     state.settingsFontDraft = {
       path: cfg.editorCustomFontPath || '',
       name: cfg.editorCustomFontName || ''
@@ -1958,6 +2083,34 @@
     setSelectValue('settings-padding-x', cfg.editorPaddingX, 56);
     setSelectValue('settings-page-width', cfg.editorPageWidth, 0);
     setSelectValue('settings-paper', cfg.editorPaper, 'paper');
+  }
+
+  function updateSettingsScopeUi() {
+    const isBook = state.settingsScope === 'book';
+    const rootField = $('settings-root-field');
+    if (rootField) rootField.classList.toggle('hidden', isBook);
+    const resetBtn = $('btn-reset-book-display');
+    if (resetBtn) {
+      resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
+    }
+    const hint = $('settings-scope-hint');
+    if (!hint) return;
+    hint.textContent = isBook
+      ? `只影响「${state.meta ? state.meta.title : '这本书'}」的显示设置；书架 →「设置」里改的是全局默认（没单独设置过的书都用它）。`
+      : '这里是全局默认设置：没有单独设置过的书都用这一份；在写作页里改设置只影响当前这本书。';
+  }
+
+  function previewSettings() {
+    if (!state.settingsBackup) return;
+    applyEditorStyle({ ...state.settingsBackup, ...readDisplayForm() });
+  }
+
+  function openSettings() {
+    state.settingsScope = settingsScopeForView();
+    const cfg = state.config || {};
+    state.settingsBackup = state.config ? { ...state.config } : null;
+    fillSettingsFields(cfg);
+    updateSettingsScopeUi();
     $('settings-backdrop').classList.remove('hidden');
   }
 
@@ -1970,16 +2123,51 @@
     state.settingsBackup = null;
   }
 
+  // 忘掉这本书的单独设置，恢复用全局默认
+  async function resetBookDisplay() {
+    if (state.settingsScope !== 'book' || !state.bookId) return false;
+    try {
+      await call(api.resetBookDisplay, state.bookId);
+      state.bookDisplay = {};
+      state.config = effectiveConfig();
+      if (state.config.editorFont === 'custom' && state.config.editorCustomFontPath) {
+        await loadCustomFont(state.config.editorCustomFontPath, { silent: true });
+      }
+      applyEditorStyle();
+      applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
+      fillSettingsFields(state.config);
+      state.settingsBackup = { ...state.config };
+      updateSettingsScopeUi();
+      toast('已恢复为全局默认（这本书不再有单独设置）');
+      return true;
+    } catch (err) {
+      toast(`恢复默认失败：${err.message}`, 'error');
+      return false;
+    }
+  }
+
   async function saveSettings() {
     try {
+      const form = readDisplayForm();
+      if (state.settingsScope === 'book' && state.bookId) {
+        const display = await call(api.setBookDisplay, state.bookId, form);
+        state.bookDisplay = display || {};
+        state.config = effectiveConfig();
+        applyEditorStyle();
+        applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
+        closeSettings({ restore: false });
+        toast('已保存：这本书的显示设置（只影响本书）');
+        return;
+      }
       const cfg = await call(api.setConfig, {
         booksRoot: $('settings-root').value.trim(),
-        ...readDisplayForm()
+        ...form
       });
-      state.config = cfg;
+      state.globalConfig = cfg;
+      state.config = effectiveConfig();
       applyEditorStyle();
       closeSettings({ restore: false });
-      toast('设置已保存');
+      toast('设置已保存（全局默认）');
       await refreshShelf();
     } catch (err) {
       toast(`保存设置失败：${err.message}`, 'error');
@@ -1991,6 +2179,7 @@
     $('btn-settings').addEventListener('click', openSettings);
     $('btn-settings-cancel').addEventListener('click', closeSettings);
     $('btn-settings-save').addEventListener('click', saveSettings);
+    $('btn-reset-book-display').addEventListener('click', resetBookDisplay);
     $('btn-pick-folder').addEventListener('click', async () => {
       try {
         const folder = await call(api.pickFolder);
@@ -2037,6 +2226,32 @@
     });
 
     $('btn-import').addEventListener('click', onImportClick);
+
+    // 书架搜索：输入即过滤；Esc 清除；回车打开第一本匹配的书
+    $('shelf-search').addEventListener('input', () => {
+      state.shelfQuery = $('shelf-search').value;
+      renderShelf();
+    });
+    $('shelf-search').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        state.shelfQuery = '';
+        $('shelf-search').value = '';
+        renderShelf();
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const rows = shelfSearchResults();
+        if (rows.length) openBookByPath(rows[0].book.path);
+      }
+    });
+    $('btn-shelf-search-clear').addEventListener('click', () => {
+      state.shelfQuery = '';
+      $('shelf-search').value = '';
+      renderShelf();
+      $('shelf-search').focus();
+    });
 
     $('book-menu').addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-action]');
@@ -2219,7 +2434,12 @@
       const ctrl = event.ctrlKey && !event.altKey && !event.shiftKey;
       if (ctrl && String(event.key).toLowerCase() === 'f') {
         event.preventDefault();
-        if (state.view === 'editor' && state.bookPath) openFindPanel();
+        if (state.view === 'editor' && state.bookPath) {
+          openFindPanel();
+        } else if (state.view === 'shelf') {
+          $('shelf-search').focus();
+          $('shelf-search').select();
+        }
         return;
       }
       if (ctrl && String(event.key).toLowerCase() === 'z') {
@@ -2317,8 +2537,31 @@
         await backToShelf();
       },
       shelfTitles: () => state.books.map((b) => b.title),
+      shelfQuery: () => state.shelfQuery,
+      shelfSearchSummary: () => $('shelf-search-summary').textContent,
+      shelfFilteredTitles: () =>
+        Array.from(document.querySelectorAll('.book-card[data-path] .book-card-title')).map(
+          (el) => el.textContent
+        ),
+      shelfCardMatches: () =>
+        Array.from(document.querySelectorAll('.book-card-match')).map((el) => el.textContent),
+      setShelfQuery(q) {
+        state.shelfQuery = String(q == null ? '' : q);
+        const input = $('shelf-search');
+        if (input) input.value = state.shelfQuery;
+        renderShelf();
+      },
       sidebarWidth: () => state.sidebarWidth,
       setSidebarWidth: (width) => applySidebarWidth(width),
+      persistSidebarWidth: (width) => {
+        applySidebarWidth(width);
+        return persistSidebarWidth(state.sidebarWidth);
+      },
+      bookId: () => state.bookId,
+      bookDisplay: () => ({ ...(state.bookDisplay || {}) }),
+      globalConfig: () => ({ ...(state.globalConfig || {}) }),
+      settingsScope: () => state.settingsScope,
+      resetBookDisplay: () => resetBookDisplay(),
       caret: () => editorEl.selectionStart,
       setCaret(pos) {
         editorEl.focus();
@@ -2386,11 +2629,18 @@
       async setCustomFont(fontPath, name) {
         const ok = await loadCustomFont(fontPath, { silent: true });
         if (!ok) return false;
-        state.config = await call(api.setConfig, {
+        const patch = {
           editorFont: 'custom',
           editorCustomFontPath: fontPath,
           editorCustomFontName: name || ''
-        });
+        };
+        if (state.bookId) {
+          state.bookDisplay = (await call(api.setBookDisplay, state.bookId, patch)) || {};
+          state.config = effectiveConfig();
+        } else {
+          state.globalConfig = await call(api.setConfig, patch);
+          state.config = effectiveConfig();
+        }
         applyEditorStyle();
         return true;
       },
@@ -2428,7 +2678,8 @@
   async function init() {
     bindEvents();
     try {
-      state.config = await call(api.getConfig);
+      state.globalConfig = await call(api.getConfig);
+      state.config = { ...state.globalConfig };
     } catch (err) {
       toast(`读取配置失败：${err.message}`, 'error');
     }

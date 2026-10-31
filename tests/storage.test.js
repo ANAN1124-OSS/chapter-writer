@@ -118,7 +118,8 @@ test('删除章节：文件移入 _trash，json 移除，删空后自动补一�
 
 test('listBooks：扫描、统计、损坏标记', async () => {
   const root = await mkTmp();
-  await storage.createBook(root, '好书');
+  const goodBook = await storage.createBook(root, '好书');
+  await storage.createChapter(goodBook.path, 1, '夜雨');
   const bad = await storage.createBook(root, '坏书');
   await storage.saveChapterText(bad.path, '001-未命名.txt', '内容内容');
   await fs.writeFile(path.join(bad.path, '书目.json'), '{ 这不是 json', 'utf8');
@@ -132,8 +133,11 @@ test('listBooks：扫描、统计、损坏标记', async () => {
   const good = books.find((b) => b.folder === '好书');
   const corrupt = books.find((b) => b.folder === '坏书');
   assert.equal(good.status, 'ok');
-  assert.equal(good.chapterCount, 1);
+  assert.equal(good.chapterCount, 2);
+  // 章节名跟着书架列表返回，供书架搜索用（不搜正文）
+  assert.deepEqual(good.chapterNames, ['', '夜雨']);
   assert.equal(corrupt.status, 'corrupt');
+  assert.deepEqual(corrupt.chapterNames, []);
   assert.match(corrupt.reason, /解析失败/);
 });
 

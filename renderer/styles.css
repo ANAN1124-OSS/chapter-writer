@@ -130,6 +130,28 @@ html, body {
 .version { transform: translateY(-2px); }
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 
+/* 书架搜索（书名 / 章节名） */
+.shelf-search { position: relative; width: 238px; }
+.shelf-search .text-input { padding: 7px 26px 7px 10px; font-size: 13px; }
+.shelf-search-clear {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.shelf-search-clear:hover { background: var(--paper-deep); color: var(--ink); }
+.shelf-search-summary { margin-bottom: 12px; }
+
 .shelf-body { flex: 1; overflow: auto; padding: 26px 34px; }
 
 .book-grid {
@@ -166,6 +188,12 @@ html, body {
 }
 .book-card-meta { font-size: 13px; color: var(--ink-soft); }
 .book-card-time { font-size: 12px; color: var(--ink-faint); }
+.book-card-match {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--accent);
+}
+.settings-scope-hint { margin: 2px 0 6px; line-height: 1.6; }
 .book-card.corrupt { border-color: #d9b3a6; background: #fbf3ee; }
 .book-card.corrupt .book-card-title { color: var(--danger); }
 .book-card.corrupt .btn { align-self: flex-start; margin-top: 4px; }

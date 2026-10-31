@@ -15,15 +15,20 @@
         <div class="brand">
           <span class="brand-mark">章</span>
           <span class="brand-name">章节写作器</span>
-          <span class="version muted small">v0.2</span>
+          <span class="version muted small">v0.3</span>
         </div>
         <div class="topbar-right">
+          <div class="shelf-search">
+            <input id="shelf-search" class="text-input" type="text" placeholder="搜索书名 / 章节名（Ctrl+F）" autocomplete="off" />
+            <button id="btn-shelf-search-clear" class="shelf-search-clear hidden" type="button" title="清除搜索（Esc）">×</button>
+          </div>
           <span id="books-root-label" class="muted small"></span>
           <button id="btn-import" class="btn ghost" type="button" title="把一个外部文件夹导入成书架里的一本书">导入小说</button>
           <button id="btn-settings" class="btn ghost" type="button">设置</button>
         </div>
       </header>
       <div class="shelf-body">
+        <div id="shelf-search-summary" class="shelf-search-summary muted small hidden"></div>
         <div class="book-grid" id="book-grid"></div>
       </div>
       <footer class="shelf-footer muted small">
@@ -191,7 +196,8 @@
     <div class="modal settings-modal" role="dialog" aria-modal="true">
       <h2 class="modal-title">设置</h2>
       <div class="settings-scroll">
-      <label class="field">
+      <p class="settings-scope-hint muted small" id="settings-scope-hint"></p>
+      <label class="field" id="settings-root-field">
         <span>书架目录</span>
         <div class="field-row">
           <input id="settings-root" class="text-input" type="text" />
@@ -285,6 +291,7 @@
       </p>
       </div>
       <div class="modal-buttons">
+        <button id="btn-reset-book-display" class="btn ghost hidden" type="button" title="忘掉这本书的单独显示设置，恢复用全局默认">恢复本书默认</button>
         <button id="btn-settings-cancel" class="btn ghost" type="button">取消</button>
         <button id="btn-settings-save" class="btn primary" type="button">保存设置</button>
       </div>

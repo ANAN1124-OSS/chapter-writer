@@ -357,7 +357,11 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.text()')) === '\n原文第一段\n'
   );
 
-  // 21. 章节栏 / 写作区 之间的分隔条可拖动，宽度写入配置
+  // 21. 章节栏 / 写作区 之间的分隔条可拖动，宽度按「这本书」记忆（不写全局）
+  const sidebarBookId = await exec('window.__cwTest.bookId()');
+  const globalSidebarBefore = await exec(
+    'window.api.getConfig().then((r) => (r.ok ? r.data.editorSidebarWidth : null))'
+  );
   const initialSidebarWidth = await exec('window.__cwTest.sidebarWidth()');
   const splitterScriptResult = await exec(`(() => {
     try {
@@ -388,19 +392,30 @@ module.exports = async function runScenario(ctx) {
     domSidebarWidth,
     draggedWidth
   });
-  const savedSidebarWidth = await exec(
-    `window.api.getConfig().then((r) => (r.ok ? r.data.editorSidebarWidth : null))`
+  const savedSidebarDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(sidebarBookId)}).then((r) => (r.ok ? r.data : null))`
   );
-  check('章节栏宽度写入配置（下次启动保持）', savedSidebarWidth === draggedWidth, {
-    savedSidebarWidth,
-    draggedWidth
-  });
+  check(
+    '章节栏宽度记到这本书（全局默认不变）',
+    Boolean(savedSidebarDisplay) &&
+      savedSidebarDisplay.editorSidebarWidth === draggedWidth &&
+      globalSidebarBefore === 250,
+    { savedSidebarDisplay, globalSidebarBefore }
+  );
   await exec(
     `document.getElementById('sidebar-resizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`
   );
   await sleep(400);
   const resetWidth = await exec('window.__cwTest.sidebarWidth()');
   check('双击分隔条恢复默认宽度', resetWidth === 250, { resetWidth });
+  const resetSidebarDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(sidebarBookId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  check(
+    '双击恢复也按这本书记（记成 250）',
+    Boolean(resetSidebarDisplay) && resetSidebarDisplay.editorSidebarWidth === 250,
+    resetSidebarDisplay
+  );
 
   // 22. 排版：一键整理本章 —— 改正文但不自动写盘，可撤销，落盘为 CRLF
   const currentBookDir = path.join(booksRoot, '章节小说 - 作者');
@@ -488,7 +503,8 @@ module.exports = async function runScenario(ctx) {
   check('重复整理不会重复叠加缩进', (await exec('window.__cwTest.text()')) === formattedText);
   check('无改动的整理不往撤销栈里塞东西', (await exec('window.__cwTest.formatUndoDepth()')) === 1);
 
-  // 23. 显示排版：预设 / 护眼底色 / 设置实时预览与取消恢复（正文不动）
+  // 23. 显示排版：预设 / 设置实时预览与取消恢复（按书记忆：只影响这本书，全局默认不动）
+  const displayBookId = await exec('window.__cwTest.bookId()');
   const styleBefore = await exec('window.__cwTest.displayStyle()');
   await exec("window.__cwTest.applyDisplayPreset('loose')");
   await sleep(250);
@@ -500,17 +516,24 @@ module.exports = async function runScenario(ctx) {
   );
   check('预设「宽松」限制正文宽度 800px', styleLoose.maxWidth === '800px', styleLoose.maxWidth);
   check('显示预设不碰正文', (await exec('window.__cwTest.text()')) === formattedText);
-  const looseConfig = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  const looseDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(displayBookId)}).then((r) => (r.ok ? r.data : null))`
+  );
   check(
-    '显示预设写入配置（下次启动保持）',
-    looseConfig.editorLineHeight === 2.4 &&
-      looseConfig.editorLetterSpacing === 0.05 &&
-      looseConfig.editorPageWidth === 800,
-    looseConfig
+    '显示预设按这本书记住',
+    Boolean(looseDisplay) && looseDisplay.editorLineHeight === 2.4 && looseDisplay.editorPageWidth === 800,
+    looseDisplay
+  );
+  const globalAfterPreset = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check(
+    '显示预设不改全局默认',
+    globalAfterPreset.editorLineHeight === 1.95 && globalAfterPreset.editorPageWidth === 0,
+    { lineHeight: globalAfterPreset.editorLineHeight, pageWidth: globalAfterPreset.editorPageWidth }
   );
 
   await exec('window.__cwTest.openSettings()');
   check('从写作页能打开设置', (await exec('window.__cwTest.settingsOpen()')) === true);
+  check('写作页里打开设置只作用于这本书', (await exec('window.__cwTest.settingsScope()')) === 'book');
   await exec("window.__cwTest.setSelect('settings-paper', 'green')");
   const styleGreen = await exec('window.__cwTest.displayStyle()');
   check('设置里改底色会实时预览', styleGreen.paperClass.includes('theme-green'), styleGreen.paperClass);
@@ -522,12 +545,54 @@ module.exports = async function runScenario(ctx) {
   await exec("window.__cwTest.setSelect('settings-paper', 'green')");
   await exec("document.getElementById('btn-settings-save').click()");
   await waitFor(
-    "window.api.getConfig().then((r) => (r.ok && r.data.editorPaper === 'green'))",
+    `window.api.getBookDisplay(${JSON.stringify(displayBookId)}).then((r) => (r.ok && r.data.editorPaper === 'green'))`,
     10000
   );
-  const savedPaper = await exec('window.api.getConfig().then((r) => (r.ok ? r.data.editorPaper : null))');
-  check('设置保存后护眼底色写入配置', savedPaper === 'green', savedPaper);
+  const savedBookPaper = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(displayBookId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  const globalAfterBookSettings = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check('设置保存后护眼底色写入「这本书」', savedBookPaper.editorPaper === 'green', savedBookPaper);
+  check(
+    '设置保存不改全局默认纸色',
+    globalAfterBookSettings.editorPaper === 'paper',
+    globalAfterBookSettings.editorPaper
+  );
   check('设置保存后正文仍未变', (await exec('window.__cwTest.text()')) === formattedText);
+
+  // 「恢复本书默认」：清掉这本书的覆盖，回到全局设置
+  await exec('window.__cwTest.openSettings()');
+  await exec("document.getElementById('btn-reset-book-display').click()");
+  await sleep(300);
+  const displayAfterReset = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(displayBookId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  check(
+    '「恢复本书默认」清空这本书的显示覆盖',
+    Boolean(displayAfterReset) && Object.keys(displayAfterReset).length === 0,
+    displayAfterReset
+  );
+  const styleAfterReset = await exec('window.__cwTest.displayStyle()');
+  check(
+    '恢复默认后行距回到全局值',
+    Math.abs(parseFloat(styleAfterReset.lineHeight) - 18 * 1.95) <= 1.5,
+    styleAfterReset.lineHeight
+  );
+  await exec('window.__cwTest.closeSettings()');
+
+  // 从书架改「全局默认」：没单独设置过的书都用它
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  check('从书架打开设置改的是全局默认', (await exec('window.__cwTest.settingsScope()')) === 'global');
+  await exec("window.__cwTest.setSelect('settings-paper', 'cream')");
+  await exec("document.getElementById('btn-settings-save').click()");
+  await waitFor("window.api.getConfig().then((r) => (r.ok && r.data.editorPaper === 'cream'))", 10000);
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(currentBookDir)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await sleep(300);
+  const globalPaperStyle = await exec('window.__cwTest.displayStyle()');
+  check('没有单独设置的书沿用全局纸色', globalPaperStyle.paperClass.includes('theme-cream'), globalPaperStyle.paperClass);
 
   // 24. 审阅修复复核：① 整理/撤销不把光标打回章首；② 关窗询问能压住排版弹层
   const caretText = '第一段文字，测试光标位置。\n\n第二段文字，继续测试。\n\n第三段文字。';
@@ -644,7 +709,9 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.displayStyle()')).fontFamily
   );
 
+  const themeBookId = await exec('window.__cwTest.bookId()');
   await exec('window.__cwTest.openSettings()');
+  check('写作页里的设置只改这本书', (await exec('window.__cwTest.settingsScope()')) === 'book');
   await exec("window.__cwTest.setSelect('settings-paper', 'night')");
   const nightStyle = await exec('window.__cwTest.displayStyle()');
   check('夜间主题生效（页面换成深色）', nightStyle.paperClass.includes('theme-night'), nightStyle.paperClass);
@@ -673,12 +740,23 @@ module.exports = async function runScenario(ctx) {
 
   await exec("window.__cwTest.setSelect('settings-paper', 'night')");
   await exec("document.getElementById('btn-settings-save').click()");
-  await waitFor("window.api.getConfig().then((r) => (r.ok && r.data.editorPaper === 'night'))", 10000);
-  const displayCfg = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  await waitFor(
+    `window.api.getBookDisplay(${JSON.stringify(themeBookId)}).then((r) => (r.ok && r.data.editorPaper === 'night' && r.data.editorPaddingX === 24))`,
+    10000
+  );
+  const themeBookDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(themeBookId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  const themeGlobalCfg = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
   check(
-    '夜间主题与左右边距写入配置',
-    displayCfg.editorPaper === 'night' && displayCfg.editorPaddingX === 24,
-    { paper: displayCfg.editorPaper, paddingX: displayCfg.editorPaddingX }
+    '夜间主题与左右边距按这本书记住',
+    themeBookDisplay.editorPaper === 'night' && themeBookDisplay.editorPaddingX === 24,
+    { paper: themeBookDisplay.editorPaper, paddingX: themeBookDisplay.editorPaddingX }
+  );
+  check(
+    '这本书的显示设置不改全局默认（仍是书架里设的米黄）',
+    themeGlobalCfg.editorPaper === 'cream',
+    themeGlobalCfg.editorPaper
   );
   check('改主题/边距不动正文一个字', (await exec('window.__cwTest.text()')) === indentBlankText);
 
@@ -976,6 +1054,165 @@ module.exports = async function runScenario(ctx) {
     '标点扩展：两项默认关时引号/省略号保持原样',
     (await exec('window.__cwTest.text()')) === '他说，"你好..."',
     await exec('window.__cwTest.text()')
+  );
+
+  // 33. 书架搜索：书名 + 章节名（不读正文）
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const allShelfTitles = await exec('window.__cwTest.shelfTitles()');
+
+  await exec("window.__cwTest.setShelfQuery('拖拽排序书')");
+  await sleep(120);
+  const titleFiltered = await exec('window.__cwTest.shelfFilteredTitles()');
+  check('书架搜索：按书名过滤', JSON.stringify(titleFiltered) === JSON.stringify(['拖拽排序书']), titleFiltered);
+  check(
+    '书架搜索：书名匹配时不显示章节命中行',
+    (await exec('window.__cwTest.shelfCardMatches()')).length === 0
+  );
+
+  await exec("window.__cwTest.setShelfQuery('第三')");
+  await sleep(120);
+  const chapterFiltered = await exec('window.__cwTest.shelfFilteredTitles()');
+  const chapterMatchLines = await exec('window.__cwTest.shelfCardMatches()');
+  check('书架搜索：按章节名过滤到对应的书', chapterFiltered.includes('拖拽排序书'), chapterFiltered);
+  check(
+    '书架搜索：卡片上显示命中的章节名',
+    chapterMatchLines.some((line) => line.includes('第三')),
+    chapterMatchLines
+  );
+  check(
+    '书架搜索：过滤后条数少于全部',
+    chapterFiltered.length < allShelfTitles.length,
+    { filtered: chapterFiltered.length, all: allShelfTitles.length }
+  );
+
+  await exec("window.__cwTest.setShelfQuery('绝对不存在的书名xyz')");
+  await sleep(120);
+  check('书架搜索：没有匹配时列表为空', (await exec('window.__cwTest.shelfFilteredTitles()')).length === 0);
+  check(
+    '书架搜索：没有匹配时给出提示',
+    (await exec('window.__cwTest.shelfSearchSummary()')).includes('没有匹配'),
+    await exec('window.__cwTest.shelfSearchSummary()')
+  );
+  check(
+    '书架搜索：没有匹配时不显示「新建一本书」',
+    (await exec("document.querySelectorAll('.book-card.new-book').length")) === 0
+  );
+
+  await exec("window.__cwTest.setShelfQuery('')");
+  await sleep(120);
+  check(
+    '书架搜索：清空后恢复全部书',
+    (await exec('window.__cwTest.shelfFilteredTitles()')).length === allShelfTitles.length
+  );
+  check(
+    '书架搜索：清空后「新建一本书」回来',
+    (await exec("document.querySelectorAll('.book-card.new-book').length")) === 1
+  );
+
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }))"
+  );
+  await sleep(80);
+  check(
+    '书架页 Ctrl+F 聚焦搜索框',
+    (await exec('document.activeElement && document.activeElement.id')) === 'shelf-search',
+    await exec('document.activeElement && document.activeElement.id')
+  );
+
+  await exec("window.__cwTest.setShelfQuery('拖拽排序书')");
+  await exec(
+    "document.getElementById('shelf-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))"
+  );
+  await sleep(100);
+  check('书架搜索：Esc 清空搜索', (await exec('window.__cwTest.shelfQuery()')) === '');
+  await exec("window.__cwTest.setShelfQuery('拖拽排序书')");
+  await exec(
+    "document.getElementById('shelf-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))"
+  );
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '书架搜索：回车打开第一本匹配的书',
+    (await exec('window.__cwTest.state.meta.title')) === '拖拽排序书'
+  );
+
+  // 34. 按书记忆显示设置：两本书互不影响，恢复默认回全局
+  await exec("window.__cwTest.newBook('显示测试A')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const bookAPath = await exec('window.__cwTest.state.bookPath');
+  const bookAId = await exec('window.__cwTest.bookId()');
+  await exec("window.__cwTest.applyDisplayPreset('loose')");
+  await exec('window.__cwTest.persistSidebarWidth(410)');
+  await sleep(300);
+  const aDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(bookAId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  check(
+    '按书记忆：A 书预设与章节栏宽度都记到 A',
+    Boolean(aDisplay) && aDisplay.editorLineHeight === 2.4 && aDisplay.editorSidebarWidth === 410,
+    aDisplay
+  );
+  check('按书记忆：A 书宽度应用到页面', (await exec('window.__cwTest.sidebarWidth()')) === 410);
+
+  await exec("window.__cwTest.newBook('显示测试B')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const bookBId = await exec('window.__cwTest.bookId()');
+  await sleep(300);
+  const bDisplay = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(bookBId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  const bStyle = await exec('window.__cwTest.displayStyle()');
+  check('按书记忆：B 书没有单独设置', Boolean(bDisplay) && Object.keys(bDisplay).length === 0, bDisplay);
+  check(
+    '按书记忆：B 书用全局行距',
+    Math.abs(parseFloat(bStyle.lineHeight) - 18 * 1.95) <= 1.5,
+    bStyle.lineHeight
+  );
+  check('按书记忆：B 书章节栏回到全局宽度', (await exec('window.__cwTest.sidebarWidth()')) === 250);
+
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(bookAPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await sleep(300);
+  const aStyleAgain = await exec('window.__cwTest.displayStyle()');
+  check(
+    '按书记忆：重新打开 A 还是 A 自己的行距',
+    Math.abs(parseFloat(aStyleAgain.lineHeight) - 18 * 2.4) <= 1.5,
+    aStyleAgain.lineHeight
+  );
+  check(
+    '按书记忆：重新打开 A 还是 A 自己的章节栏宽度',
+    (await exec('window.__cwTest.sidebarWidth()')) === 410
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  check('按书记忆：A 书设置作用域是 book', (await exec('window.__cwTest.settingsScope()')) === 'book');
+  check(
+    '按书记忆：有单独设置时显示「恢复本书默认」',
+    (await exec("document.getElementById('btn-reset-book-display').classList.contains('hidden')")) === false
+  );
+  await exec("document.getElementById('btn-reset-book-display').click()");
+  await sleep(300);
+  const aAfterReset = await exec(
+    `window.api.getBookDisplay(${JSON.stringify(bookAId)}).then((r) => (r.ok ? r.data : null))`
+  );
+  check(
+    '按书记忆：恢复默认清空 A 的覆盖',
+    Boolean(aAfterReset) && Object.keys(aAfterReset).length === 0,
+    aAfterReset
+  );
+  check(
+    '按书记忆：恢复后 A 回到全局行距',
+    Math.abs(parseFloat((await exec('window.__cwTest.displayStyle()')).lineHeight) - 18 * 1.95) <= 1.5
+  );
+  await exec('window.__cwTest.closeSettings()');
+  const cfgOnDisk = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check(
+    '按书记忆：设置落进 config.json（重启也能保持）',
+    Boolean(cfgOnDisk.bookDisplay) &&
+      Object.keys(cfgOnDisk.bookDisplay).length > 0 &&
+      !cfgOnDisk.bookDisplay[bookAId],
+    cfgOnDisk.bookDisplay && Object.keys(cfgOnDisk.bookDisplay)
   );
 
   return { ok: true, checks: checks.length, details: checks };

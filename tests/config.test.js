@@ -128,3 +128,73 @@ test('自定义字体：没有字体文件时回落内置字体', () => {
   assert.equal(custom.editorCustomFontName, '我的字体.ttf');
   assert.equal(sanitize({ editorCustomFontPath: 123 }).editorCustomFontPath, '');
 });
+
+test('按书显示设置：只存改过的项，脏数据被清洗', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  const bookId = 'b_test-book';
+
+  assert.deepEqual(await store.getBookDisplay(bookId), {});
+
+  const saved = await store.setBookDisplay(bookId, {
+    editorPaper: 'night',
+    editorSidebarWidth: 420,
+    editorLineHeight: 2.2
+  });
+  assert.equal(saved.editorPaper, 'night');
+  assert.equal(saved.editorSidebarWidth, 420);
+  assert.equal(saved.editorLineHeight, 2.2);
+  // 没改的项不写进覆盖，继续沿用全局
+  assert.equal(Object.prototype.hasOwnProperty.call(saved, 'editorFont'), false);
+
+  // 再改一项是合并，不会把之前的覆盖冲掉
+  await store.setBookDisplay(bookId, { editorFont: 'kai' });
+  const merged = await store.getBookDisplay(bookId);
+  assert.equal(merged.editorFont, 'kai');
+  assert.equal(merged.editorPaper, 'night');
+  assert.equal(merged.editorSidebarWidth, 420);
+
+  // 全局设置不受这本书的覆盖影响
+  const cfg = await store.get();
+  assert.equal(cfg.editorPaper, 'paper');
+  assert.equal(cfg.editorFont, 'serif');
+
+  // 重启后仍在
+  const display = await createConfigStore(dir).getBookDisplay(bookId);
+  assert.equal(display.editorPaper, 'night');
+
+  // 直到点「恢复本书默认」才删掉覆盖
+  assert.equal(await store.resetBookDisplay(bookId), true);
+  assert.deepEqual(await store.getBookDisplay(bookId), {});
+  assert.equal(await store.resetBookDisplay(bookId), false, '没有覆盖时再重置返回 false');
+});
+
+test('按书显示设置：非法值按全局规则夹紧，非法 bookId 被忽略', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.setBookDisplay('b_x', {
+    editorPaper: 'pink',
+    editorFontSize: 999,
+    editorPageWidth: 99999,
+    editorCustomFontPath: 123
+  });
+  const display = await store.getBookDisplay('b_x');
+  assert.equal(display.editorPaper, 'paper');
+  assert.equal(display.editorFontSize, 30);
+  assert.equal(display.editorPageWidth, 1600);
+  assert.equal(display.editorCustomFontPath, '');
+  // 覆盖成 custom 但没路径：该项不算数
+  const custom = await store.setBookDisplay('b_y', { editorFont: 'custom' });
+  assert.deepEqual(custom, {});
+
+  const cleaned = sanitize({
+    bookDisplay: {
+      '  ': { editorPaper: 'night' },
+      'b_ok': { editorPaper: 'kraft', editorSidebarWidth: 9999 }
+    }
+  });
+  assert.deepEqual(Object.keys(cleaned.bookDisplay), ['b_ok']);
+  assert.equal(cleaned.bookDisplay.b_ok.editorPaper, 'kraft');
+  assert.equal(cleaned.bookDisplay.b_ok.editorSidebarWidth, 800);
+  assert.equal(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay && Object.keys(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay).length, 0);
+});
