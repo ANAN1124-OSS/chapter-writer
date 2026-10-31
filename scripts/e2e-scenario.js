@@ -3591,6 +3591,216 @@ module.exports = async function runScenario(ctx) {
   );
   await exec('window.__cwTest.closeSettings()');
 
+  // 44i. 写作时长统计（v0.8-2，提案 N2）：可选、默认关；只记时长不记内容
+  // 只写临时 userData 的 stats.json / config.json；书库 / 书目 / 章节 txt 不受影响。
+  const writeTimerDay = statsLib.localDayKey();
+  const waitForStatsSeconds = async (atLeast, timeout = 8000) => {
+    const startedAt = Date.now();
+    for (;;) {
+      const disk = await readStatsDisk();
+      const seconds = statsLib.daySeconds(disk, writeTimerDay);
+      if (seconds >= atLeast) return { disk, seconds };
+      if (Date.now() - startedAt > timeout) {
+        throw new Error(`等待写作时长落盘超时：${seconds} < ${atLeast}`);
+      }
+      await sleep(120);
+    }
+  };
+  const writeTimerConfigBefore = await readConfigDisk();
+  const writeTimerStatsBefore = await readStatsDisk();
+  check(
+    '写作时长：默认关（config 里没有开启；旧 stats 没有 seconds）',
+    writeTimerConfigBefore.writeDurationEnabled !== true &&
+      (await exec('window.api.getConfig().then((r) => r.ok && r.data.writeDurationEnabled === false)')) === true &&
+      statsLib.daySeconds(writeTimerStatsBefore, writeTimerDay) === 0
+  );
+  check(
+    '写作时长：默认关时写作页不显示计时按钮',
+    (await exec('window.__cwTest.timerVisible()')) === false &&
+      (await exec('window.__cwTest.timerStart()')) === false
+  );
+
+  // 44i-1. 设置里开启（全局设置：要在书架页打开）；开关落进 config.json
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '写作时长：设置里有开关，默认未勾选且按书设置里不显示',
+    (await exec('window.__cwTest.durationSettingsVisible()')) === true &&
+      (await exec('window.__cwTest.durationSettingsChecked()')) === false &&
+      (await exec('window.__cwTest.durationSettingsSummary()')).includes('未开启')
+  );
+  await exec("window.__cwTest.setCheck('settings-write-duration', true)");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.writeDurationEnabled === true)');
+  const writeTimerConfigOn = await readConfigDisk();
+  check(
+    '写作时长：开启后开关真的落进 config.json，只新增 writeDurationEnabled 一个字段',
+    writeTimerConfigOn.writeDurationEnabled === true &&
+      writeTimerConfigOn.dailyGoal === 0 &&
+      JSON.stringify(Object.keys(writeTimerConfigOn).filter((key) => /duration|timer/i.test(key))) ===
+        '["writeDurationEnabled"]',
+    writeTimerConfigOn
+  );
+  check('写作时长：书架页不显示计时按钮（只在写作页）', (await exec('window.__cwTest.timerVisible()')) === false);
+
+  // 44i-2. 打开书 → 手动开始 / 暂停：按实际经过的整秒记进 stats.json，不碰字数
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const timerBookEntriesBefore = (await fs.readdir(historyBookPath)).sort().join('|');
+  check(
+    '写作时长：开启后写作页出现计时按钮，默认不走表',
+    (await exec('window.__cwTest.timerVisible()')) === true &&
+      (await exec('window.__cwTest.timerRunning()')) === false &&
+      (await exec('window.__cwTest.timerText()')).includes('写作计时')
+  );
+  const timerStatsBeforeStart = await readStatsDisk();
+  const timerSecondsBeforeStart = statsLib.daySeconds(timerStatsBeforeStart, writeTimerDay);
+  const timerCharsBeforeStart = statsLib.dayTotal(timerStatsBeforeStart, writeTimerDay);
+  check('写作时长：点开始后进入计时状态', (await exec('window.__cwTest.timerStart()')) === true && (await exec('window.__cwTest.timerRunning()')) === true);
+  await sleep(1400);
+  await exec('window.__cwTest.timerPause()');
+  check(
+    '写作时长：暂停后按钮显示已暂停的秒表，本次时长 ≥ 1 秒',
+    (await exec('window.__cwTest.timerRunning()')) === false &&
+      (await exec('window.__cwTest.timerText()')).includes('已暂停') &&
+      (await exec('window.__cwTest.timerSessionSeconds()')) >= 1
+  );
+  const timerStatsAfterPause = await readStatsDisk();
+  const timerSecondsAfterPause = statsLib.daySeconds(timerStatsAfterPause, writeTimerDay);
+  check(
+    '写作时长：暂停时把整秒写进 stats.json，字数一点没变',
+    timerSecondsAfterPause >= timerSecondsBeforeStart + 1 &&
+      timerSecondsAfterPause <= timerSecondsBeforeStart + 4 &&
+      statsLib.dayTotal(timerStatsAfterPause, writeTimerDay) === timerCharsBeforeStart &&
+      Object.keys(timerStatsAfterPause.days[writeTimerDay] || {}).sort().join('|') === 'books|seconds',
+    { timerSecondsBeforeStart, timerSecondsAfterPause }
+  );
+
+  // 44i-3. 界面 / 统计摘要 / 码字日历都跟着显示时长（只读，不再写盘）
+  await exec('window.__cwTest.refreshStats()');
+  const timerSummary = await exec('window.__cwTest.statsSummary()');
+  check(
+    '写作时长：统计摘要带 writeDurationEnabled / todaySeconds，与磁盘一致',
+    timerSummary &&
+      timerSummary.writeDurationEnabled === true &&
+      timerSummary.todaySeconds === timerSecondsAfterPause &&
+      (await exec('window.__cwTest.statsChartSummary()')).includes('今日写作') &&
+      (await exec('window.__cwTest.durationSettingsSummary()')).includes('今天写作')
+  );
+  const timerCalendar = await exec('window.__cwTest.statsCalendar()');
+  const timerCalendarCell = timerCalendar && timerCalendar.days.find((item) => item.day === writeTimerDay);
+  check(
+    '写作时长：码字日历今天格子 / 月度汇总带「用时」',
+    timerCalendar &&
+      timerCalendar.totalSeconds === timerSecondsAfterPause &&
+      timerCalendarCell &&
+      timerCalendarCell.seconds === timerSecondsAfterPause &&
+      (await exec(`window.__cwTest.calendarDayInfo(${JSON.stringify(writeTimerDay)})`)).seconds === timerSecondsAfterPause &&
+      (await exec('window.__cwTest.calendarSummaryText()')).includes('用时')
+  );
+
+  // 44i-4. 计时中上报（30 秒定时器同一路径）：整秒落盘、零头留在内存，不重复计数
+  await exec('window.__cwTest.timerStart()');
+  await sleep(1200);
+  await exec('window.__cwTest.timerFlush()');
+  const timerAfterFlush = await waitForStatsSeconds(timerSecondsAfterPause + 1);
+  check(
+    '写作时长：计时中上报只加整秒、不足 1 秒留在内存',
+    timerAfterFlush.seconds >= timerSecondsAfterPause + 1 &&
+      timerAfterFlush.seconds <= timerSecondsAfterPause + 3 &&
+      (await exec('window.__cwTest.timerUnsentSeconds()')) <= 1 &&
+      (await exec('window.__cwTest.timerRunning()')) === true
+  );
+  await exec('window.__cwTest.timerPause()');
+
+  // 44i-5. 离开写作页自动停表并上报；回写作页从 0 开始、不会自己走表
+  await exec('window.__cwTest.timerStart()');
+  await sleep(1300);
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const timerAfterLeave = await waitForStatsSeconds(timerAfterFlush.seconds + 1);
+  check(
+    '写作时长：回书架自动停表，并把没上报的整秒记下',
+    timerAfterLeave.seconds >= timerAfterFlush.seconds + 1 &&
+      (await exec('window.__cwTest.timerRunning()')) === false &&
+      (await exec('window.__cwTest.timerVisible()')) === false
+  );
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '写作时长：重新打开书后秒表从 0 开始，不会自己计时',
+    (await exec('window.__cwTest.timerVisible()')) === true &&
+      (await exec('window.__cwTest.timerRunning()')) === false &&
+      (await exec('window.__cwTest.timerSessionSeconds()')) === 0 &&
+      (await exec('window.__cwTest.timerText()')) === '写作计时'
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
+  // 44i-6. 关掉开关：主进程不再接收时长；写作页按钮消失，历史秒数保留
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setCheck('settings-write-duration', false)");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.writeDurationEnabled === false)');
+  const timerGateBeforeStat = await fs.stat(statsPath);
+  const timerGateBefore = await readStatsDisk();
+  const timerGateResult = await exec('window.api.addStatsDuration({ seconds: 300 })');
+  await sleep(200);
+  const timerGateAfterStat = await fs.stat(statsPath);
+  const timerGateAfter = await readStatsDisk();
+  check(
+    '写作时长：关掉后主进程直接忽略上报，stats.json 一个字节都不动',
+    timerGateResult &&
+      timerGateResult.ok === true &&
+      timerGateResult.data.recorded === 0 &&
+      timerGateResult.data.disabled === true &&
+      timerGateAfterStat.size === timerGateBeforeStat.size &&
+      timerGateAfterStat.mtimeMs === timerGateBeforeStat.mtimeMs &&
+      JSON.stringify(timerGateAfter) === JSON.stringify(timerGateBefore)
+  );
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const timerOffStatBefore = await fs.stat(statsPath);
+  await sleep(1200);
+  const timerOffStatAfter = await fs.stat(statsPath);
+  check(
+    '写作时长：关掉后写作页不再显示按钮、也开不了计时（历史时长仍保留）',
+    (await exec('window.__cwTest.timerVisible()')) === false &&
+      (await exec('window.__cwTest.timerStart()')) === false &&
+      timerOffStatAfter.size === timerOffStatBefore.size &&
+      timerOffStatAfter.mtimeMs === timerOffStatBefore.mtimeMs &&
+      statsLib.daySeconds(await readStatsDisk(), writeTimerDay) === timerAfterLeave.seconds
+  );
+
+  // 44i-7. 只写 userData、兼容旧数据：书库没有 stats.json / 临时文件 / 新备份目录
+  const timerUserDataEntries = await fs.readdir(userData);
+  const timerBookEntriesAfter = (await fs.readdir(historyBookPath)).sort().join('|');
+  check(
+    '写作时长：只写 userData/stats.json，书内目录一个文件都没多',
+    !timerUserDataEntries.some((name) => name.includes('.tmp-')) &&
+      (await fileExists(statsPath)) &&
+      !(await fileExists(path.join(historyBookPath, 'stats.json'))) &&
+      !(await fileExists(path.join(booksRoot, 'stats.json'))) &&
+      timerBookEntriesAfter === timerBookEntriesBefore,
+    { before: timerBookEntriesBefore, after: timerBookEntriesAfter }
+  );
+  const timerDiskFinal = await readStatsDisk();
+  const timerSeedMonthView = statsLib.monthView(timerDiskFinal, {
+    year: calendarSeed.seedYear,
+    month: calendarSeed.seedMonth,
+    now: new Date()
+  });
+  check(
+    '写作时长：旧统计（没有 seconds 的种子天）照常读，时长按 0 处理',
+    timerSeedMonthView.totalSeconds === 0 &&
+      timerSeedMonthView.days.every((item) => item.seconds === 0) &&
+      calendarSeed.seedDays.every(
+        (item) => Object.keys(timerDiskFinal.days[item.day] || {}).join('|') === 'books'
+      ) &&
+      Object.keys(timerDiskFinal).sort().join('|') === 'days|version'
+  );
+
   // 45. 导出 EPUB（v0.7-1）：整本书 → EPUB 3；分卷做目录级、一章一个 XHTML、纯文字封面
   await exec("window.__cwTest.newBook('EPUB导出测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");

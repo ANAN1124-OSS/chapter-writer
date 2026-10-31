@@ -132,6 +132,10 @@
           <span id="status-text">已保存</span>
           <span id="status-selection" class="status-selection hidden"></span>
           <span class="spacer"></span>
+          <button id="btn-write-timer" class="status-timer hidden" type="button" title="写作计时（默认关）：点一下开始，再点暂停；只记时长、不记内容">
+            <span id="write-timer-icon" aria-hidden="true">⏱</span>
+            <span id="write-timer-text">写作计时</span>
+          </button>
           <span id="status-stats" class="status-stats hidden">
             <span id="status-stats-text"></span>
             <span class="goal-track" id="status-goal-track"><i id="status-goal-fill"></i></span>
@@ -599,6 +603,13 @@
           <span id="settings-goal-state" class="muted small"></span>
         </div>
       </label>
+      <div class="field" id="settings-duration-field">
+        <label class="check-row">
+          <input id="settings-write-duration" type="checkbox" />
+          <span>记录写作时长（默认关）：只在写作页手动点「写作计时」时累计秒数，<strong>只记时长、不记内容</strong>，存在 <code>stats.json</code>，不写书库</span>
+        </label>
+        <div id="settings-duration-summary" class="muted small"></div>
+      </div>
       <div class="field" id="settings-stats-chart-field">
         <span>近 30 天（含今天，最右一根是今天）</span>
         <div id="settings-stats-summary" class="muted small"></div>
@@ -623,6 +634,7 @@
       <p class="muted small" id="settings-stats-hint">
         统计只存在应用配置目录的 <code>stats.json</code>，不写进书库、不改章节 txt；只统计保存动作带来的新增字数，
         删字不会倒扣当天进度。旧配置没有目标字段时按「不设目标」处理。码字日历 / 连续天数都从这份统计现算，不另存文件。
+        写作时长默认关；开启后只记秒数（不记内容），和字数存在同一份 <code>stats.json</code>。
       </p>
       <div class="field-group">数据安全</div>
       <div class="field" id="settings-snapshot-field">

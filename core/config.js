@@ -59,6 +59,9 @@ const DEFAULTS = Object.freeze({
   // 每日写作目标（字数）：0 = 不设目标；只统计保存动作写下的正字数。
   // 统计本身存在 userData/stats.json，不写进书库。
   dailyGoal: statsLib.DEFAULT_GOAL,
+  // 写作时长统计（v0.8-2）：默认关。开启后只在写作页手动点「写作计时」时累计秒数，
+  // 只记时长不记内容，存 userData/stats.json；旧配置没有这个键 = 关。
+  writeDurationEnabled: false,
   // 敏感词预检用的词表（作者自己的 txt，每行一个词）。应用不内置任何词表；
   // 这里只记绝对路径，词表文件本身只读、不复制、不改写。没设置 = ''。
   sensitiveWordsPath: ''
@@ -188,6 +191,8 @@ function sanitize(raw) {
   );
   // 每日目标：0 = 不设目标；负数 / NaN 回落 0，超大值夹到上限；旧配置没有这个键照常启动。
   cfg.dailyGoal = statsLib.normalizeGoal(cfg.dailyGoal, DEFAULTS.dailyGoal);
+  // 写作时长统计：只认真正的 true（缺字段 / 写错类型都按「关」）。
+  cfg.writeDurationEnabled = cfg.writeDurationEnabled === true;
   // 敏感词表路径：只做基本清洗（非字符串 / 超长 → 未设置）；文件不存在时由预检面板提示，
   // 不会因为词表被移走就让应用起不来。旧配置没有这个键 = 未设置。
   const sensitiveWordsPath =

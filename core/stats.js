@@ -18,6 +18,9 @@ const MAX_RECENT_DAYS = 400;
 const KEEP_DAYS = 400;
 const MAX_DAYS = 500;
 const MAX_DAY_CHARS = 100000000;
+// 写作时长（v0.8-2）：一天最多记 24 小时，坏数据 / 手改文件都夹住。
+// 只记秒数，不记正文、不记按键；单位是秒，按天汇总（不按书分桶）。
+const MAX_DAY_SECONDS = 86400;
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 // 码字日历固定周一起始（和国内日历 / 口袋写作习惯一致）。
 const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -79,6 +82,19 @@ function sanitizeBookId(raw) {
   return id.slice(0, 200);
 }
 
+// 写作时长清洗：只认有限数，四舍五入到整秒，负数 / NaN / 坏字符串一律 0，
+// 超过 24 小时夹到上限。旧 stats.json 没有这个字段 = 0。
+function sanitizeDuration(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(MAX_DAY_SECONDS, n);
+}
+
+function secondsOfEntry(entry) {
+  if (!entry || typeof entry !== 'object') return 0;
+  return sanitizeDuration(entry.seconds);
+}
+
 function emptyStats() {
   return { version: STATS_VERSION, days: {} };
 }
@@ -106,7 +122,14 @@ function sanitizeStats(raw) {
       if (!Number.isFinite(n) || n <= 0) continue;
       books[id] = Math.min(MAX_DAY_CHARS, n);
     }
-    if (Object.keys(books).length) out.days[key] = { books };
+    const seconds = sanitizeDuration(entry.seconds);
+    // 旧数据只有 books；开着写作时长后，某天可能只有时长没有新字数（只计时 / 只读），
+    // 这种「只有 seconds」的日子也要留住，否则月视图会少一天时长。
+    if (!Object.keys(books).length && seconds <= 0) continue;
+    const clean = {};
+    if (Object.keys(books).length) clean.books = books;
+    if (seconds > 0) clean.seconds = seconds;
+    out.days[key] = clean;
   }
   return out;
 }
@@ -117,8 +140,15 @@ function dayTotal(rawStats, day) {
   const entry = stats.days[key];
   if (!entry) return 0;
   let total = 0;
-  for (const value of Object.values(entry.books)) total += value;
+  for (const value of Object.values(entry.books || {})) total += value;
   return total;
+}
+
+// 某一天的写作时长（秒）；没有记录 = 0。旧 stats.json 没有 seconds 字段也算 0。
+function daySeconds(rawStats, day) {
+  const stats = sanitizeStats(rawStats);
+  const key = isValidDayKey(day) ? day : localDayKey();
+  return secondsOfEntry(stats.days[key]);
 }
 
 // 内部用：已经 sanitize 过的统计，直接取某天合计，避免 monthView 里逐天重复清洗。
@@ -176,6 +206,7 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
   const pad = (n) => String(n).padStart(2, '0');
   const days = [];
   let total = 0;
+  let totalSeconds = 0;
   let writtenDays = 0;
   let goalDays = 0;
   let maxChars = 0;
@@ -183,8 +214,11 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
 
   for (let dayOfMonth = 1; dayOfMonth <= count; dayOfMonth += 1) {
     const day = `${targetYear}-${pad(targetMonth)}-${pad(dayOfMonth)}`;
-    const chars = totalOfEntry(stats.days[day]);
+    const entry = stats.days[day];
+    const chars = totalOfEntry(entry);
+    const seconds = secondsOfEntry(entry);
     const written = chars > 0;
+    totalSeconds += seconds;
     if (written) {
       total += chars;
       writtenDays += 1;
@@ -198,6 +232,7 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
       day,
       dayOfMonth,
       chars,
+      seconds,
       written,
       goalMet: dailyGoal > 0 && chars >= dailyGoal,
       level: 0, // 下面按整月最高值 / 目标统一算，避免逐天口径不一致
@@ -219,6 +254,7 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
     weekdayLabels: WEEKDAY_LABELS.slice(),
     goal: dailyGoal,
     total,
+    totalSeconds,
     writtenDays,
     goalDays,
     average: writtenDays > 0 ? Math.round(total / writtenDays) : 0,
@@ -262,21 +298,8 @@ function streak(rawStats, { now = new Date() } = {}) {
   };
 }
 
-// 把一次保存的正字数增量记进某本书的某一天；delta <= 0 不计数（删字/没变都不该扣今天的进度）。
-// 返回新 stats 与真正记下的 added（调用方据此决定要不要写盘）。
-function recordChars(rawStats, { day, bookId, delta } = {}) {
-  const stats = sanitizeStats(rawStats);
-  const key = isValidDayKey(day) ? day : localDayKey();
-  const amount = Math.round(Number(delta));
-  if (!Number.isFinite(amount) || amount <= 0) return { stats, added: 0, day: key };
-  const id = sanitizeBookId(bookId);
-  const entry = stats.days[key] && stats.days[key].books ? stats.days[key] : { books: {} };
-  const before = entry.books[id] || 0;
-  entry.books[id] = Math.min(MAX_DAY_CHARS, before + amount);
-  const actualAdded = entry.books[id] - before;
-  stats.days[key] = entry;
-
-  // 只清理「早于保留窗口」的真实日期；未来日期/坏键（读取时已被清洗）不动。
+// 只清理「早于保留窗口」的真实日期；未来日期/坏键（读取时已被清洗）不动。
+function pruneDays(stats, key) {
   const cutoff = shiftDayKey(key, -(KEEP_DAYS - 1));
   for (const existing of Object.keys(stats.days)) {
     if (existing < cutoff) delete stats.days[existing];
@@ -285,7 +308,44 @@ function recordChars(rawStats, { day, bookId, delta } = {}) {
   if (all.length > MAX_DAYS) {
     for (const old of all.slice(0, all.length - MAX_DAYS)) delete stats.days[old];
   }
+}
+
+// 把一次保存的正字数增量记进某本书的某一天；delta <= 0 不计数（删字/没变都不该扣今天的进度）。
+// 返回新 stats 与真正记下的 added（调用方据此决定要不要写盘）。
+function recordChars(rawStats, { day, bookId, delta } = {}) {
+  const stats = sanitizeStats(rawStats);
+  const key = isValidDayKey(day) ? day : localDayKey();
+  const amount = Math.round(Number(delta));
+  if (!Number.isFinite(amount) || amount <= 0) return { stats, added: 0, day: key };
+  const id = sanitizeBookId(bookId);
+  // 保留这一天已有的写作时长（v0.8-2）；旧数据没有 seconds 时就是空的。
+  const existing = stats.days[key];
+  const entry = existing && typeof existing === 'object' ? { ...existing, books: { ...(existing.books || {}) } } : { books: {} };
+  const before = entry.books[id] || 0;
+  entry.books[id] = Math.min(MAX_DAY_CHARS, before + amount);
+  const actualAdded = entry.books[id] - before;
+  stats.days[key] = entry;
+  pruneDays(stats, key);
   return { stats, added: actualAdded, day: key };
+}
+
+// 把一段写作时长（秒）累计到某一天；seconds <= 0 / 坏值不写盘。
+// 只加时长、不记任何正文或按键；单日上限 MAX_DAY_SECONDS（24 小时）。
+// 时长和字数是同一天的两种记录：这里也保留当天已有的按书字数。
+function recordDuration(rawStats, { day, seconds } = {}) {
+  const stats = sanitizeStats(rawStats);
+  const key = isValidDayKey(day) ? day : localDayKey();
+  const amount = Math.round(Number(seconds));
+  if (!Number.isFinite(amount) || amount <= 0) return { stats, added: 0, day: key };
+  const existing = stats.days[key];
+  const entry = existing && typeof existing === 'object' ? { ...existing } : { books: {} };
+  const before = secondsOfEntry(entry);
+  entry.seconds = Math.min(MAX_DAY_SECONDS, before + amount);
+  const added = entry.seconds - before;
+  if (added <= 0) return { stats, added: 0, day: key };
+  stats.days[key] = entry;
+  pruneDays(stats, key);
+  return { stats, added, day: key };
 }
 
 // 近 N 天：从最早到今天，缺的天补 0，方便渲染层直接画柱子。
@@ -302,21 +362,26 @@ function recentDays(rawStats, now = new Date(), count = DEFAULT_RECENT_DAYS) {
 }
 
 // 给渲染层的最小摘要：今天多少字、目标多少、完成百分比、近 N 天（含今天）。
+// v0.8-2 追加写作时长：今天 / 近 N 天各多少秒（关掉记录时一直是 0，旧数据读出来也是 0）。
 function summary(rawStats, { now = new Date(), goal = DEFAULT_GOAL, days = DEFAULT_RECENT_DAYS } = {}) {
   const stats = sanitizeStats(rawStats);
   const anchor = localDayKey(now);
   const recent = recentDays(stats, anchor, days);
   const todayChars = dayTotal(stats, anchor);
+  const todaySeconds = daySeconds(stats, anchor);
+  const recentSeconds = recent.reduce((sum, item) => sum + secondsOfEntry(stats.days[item.day]), 0);
   const dailyGoal = normalizeGoal(goal);
   const goalPercent = dailyGoal > 0 ? Math.min(100, Math.floor((todayChars / dailyGoal) * 100)) : 0;
   const recentTotal = recent.reduce((sum, item) => sum + item.chars, 0);
   return {
     day: anchor,
     todayChars,
+    todaySeconds,
     goal: dailyGoal,
     goalPercent,
     goalMet: dailyGoal > 0 && todayChars >= dailyGoal,
     recentTotal,
+    recentSeconds,
     days: recent
   };
 }
@@ -395,12 +460,24 @@ function createStatsStore(userDataDir) {
     });
   }
 
+  // 写作时长（v0.8-2）：只有按钮记秒数，不记内容；和字数共用一个串行队列与原子写，
+  // 避免「保存正文」与「计时上报」同时写 stats.json 互相覆盖。
+  function addDuration({ day, seconds } = {}) {
+    return enqueue(async () => {
+      const current = await load();
+      const result = recordDuration(current, { day, seconds });
+      if (result.added > 0) await writeJsonAtomic(file, result.stats);
+      cache = result.stats;
+      return { added: result.added, day: result.day, stats: cloneStats(cache) };
+    });
+  }
+
   async function summaryOf(options) {
     const stats = await get();
     return summary(stats, options);
   }
 
-  return { file, load, get, record, summary: summaryOf };
+  return { file, load, get, record, addDuration, summary: summaryOf };
 }
 
 module.exports = {
@@ -409,6 +486,7 @@ module.exports = {
   MAX_GOAL,
   DEFAULT_RECENT_DAYS,
   KEEP_DAYS,
+  MAX_DAY_SECONDS,
   WEEKDAY_LABELS,
   localDayKey,
   parseDayKey,
@@ -420,8 +498,11 @@ module.exports = {
   mondayWeekday,
   calendarLevel,
   sanitizeStats,
+  sanitizeDuration,
   dayTotal,
+  daySeconds,
   recordChars,
+  recordDuration,
   recentDays,
   summary,
   monthView,

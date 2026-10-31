@@ -19,6 +19,8 @@
   const CONTENT_SEARCH_MIN_CHARS = 2;
   const CONTENT_PAGE_SIZE = 8;
   const CONTENT_RESULT_LIMIT = 40;
+  // 写作计时（v0.8-2）：每 30 秒把整秒上报一次；不足 1 秒的零头留在内存里下次一起算。
+  const WRITE_TIMER_FLUSH_MS = 30000;
 
   // ---------- 小工具 ----------
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -53,6 +55,15 @@
     if (value < 1024) return `${value} B`;
     if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
     return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  // 写作时长显示（纯格式换算在 editor-logic.js，Node 单测覆盖；这里只做转发）
+  function formatDuration(n) {
+    return editorLogic.formatDuration(n);
+  }
+
+  function formatStopwatch(n) {
+    return editorLogic.formatStopwatch(n);
   }
 
   function countChars(text) {
@@ -152,6 +163,16 @@
     stats: null, // 每日字数摘要：{ day, todayChars, goal, goalPercent, goalMet, recentTotal, days[], streak }
     calendar: null, // 设置里显示的码字日历月视图（只读；翻月时由 stats:calendar 换）
     streak: null, // 连续写作天数：{ current, best, todayWritten, lastWritten, writtenDays }
+    // 写作时长（v0.8-2，提案 N2）：默认关，只有设置里开启后才出现计时按钮。
+    // 只按实际经过的时间累计秒数，不读正文、不记按键；秒数按天存进 userData/stats.json。
+    writeTimer: {
+      running: false, // 现在是否在计时
+      segmentStart: 0, // 这一段开始计时的 Date.now()（暂停 = 0）
+      sessionMs: 0, // 本次打开这本书累计的毫秒（只用于界面秒表）
+      unsentMs: 0, // 还没上报给主进程的毫秒（保留不足 1 秒的零头）
+      flushTimer: null, // 每 30 秒上报一次
+      tickTimer: null // 每秒刷新一下按钮上的秒表（纯显示，不写盘）
+    },
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
     jumpOutOfRange: false, // 输入的是章号但超出本书章数
@@ -331,6 +352,10 @@
     $('editor-view').classList.toggle('hidden', view !== 'editor');
     updateWindowTitle();
     renderStatsUi();
+    // 离开写作页就停表（先把没上报的整秒记下）：回书架 / 关书不会把闲逛时间算成写作
+    if (view !== 'editor' && (state.writeTimer.running || state.writeTimer.sessionMs > 0 || state.writeTimer.unsentMs > 0)) {
+      void resetWriteTimer({ flush: true });
+    }
     // 标记层只在写作页显示；切回书架就收起（开关状态保留，回来还在）
     if (view === 'editor') scheduleMarksRender(0);
     else hideEditorMarks();
@@ -1032,6 +1057,8 @@
       toast(`注意：${data.missing.length} 个章节文件缺失，可在「导出 → 打开本书文件夹」里检查`, 'warn');
     }
 
+    // 换书前先停掉上一本的写作计时：把没上报的整秒记下，新书从 0 开始
+    await resetWriteTimer({ flush: true });
     state.bookPath = bookPath;
     state.meta = data.meta;
     state.bookId = data.meta.id;
@@ -2112,6 +2139,8 @@
     }
     renderStatsChart();
     renderStatsCalendar();
+    renderDurationSettings();
+    renderWriteTimer();
   }
 
   // 设置里的近 30 天柱状图：纯 CSS 高度，不引第三方库。今天那根高亮。
@@ -2137,9 +2166,14 @@
     });
     const summaryEl = $('settings-stats-summary');
     if (summaryEl) {
+      const durationText =
+        stats && (writeDurationEnabled() || Number(stats.todaySeconds) > 0)
+          ? ` · 今日写作 ${formatDuration(stats.todaySeconds)}`
+          : '';
       summaryEl.textContent = stats
         ? `今天 ${formatChars(stats.todayChars)} · 近 30 天 ${formatChars(stats.recentTotal)}` +
-          (goal > 0 ? ` · 目标 ${formatChars(goal)}（${Math.min(100, Math.floor(Number(stats.goalPercent) || 0))}%）` : ' · 未设目标')
+          (goal > 0 ? ` · 目标 ${formatChars(goal)}（${Math.min(100, Math.floor(Number(stats.goalPercent) || 0))}%）` : ' · 未设目标') +
+          durationText
         : '还没有统计数据（保存一次后开始记录）';
     }
     const goalState = $('settings-goal-state');
@@ -2185,15 +2219,17 @@
 
   function calendarSummaryText(view) {
     if (!view) return '';
+    const durationText = view.totalSeconds > 0 ? ` · 用时 ${formatDuration(view.totalSeconds)}` : '';
     if (!view.writtenDays) {
-      return view.isCurrentMonth ? '本月还没有保存记录（保存一次后开始记录）' : '这个月没有保存记录';
+      const base = view.isCurrentMonth ? '本月还没有保存记录（保存一次后开始记录）' : '这个月没有保存记录';
+      return view.totalSeconds > 0 ? `${base}（计时 ${formatDuration(view.totalSeconds)}）` : base;
     }
     const goalText = view.goal > 0 ? ` · 达标 ${view.goalDays} 天` : '';
     const bestText = view.bestDay
       ? ` · 最高 ${view.bestDay.day.slice(5)}（${formatChars(view.bestDay.chars)}）`
       : '';
     const prefix = view.isCurrentMonth ? '本月' : `${view.month}月`;
-    return `${prefix} ${formatChars(view.total)} · 写了 ${view.writtenDays} 天 · 日均 ${formatChars(view.average)}${goalText}${bestText}`;
+    return `${prefix} ${formatChars(view.total)} · 写了 ${view.writtenDays} 天 · 日均 ${formatChars(view.average)}${goalText}${bestText}${durationText}`;
   }
 
   async function loadStatsCalendar(year, month) {
@@ -2284,6 +2320,7 @@
       if (item.future) cell.classList.add('future');
       cell.dataset.day = item.day;
       cell.dataset.chars = String(item.chars);
+      cell.dataset.seconds = String(item.seconds || 0);
       cell.dataset.level = String(item.level);
       cell.dataset.goalMet = item.goalMet ? '1' : '0';
       const num = document.createElement('span');
@@ -2291,6 +2328,7 @@
       cell.appendChild(num);
       cell.title =
         `${item.day} · ${item.chars > 0 ? formatChars(item.chars) : '没写'}` +
+        (item.seconds > 0 ? ` · 用时 ${formatDuration(item.seconds)}` : '') +
         (item.goalMet ? ' · 已达标' : '') +
         (item.today ? ' · 今天' : '') +
         (item.future ? ' · 还没到' : '');
@@ -2304,6 +2342,190 @@
     if (streakEl) {
       streakEl.textContent = calendarStreakLabel(state.streak);
       streakEl.classList.toggle('off', !(state.streak && state.streak.current > 0));
+    }
+  }
+
+  // ---------- 写作时长（v0.8-2，提案 N2，参考口袋写作 tb_stat.writeDuration） ----------
+  // 默认关：设置里打开后才在状态栏出现「写作计时」按钮。
+  // 语义 = 秒表：只在你手动点开始时按实际经过时间累计秒数，暂停 / 回书架 / 关窗时停；
+  // 不读正文、不记按键、不做番茄钟倒计时；秒数按天存 userData/stats.json（和字数同一份）。
+  function writeDurationEnabled() {
+    return Boolean(state.config && state.config.writeDurationEnabled === true);
+  }
+
+  function writeTimerTodaySeconds() {
+    const stats = state.stats || {};
+    return Math.max(0, Math.round(Number(stats.todaySeconds) || 0));
+  }
+
+  // 只用于界面显示：已上报的今天秒数 + 还在内存里没上报的整秒
+  function writeTimerTodaySecondsLive() {
+    return writeTimerTodaySeconds() + Math.floor(writeTimerUnsentMs() / 1000);
+  }
+
+  function writeTimerSegmentMs() {
+    const t = state.writeTimer;
+    return t.running ? Math.max(0, Date.now() - t.segmentStart) : 0;
+  }
+
+  function writeTimerSessionMs() {
+    return Math.max(0, state.writeTimer.sessionMs + writeTimerSegmentMs());
+  }
+
+  function writeTimerSessionSeconds() {
+    return Math.floor(writeTimerSessionMs() / 1000);
+  }
+
+  function writeTimerUnsentMs() {
+    return Math.max(0, state.writeTimer.unsentMs + writeTimerSegmentMs());
+  }
+
+  function renderWriteTimer() {
+    const btn = $('btn-write-timer');
+    if (!btn) return;
+    const visible = state.view === 'editor' && Boolean(state.bookPath) && writeDurationEnabled();
+    btn.classList.toggle('hidden', !visible);
+    if (!visible) return;
+    const t = state.writeTimer;
+    const seconds = writeTimerSessionSeconds();
+    const label = $('write-timer-text');
+    if (label) {
+      if (t.running) label.textContent = `计时 ${formatStopwatch(seconds)}`;
+      else if (seconds > 0) label.textContent = `已暂停 ${formatStopwatch(seconds)}`;
+      else label.textContent = '写作计时';
+    }
+    btn.classList.toggle('running', t.running === true);
+    btn.classList.toggle('paused', !t.running && seconds > 0);
+    const todayText = formatDuration(writeTimerTodaySecondsLive());
+    btn.title =
+      (t.running ? '正在计时：点一下暂停（只记时长，不记内容）' : '点击开始写作计时（只记时长，不记内容）') +
+      `。今天已写 ${writeTimerTodaySecondsLive() > 0 ? todayText : '0 秒'}` +
+      (t.running || seconds > 0 ? ` · 本次 ${formatStopwatch(seconds)}` : '');
+  }
+
+  // 设置 →「写作统计」里的时长状态（未开启 / 今天 / 近 30 天）
+  // 注意：这里只更新状态文字，不回填 checkbox（否则会把用户还没保存的勾选改掉）。
+  function renderDurationSettings() {
+    const summary = $('settings-duration-summary');
+    if (!summary) return;
+    if (!writeDurationEnabled()) {
+      summary.textContent = '未开启（默认关；开启后只在写作页点「写作计时」时累计，不记录任何内容）';
+      summary.className = 'muted small';
+      return;
+    }
+    const stats = state.stats || {};
+    const recent = Math.max(0, Math.round(Number(stats.recentSeconds) || 0));
+    const today = writeTimerTodaySecondsLive();
+    summary.textContent =
+      `今天写作 ${formatDuration(today)} · 近 30 天 ${formatDuration(recent)}` +
+      (state.writeTimer.running ? ' · 正在计时' : '');
+    summary.className = 'muted small';
+  }
+
+  function stopWriteTimerTicker() {
+    const t = state.writeTimer;
+    if (t.flushTimer) clearInterval(t.flushTimer);
+    if (t.tickTimer) clearInterval(t.tickTimer);
+    t.flushTimer = null;
+    t.tickTimer = null;
+  }
+
+  function startWriteTimerTicker() {
+    const t = state.writeTimer;
+    stopWriteTimerTicker();
+    t.flushTimer = setInterval(() => {
+      void flushWriteTimer();
+    }, WRITE_TIMER_FLUSH_MS);
+    // 只刷新按钮上的秒表文字，不写盘、不碰正文
+    t.tickTimer = setInterval(() => renderWriteTimer(), 1000);
+  }
+
+  function startWriteTimer() {
+    if (!writeDurationEnabled() || state.view !== 'editor' || !state.bookPath) return false;
+    const t = state.writeTimer;
+    if (t.running) return true;
+    t.running = true;
+    t.segmentStart = Date.now();
+    startWriteTimerTicker();
+    renderWriteTimer();
+    renderDurationSettings();
+    return true;
+  }
+
+  // 上报串行化：暂停 / 保存 / 30 秒定时 可能同时触发，排队执行才不会重复扣零头
+  let writeTimerQueue = Promise.resolve();
+
+  function flushWriteTimer() {
+    const run = writeTimerQueue.then(
+      () => flushWriteTimerNow(),
+      () => flushWriteTimerNow()
+    );
+    writeTimerQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  async function flushWriteTimerNow() {
+    const t = state.writeTimer;
+    if (t.running) {
+      const now = Date.now();
+      const delta = Math.max(0, now - t.segmentStart);
+      t.segmentStart = now;
+      t.sessionMs += delta;
+      t.unsentMs += delta;
+    }
+    const seconds = Math.floor(t.unsentMs / 1000);
+    // 关掉记录时不写盘：配置切换前会先 flush 一次，这里只是兜底。
+    if (seconds <= 0 || !writeDurationEnabled()) {
+      renderWriteTimer();
+      return 0;
+    }
+    t.unsentMs -= seconds * 1000;
+    try {
+      const res = await call(api.addStatsDuration, { seconds });
+      if (res && res.stats) {
+        state.stats = res.stats;
+        if (res.stats.streak) state.streak = res.stats.streak;
+        renderStatsUi();
+      }
+      return (res && res.recorded) || 0;
+    } catch {
+      // 统计写失败不能影响写作：把秒数放回去，下次暂停 / 保存 / 定时再试
+      t.unsentMs += seconds * 1000;
+      return 0;
+    }
+  }
+
+  async function pauseWriteTimer() {
+    const t = state.writeTimer;
+    await flushWriteTimer();
+    t.running = false;
+    t.segmentStart = 0;
+    stopWriteTimerTicker();
+    renderWriteTimer();
+    renderDurationSettings();
+    return true;
+  }
+
+  // 离开这本书 / 回书架 / 关窗：先把没上报的整秒发出去，再清空本次秒表。
+  async function resetWriteTimer({ flush = true } = {}) {
+    if (flush) await flushWriteTimer();
+    const t = state.writeTimer;
+    t.running = false;
+    t.segmentStart = 0;
+    t.sessionMs = 0;
+    t.unsentMs = 0;
+    stopWriteTimerTicker();
+    renderWriteTimer();
+    renderDurationSettings();
+  }
+
+  // 设置保存后调用：关掉时立刻停表并隐藏按钮；开启时按钮跟着出现。
+  function applyWriteTimerConfig() {
+    if (!writeDurationEnabled()) {
+      void resetWriteTimer({ flush: false });
+    } else {
+      renderWriteTimer();
+      renderDurationSettings();
     }
   }
 
@@ -2429,6 +2651,8 @@
         if (data.stats.streak) state.streak = data.stats.streak;
         renderStatsUi();
       }
+      // 写作时长：保存时顺手把还没上报的整秒记下（只影响统计，失败不影响保存结果）
+      if (state.writeTimer.running || state.writeTimer.unsentMs > 0) void flushWriteTimer();
       // 保存后同步本章字数缓存：章节列表的字数 / 「比上章短」提示跟着更新
       if (Number.isFinite(Number(data.chars))) {
         chapter.chars = Number(data.chars);
@@ -3369,6 +3593,8 @@
 
   // ---------- 关闭拦截 ----------
   async function handleCloseRequest() {
+    // 关窗前先把写作计时里没上报的整秒记下（异步：统计写失败也不影响关窗判断）
+    await flushWriteTimer();
     if (state.modal) {
       api.closeReady(false);
       return;
@@ -5952,6 +6178,9 @@
     setSelectValue('settings-snapshot-days', cfg.snapshotKeepDays, 7);
     const goal = Math.max(0, Math.round(Number(cfg.dailyGoal) || 0));
     $('settings-daily-goal').value = String(goal);
+    // 写作时长：默认关，只认真正的 true（旧配置没有这个键 = 关）
+    $('settings-write-duration').checked = cfg.writeDurationEnabled === true;
+    renderDurationSettings();
     // 敏感词表：只记路径，词表本身只读；具体状态在 openSettings 里异步读一次
     state.sensitiveWordsDraft = typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath : '';
     state.sensitiveWordsInfo = null;
@@ -6121,10 +6350,14 @@
     };
   }
 
-  // 每日目标是全局设置（0 = 不设目标）；主进程/配置层还会再清洗一次范围。
+  // 每日目标是全局设置（0 = 不设目标）；写作时长开关同样是全局的（默认关）。
+  // 主进程/配置层还会再清洗一次范围与布尔值。
   function readStatsForm() {
     const n = Number($('settings-daily-goal').value);
-    return { dailyGoal: Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0 };
+    return {
+      dailyGoal: Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0,
+      writeDurationEnabled: $('settings-write-duration').checked === true
+    };
   }
 
   function updateSettingsScopeUi() {
@@ -6136,10 +6369,11 @@
     if (snapshotField) snapshotField.classList.toggle('hidden', isBook);
     const snapshotDays = $('settings-snapshot-days-field');
     if (snapshotDays) snapshotDays.classList.toggle('hidden', isBook);
-    // 写作统计 / 每日目标也是全局设置：按书覆盖没有意义，写作页里不显示
+    // 写作统计 / 每日目标 / 写作时长也是全局设置：按书覆盖没有意义，写作页里不显示
     for (const id of [
       'settings-stats-group',
       'settings-daily-goal-field',
+      'settings-duration-field',
       'settings-stats-chart-field',
       'settings-calendar-field',
       'settings-stats-hint'
@@ -6200,6 +6434,8 @@
     if (restore && state.settingsBackup) {
       state.config = state.settingsBackup;
       applyEditorStyle();
+      renderWriteTimer();
+      renderDurationSettings();
     }
     state.settingsBackup = null;
   }
@@ -6240,6 +6476,10 @@
         toast('已保存：这本书的显示设置（只影响本书）');
         return;
       }
+      // 关掉「写作时长」前，先把计时器里还没上报的整秒记下来（配置一改主进程就不再接收）
+      if (writeDurationEnabled() && $('settings-write-duration').checked !== true) {
+        await flushWriteTimer();
+      }
       const cfg = await call(api.setConfig, {
         booksRoot: $('settings-root').value.trim(),
         ...form,
@@ -6250,6 +6490,7 @@
       state.globalConfig = cfg;
       state.config = effectiveConfig();
       applyEditorStyle();
+      applyWriteTimerConfig();
       closeSettings({ restore: false });
       toast('设置已保存（全局默认）');
       await refreshShelf();
@@ -6266,6 +6507,14 @@
     $('btn-settings-cancel').addEventListener('click', closeSettings);
     $('btn-settings-save').addEventListener('click', saveSettings);
     $('btn-reset-book-display').addEventListener('click', resetBookDisplay);
+    // 写作计时（v0.8-2）：手动开始 / 暂停；只记时长不记内容，不做番茄钟
+    const writeTimerBtn = $('btn-write-timer');
+    if (writeTimerBtn) {
+      writeTimerBtn.addEventListener('click', () => {
+        if (state.writeTimer.running) void pauseWriteTimer();
+        else startWriteTimer();
+      });
+    }
     // 码字日历：翻月 / 回到本月（只读；点击不会写 stats.json）
     $('calendar-prev').addEventListener('click', () => {
       void shiftStatsCalendar(-1);
@@ -7880,6 +8129,7 @@
           chars: Number(el.dataset.chars),
           level: Number(el.dataset.level),
           goalMet: el.dataset.goalMet === '1',
+          seconds: Number(el.dataset.seconds),
           today: el.classList.contains('today'),
           future: el.classList.contains('future')
         };
@@ -7888,6 +8138,22 @@
       calendarPrevDisabled: () => $('calendar-prev').disabled,
       calendarTodayDisabled: () => $('calendar-today').disabled,
       shelfStreakText: () => $('shelf-stats-streak').textContent,
+      // 写作时长（v0.8-2，提案 N2）
+      timerVisible: () => !$('btn-write-timer').classList.contains('hidden'),
+      timerRunning: () => state.writeTimer.running === true,
+      timerText: () => $('write-timer-text').textContent,
+      timerTitle: () => $('btn-write-timer').title,
+      timerStart: () => startWriteTimer(),
+      timerPause: () => pauseWriteTimer(),
+      timerFlush: () => flushWriteTimer(),
+      timerReset: () => resetWriteTimer({ flush: true }),
+      timerSessionSeconds: () => writeTimerSessionSeconds(),
+      timerTodaySeconds: () => writeTimerTodaySeconds(),
+      timerUnsentSeconds: () => Math.floor(writeTimerUnsentMs() / 1000),
+      durationEnabled: () => writeDurationEnabled(),
+      durationSettingsVisible: () => !$('settings-duration-field').classList.contains('hidden'),
+      durationSettingsSummary: () => $('settings-duration-summary').textContent,
+      durationSettingsChecked: () => $('settings-write-duration').checked === true,
       setInput(id, value) {
         const el = $(id);
         el.value = String(value);

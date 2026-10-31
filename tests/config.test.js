@@ -432,3 +432,38 @@ test('敏感词表配置：写盘 / 读回，清除后落盘为空', async () =>
   await store.set({ sensitiveWordsPath: '' });
   assert.equal((await createConfigStore(dir).get()).sensitiveWordsPath, '');
 });
+
+test('写作时长配置：默认关、旧配置缺字段照常启动、只认真正的 true', async () => {
+  const dir = await mkTmp();
+  assert.equal((await createConfigStore(dir).get()).writeDurationEnabled, false, '默认关');
+  // 模拟旧配置：完全没有 writeDurationEnabled
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 800 }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.writeDurationEnabled, false, '旧配置缺字段 = 关');
+  assert.equal(cfg.dailyGoal, 800, '旧配置其它字段不受影响');
+
+  assert.equal(sanitize({ writeDurationEnabled: 'true' }).writeDurationEnabled, false, '字符串 true 不算');
+  assert.equal(sanitize({ writeDurationEnabled: 1 }).writeDurationEnabled, false, '数字 1 不算');
+  assert.equal(sanitize({ writeDurationEnabled: true }).writeDurationEnabled, true);
+});
+
+test('写作时长配置：开关写盘 / 读回，只影响这个字段', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  const on = await store.set({ writeDurationEnabled: true, editorFont: 'kai' });
+  assert.equal(on.writeDurationEnabled, true);
+  assert.equal(on.editorFont, 'kai');
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.writeDurationEnabled, true);
+  assert.equal(reopened.editorFont, 'kai');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.writeDurationEnabled, true);
+  assert.equal(raw.editorFont, 'kai');
+
+  await store.set({ writeDurationEnabled: false });
+  assert.equal((await createConfigStore(dir).get()).writeDurationEnabled, false);
+});

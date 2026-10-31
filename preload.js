@@ -91,6 +91,8 @@ contextBridge.exposeInMainWorld('api', {
   getStats: () => invoke('stats:get'),
   // 码字日历：只读某个月的每日字数（year/month 由渲染层传，主进程清洗），不写盘
   getStatsCalendar: (calendar) => invoke('stats:calendar', calendar),
+  // 写作时长（v0.8-2）：只上报「整秒数」，主进程按配置决定记不记；不传正文/按键
+  addStatsDuration: (payload) => invoke('stats:duration', payload),
   // 灵感箱（碎片速记）：书架根目录 _碎片 里的普通 txt，不写 书目.json、不碰章节
   listFragments: () => invoke('fragments:list'),
   createFragment: (text) => invoke('fragments:create', text),

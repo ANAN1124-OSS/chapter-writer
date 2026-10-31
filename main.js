@@ -471,10 +471,12 @@ function getStatsStore() {
 }
 
 // 统计摘要统一出口：今天 + 近 30 天 + 连续写作天数（保存后与 stats:get 用同一套口径）。
+// v0.8-2 起带上「写作时长」开关状态，界面据此决定要不要显示计时按钮（默认关）。
 function statsSummaryPayload(stats, cfg, now = new Date()) {
   return {
     ...statsLib.summary(stats, { goal: cfg.dailyGoal, now }),
-    streak: statsLib.streak(stats, { now })
+    streak: statsLib.streak(stats, { now }),
+    writeDurationEnabled: cfg.writeDurationEnabled === true
   };
 }
 
@@ -704,6 +706,33 @@ function registerIpc() {
         goal: cfg.dailyGoal
       }),
       streak: statsLib.streak(stats, { now })
+    };
+  });
+  // 写作时长（v0.8-2）：渲染层在计时暂停 / 保存 / 每 30 秒上报一次整秒。
+  // 默认关：关着时直接忽略请求、连 stats.json 都不碰，旧用户行为完全不变。
+  // 只记秒数，不接收正文、按键或任何内容；写盘仍走 core/atomic（和字数共用串行队列）。
+  handle('stats:duration', async (request) => {
+    const cfg = await getConfig();
+    const now = new Date();
+    const day = statsLib.localDayKey(now);
+    if (cfg.writeDurationEnabled !== true) {
+      const stats = await getStatsStore().get();
+      return { recorded: 0, disabled: true, day, stats: statsSummaryPayload(stats, cfg, now) };
+    }
+    const requested = Math.min(
+      statsLib.MAX_DAY_SECONDS,
+      Math.max(0, Math.floor(Number(request && request.seconds) || 0))
+    );
+    if (requested <= 0) {
+      const stats = await getStatsStore().get();
+      return { recorded: 0, disabled: false, day, stats: statsSummaryPayload(stats, cfg, now) };
+    }
+    const recorded = await getStatsStore().addDuration({ day, seconds: requested });
+    return {
+      recorded: recorded.added,
+      disabled: false,
+      day: recorded.day,
+      stats: statsSummaryPayload(recorded.stats, cfg, new Date())
     };
   });
 

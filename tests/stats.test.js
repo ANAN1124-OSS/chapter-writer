@@ -390,3 +390,151 @@ test('连续写作天数：最长连续按历史算，断档 / 未来日期 / �
     writtenDays: 0
   });
 });
+
+// ---------- 写作时长统计（v0.8-2，提案 N2） ----------
+
+test('写作时长：清洗只认正整秒，坏值丢弃，单日夹到 24 小时，旧数据没有 seconds 照常读', () => {
+  const cleaned = statsLib.sanitizeStats({
+    version: 1,
+    days: {
+      '2026-11-01': { books: { a: 100 }, seconds: 125 },
+      '2026-11-02': { seconds: 90 }, // 只有时长、没有新字数
+      '2026-11-03': { books: { a: 10 }, seconds: -5 },
+      '2026-11-04': { books: { a: 10 }, seconds: 'abc' },
+      '2026-11-05': { books: { a: 10 }, seconds: 1e9 },
+      '2026-11-06': { books: {}, seconds: 30.6 },
+      '2026-11-07': { books: {}, seconds: 0 },
+      '2026-11-08': { books: { a: 1 } }
+    }
+  });
+  assert.deepEqual(Object.keys(cleaned.days).sort(), [
+    '2026-11-01',
+    '2026-11-02',
+    '2026-11-03',
+    '2026-11-04',
+    '2026-11-05',
+    '2026-11-06',
+    '2026-11-08'
+  ]);
+  assert.deepEqual(cleaned.days['2026-11-01'], { books: { a: 100 }, seconds: 125 });
+  assert.deepEqual(cleaned.days['2026-11-02'], { seconds: 90 }, '只有时长的日子也要留住');
+  assert.equal(cleaned.days['2026-11-03'].seconds, undefined, '负数不记');
+  assert.equal(cleaned.days['2026-11-04'].seconds, undefined, '坏字符串不记');
+  assert.equal(cleaned.days['2026-11-05'].seconds, statsLib.MAX_DAY_SECONDS, '超大夹到单日上限');
+  assert.equal(cleaned.days['2026-11-06'].seconds, 31, '四舍五入到整秒');
+  assert.equal(cleaned.days['2026-11-07'], undefined);
+  assert.deepEqual(cleaned.days['2026-11-08'], { books: { a: 1 } }, '旧数据没有 seconds = 时长 0，不影响字数');
+
+  assert.equal(statsLib.sanitizeDuration(-1), 0);
+  assert.equal(statsLib.sanitizeDuration(59.6), 60);
+  assert.equal(statsLib.sanitizeDuration(statsLib.MAX_DAY_SECONDS + 100), statsLib.MAX_DAY_SECONDS);
+  assert.equal(statsLib.sanitizeDuration('90'), 90);
+  assert.equal(statsLib.sanitizeDuration(Number.NaN), 0);
+  assert.equal(statsLib.daySeconds(cleaned, '2026-11-02'), 90);
+  assert.equal(statsLib.daySeconds(cleaned, '2026-11-03'), 0);
+  assert.equal(statsLib.daySeconds(null, '2026-11-02'), 0);
+});
+
+test('写作时长：recordDuration 按天累计、不碰字数，字数和时长互不覆盖', () => {
+  const base = statsWith({ '2026-11-01': { books: { a: 100 } } });
+  const d1 = statsLib.recordDuration(base, { day: '2026-11-01', seconds: 65 });
+  assert.equal(d1.added, 65);
+  assert.deepEqual(d1.stats.days['2026-11-01'], { books: { a: 100 }, seconds: 65 });
+  assert.equal(statsLib.daySeconds(d1.stats, '2026-11-01'), 65);
+  assert.equal(statsLib.dayTotal(d1.stats, '2026-11-01'), 100, '时长不影响字数');
+
+  const d2 = statsLib.recordDuration(d1.stats, { day: '2026-11-01', seconds: 30 });
+  assert.equal(d2.added, 30);
+  assert.equal(statsLib.daySeconds(d2.stats, '2026-11-01'), 95);
+
+  // 只有时长的那天：再加字数也不丢时长
+  const onlyTime = statsLib.recordDuration(statsWith({}), { day: '2026-11-02', seconds: 45 });
+  assert.equal(onlyTime.stats.days['2026-11-02'].seconds, 45);
+  const withChars = statsLib.recordChars(onlyTime.stats, { day: '2026-11-02', bookId: 'b', delta: 12 });
+  assert.deepEqual(withChars.stats.days['2026-11-02'], { seconds: 45, books: { b: 12 } });
+  assert.equal(statsLib.daySeconds(withChars.stats, '2026-11-02'), 45);
+
+  // 坏值 / 0 / 负数都不计数
+  assert.equal(statsLib.recordDuration(withChars.stats, { day: '2026-11-02', seconds: 0 }).added, 0);
+  assert.equal(statsLib.recordDuration(withChars.stats, { day: '2026-11-02', seconds: 'abc' }).added, 0);
+  assert.equal(statsLib.recordDuration(withChars.stats, { day: '2026-11-02', seconds: -10 }).added, 0);
+  assert.equal(statsLib.daySeconds(withChars.stats, '2026-11-02'), 45, '坏值不会改已有记录');
+
+  // 非法日期落到今天
+  const today = statsLib.localDayKey();
+  const fallback = statsLib.recordDuration(statsWith({}), { day: '2026-02-30', seconds: 7 });
+  assert.equal(fallback.day, today);
+  assert.equal(statsLib.daySeconds(fallback.stats, today), 7);
+});
+
+test('写作时长：单日超过 24 小时夹住，added 只算真正记下的部分', () => {
+  const full = statsWith({ '2026-11-01': { books: { a: 1 }, seconds: statsLib.MAX_DAY_SECONDS } });
+  const res = statsLib.recordDuration(full, { day: '2026-11-01', seconds: 100 });
+  assert.equal(res.added, 0);
+  assert.equal(res.stats.days['2026-11-01'].seconds, statsLib.MAX_DAY_SECONDS);
+
+  const near = statsWith({ '2026-11-01': { books: { a: 1 }, seconds: statsLib.MAX_DAY_SECONDS - 10 } });
+  const add = statsLib.recordDuration(near, { day: '2026-11-01', seconds: 100 });
+  assert.equal(add.added, 10, '只记下剩余容量');
+});
+
+test('写作时长：summary 给出今天 / 近 30 天秒数，monthView 给出每天秒数与月度合计', () => {
+  const stats = statsWith({
+    '2026-10-30': { books: { a: 100 }, seconds: 600 },
+    '2026-10-31': { books: { a: 50 }, seconds: 90 },
+    '2026-11-01': { books: { a: 20 } },
+    '2026-09-01': { books: { a: 1 }, seconds: 9999 }
+  });
+  const summary = statsLib.summary(stats, { now: new Date(2026, 9, 31, 12) });
+  assert.equal(summary.todayChars, 50);
+  assert.equal(summary.todaySeconds, 90);
+  assert.equal(summary.recentSeconds, 690, '9 月 1 日在 30 天窗口外');
+  assert.equal(summary.days.length, 30);
+
+  const view = statsLib.monthView(stats, { year: 2026, month: 10, now: new Date(2026, 9, 31, 12) });
+  assert.equal(view.totalSeconds, 690);
+  assert.equal(view.total, 150);
+  assert.equal(view.days.find((day) => day.day === '2026-10-30').seconds, 600);
+  assert.equal(view.days.find((day) => day.day === '2026-10-25').seconds, 0);
+
+  // 只有时长、没有字数的日子：不计写字天数，但计入月度时长
+  const durationOnly = statsLib.monthView(statsWith({ '2026-10-05': { seconds: 300 } }), {
+    year: 2026,
+    month: 10,
+    now: new Date(2026, 9, 31, 12)
+  });
+  assert.equal(durationOnly.writtenDays, 0);
+  assert.equal(durationOnly.totalSeconds, 300);
+  assert.equal(durationOnly.days.find((day) => day.day === '2026-10-05').seconds, 300);
+});
+
+test('写作时长：存储 addDuration 原子落盘、与字数共用文件、并发合并且不丢秒', async () => {
+  const dir = await mkTmp();
+  const store = statsLib.createStatsStore(dir);
+  const rec = await store.addDuration({ day: '2026-10-31', seconds: 61 });
+  assert.equal(rec.added, 61);
+  assert.equal(rec.day, '2026-10-31');
+  const disk = JSON.parse(await fs.readFile(store.file, 'utf8'));
+  assert.equal(disk.days['2026-10-31'].seconds, 61);
+  assert.equal(disk.version, 1);
+
+  await store.record({ day: '2026-10-31', bookId: 'bookA', delta: 5 });
+  const both = JSON.parse(await fs.readFile(store.file, 'utf8'));
+  assert.equal(both.days['2026-10-31'].seconds, 61, '保存字数不会冲掉时长');
+  assert.equal(both.days['2026-10-31'].books.bookA, 5, '记录时长也不冲掉字数');
+
+  await Promise.all(Array.from({ length: 10 }, () => store.addDuration({ day: '2026-10-31', seconds: 6 })));
+  const finalDisk = JSON.parse(await fs.readFile(store.file, 'utf8'));
+  assert.equal(finalDisk.days['2026-10-31'].seconds, 121, '并发上报串行合并，不丢秒数');
+  const summary = await store.summary({ now: new Date(2026, 9, 31, 12) });
+  assert.equal(summary.todaySeconds, 121);
+  assert.equal(summary.todayChars, 5);
+  await assert.rejects(fs.stat(path.join(dir, 'config.json')), /ENOENT/, '时长只写 stats.json，不写配置');
+
+  // 坏文件归档后从空统计继续（和字数一样，不影响正文）
+  const dir2 = await mkTmp();
+  await fs.writeFile(path.join(dir2, 'stats.json'), '{ 坏掉的统计', 'utf8');
+  const store2 = statsLib.createStatsStore(dir2);
+  assert.equal((await store2.summary({ now: new Date(2026, 9, 31, 12) })).todaySeconds, 0);
+  assert.equal((await store2.addDuration({ day: '2026-10-31', seconds: 8 })).added, 8);
+});

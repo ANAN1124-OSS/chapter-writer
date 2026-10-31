@@ -263,6 +263,34 @@
     return `${trim((n / 100000000).toFixed(1))}亿`;
   }
 
+  // ---------- 写作时长（v0.8-2） ----------
+  // 只用于界面显示，不写盘、不参与统计口径：秒数由主进程 / stats.json 提供。
+  // 60 秒以下按秒；1 小时以下按分钟；再往上按「N 小时 M 分钟」；跨天按「N 天 M 小时」。
+  function formatDuration(value) {
+    const total = Math.max(0, Math.round(Number(value) || 0));
+    if (total <= 0) return '0 秒';
+    if (total < 60) return `${total} 秒`;
+    if (total < 3600) return `${Math.floor(total / 60)} 分钟`;
+    if (total < 86400) {
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`;
+    }
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`;
+  }
+
+  // 计时按钮上的秒表：0:07 / 12:34 / 1:02:05（不补前导 0 的小时）。
+  function formatStopwatch(value) {
+    const total = Math.max(0, Math.floor(Number(value) || 0));
+    const seconds = total % 60;
+    const minutes = Math.floor(total / 60) % 60;
+    const hours = Math.floor(total / 3600);
+    const pad = (n) => String(n).padStart(2, '0');
+    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${Math.floor(total / 60)}:${pad(seconds)}`;
+  }
+
   // 「超长段落 N 段」那个小标签点一下：从光标往后找下一段，到末尾就绕回第一段
   function nextLongParagraph(items, position) {
     if (!Array.isArray(items) || !items.length) return null;
@@ -293,6 +321,8 @@
     invisibleMarks,
     compareChapterChars,
     formatCharsShort,
+    formatDuration,
+    formatStopwatch,
     nextLongParagraph
   };
 });

@@ -310,3 +310,32 @@ test('空白与下标工具：lineRanges / countChars 边界', () => {
   assert.equal(logic.countChars(123), 3);
 });
 
+
+test('写作时长格式：秒 / 分钟 / 小时 / 天，坏值按 0', () => {
+  assert.equal(logic.formatDuration(0), '0 秒');
+  assert.equal(logic.formatDuration(null), '0 秒');
+  assert.equal(logic.formatDuration(1), '1 秒');
+  assert.equal(logic.formatDuration(59), '59 秒');
+  assert.equal(logic.formatDuration(60), '1 分钟');
+  assert.equal(logic.formatDuration(125), '2 分钟');
+  assert.equal(logic.formatDuration(3599), '59 分钟');
+  assert.equal(logic.formatDuration(3600), '1 小时');
+  assert.equal(logic.formatDuration(3660), '1 小时 1 分钟');
+  assert.equal(logic.formatDuration(86399), '23 小时 59 分钟');
+  assert.equal(logic.formatDuration(86400), '1 天');
+  assert.equal(logic.formatDuration(90000), '1 天 1 小时');
+  assert.equal(logic.formatDuration(-10), '0 秒');
+  assert.equal(logic.formatDuration('abc'), '0 秒');
+});
+
+test('写作时长秒表：m:ss / h:mm:ss，小时不补前导 0', () => {
+  assert.equal(logic.formatStopwatch(0), '0:00');
+  assert.equal(logic.formatStopwatch(7), '0:07');
+  assert.equal(logic.formatStopwatch(65), '1:05');
+  assert.equal(logic.formatStopwatch(3599), '59:59');
+  assert.equal(logic.formatStopwatch(3600), '1:00:00');
+  assert.equal(logic.formatStopwatch(3725), '1:02:05');
+  assert.equal(logic.formatStopwatch(36000), '10:00:00');
+  assert.equal(logic.formatStopwatch(-5), '0:00');
+  assert.equal(logic.formatStopwatch('bad'), '0:00');
+});
