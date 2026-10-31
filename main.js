@@ -43,6 +43,7 @@ const epubLib = require('./core/epub');
 const fragmentsLib = require('./core/fragments');
 const sensitiveLib = require('./core/sensitive');
 const ttsLib = require('./core/tts');
+const logsLib = require('./core/logs');
 
 let win = null;
 let configStore = null;
@@ -58,6 +59,95 @@ let rendererDirty = false;
 // 拒绝所有读写）时会临时换成进程内剪贴板，见 createE2EClipboard()。
 let activeClipboard = clipboard;
 
+// ---------- 崩溃 / 错误日志（提案 7.4） ----------
+// 只记元数据（时间 / 类型 / 错误码 / IPC 频道 / 路径 / 栈 / 版本），绝不传正文；
+// 日志写不进去只吞掉，绝不能影响正文保存、界面和退出（实现在 core/logs.js，单测覆盖）。
+let logStore = null;
+
+function getLogStore() {
+  if (!logStore) {
+    try {
+      logStore = logsLib.createLogStore(app.getPath('userData'));
+    } catch {
+      logStore = null; // 连路径都拿不到：静默降级，不影响应用
+    }
+  }
+  return logStore;
+}
+
+// 记一条错误日志（不 await：主流程不能等日志落盘）。extra 里只允许元数据字段。
+function logError(kind, err, extra = {}) {
+  try {
+    const store = getLogStore();
+    if (!store) return;
+    const described = logsLib.describeError(err);
+    let version = '';
+    try { version = app.getVersion(); } catch { version = ''; }
+    store.write({
+      level: extra.level || 'error',
+      kind,
+      code: extra.code != null ? extra.code : described.code,
+      channel: extra.channel,
+      path: extra.path,
+      message: extra.message != null ? extra.message : described.message,
+      stack: described.stack,
+      pid: process.pid,
+      app: version
+    });
+  } catch {
+    /* 日志本身永远不能影响应用 */
+  }
+}
+
+// 给作者看的固定提示（不把错误细节 / 任何正文塞进界面）
+const INTERNAL_ERROR_TEXT = {
+  uncaughtException:
+    '程序遇到一个内部错误，已写进日志。建议先按 Ctrl+S 保存，再重启应用（设置 → 诊断日志里可以打开日志文件夹）。',
+  unhandledRejection:
+    '程序有一项后台操作失败了，已写进日志。写作和保存不受影响；如果反复出现，可在设置 → 诊断日志里查看。'
+};
+
+function notifyInternalError(kind, err) {
+  try {
+    const described = logsLib.describeError(err);
+    console.error(`[${kind}]`, described.code || '', described.message);
+    logError(kind, err);
+    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('app:internal-error', {
+        kind,
+        code: described.code || '',
+        message: INTERNAL_ERROR_TEXT[kind] || INTERNAL_ERROR_TEXT.uncaughtException,
+        time: new Date().toISOString()
+      });
+    }
+  } catch {
+    /* 处理错误时再抛错就真没救了：吞掉 */
+  }
+}
+
+// 主进程崩溃 / 未处理的 Promise：写日志 + 通知界面，进程不退出（作者可能还有没保存的稿子，
+// 至少让他先 Ctrl+S 再重启）。日志失败也只影响日志。
+process.on('uncaughtException', (err) => notifyInternalError('uncaughtException', err));
+process.on('unhandledRejection', (reason) => notifyInternalError('unhandledRejection', reason));
+
+function logStartup() {
+  try {
+    const store = getLogStore();
+    if (!store) return;
+    let version = '';
+    try { version = app.getVersion(); } catch { version = ''; }
+    store.write({
+      level: 'info',
+      kind: 'app-start',
+      message: `启动：v${version || '?'}（${process.platform} ${process.arch}，Electron ${process.versions.electron || '?'}，pid ${process.pid}）`,
+      pid: process.pid,
+      app: version
+    });
+  } catch {
+    /* 忽略 */
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -66,10 +156,12 @@ function ok(data) {
   return { ok: true, data };
 }
 
-function fail(err) {
+function fail(err, channel) {
   const code = (err && err.code) || 'ERROR';
   const message = (err && err.message) || String(err);
-  console.error('[ipc-fail]', code, message);
+  console.error('[ipc-fail]', channel ? `${channel}:` : '', code, message);
+  // 保存失败单独记一条（错误码 + 章节文件名，绝不含正文），方便排查「保存失败」类反馈
+  logError(channel === 'chapter:save' ? 'save-failed' : 'ipc-error', err, { channel });
   return { ok: false, code, message };
 }
 
@@ -80,11 +172,11 @@ function isTrustedSender(event) {
 
 function handle(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
-    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }));
+    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
     try {
       return ok(await fn(...args));
     } catch (err) {
-      return fail(err);
+      return fail(err, channel);
     }
   });
 }
@@ -102,12 +194,12 @@ function assertBookPath(bookPath, booksRoot) {
 
 function handleBook(channel, fn) {
   ipcMain.handle(channel, async (event, bookPath, ...args) => {
-    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }));
+    if (!isTrustedSender(event)) return fail(Object.assign(new Error('不可信的调用来源'), { code: 'BAD_SENDER' }), channel);
     try {
       const cfg = await getConfig();
       return ok(await fn(assertBookPath(bookPath, cfg.booksRoot), ...args));
     } catch (err) {
-      return fail(err);
+      return fail(err, channel);
     }
   });
 }
@@ -1013,6 +1105,25 @@ function registerIpc() {
     if (err) throw new storage.StorageError('OPEN_FAILED', err);
     return true;
   });
+
+  // 诊断日志（提案 7.4）：目录 / 文件清单给设置弹层显示；「打开日志文件夹」由主进程调资源管理器。
+  // 日志只存在于 userData/logs，渲染层拿不到也写不了任何文件。
+  handle('logs:info', async () => {
+    const store = getLogStore();
+    if (!store) throw new storage.StorageError('LOG_UNAVAILABLE', '日志目录暂时不可用');
+    return store.info();
+  });
+
+  handle('logs:open-folder', async () => {
+    const store = getLogStore();
+    if (!store) throw new storage.StorageError('LOG_UNAVAILABLE', '日志目录暂时不可用');
+    await fs.mkdir(store.dir, { recursive: true });
+    // 自检环境不要真的在作者桌面上弹出资源管理器窗口，只回报目录
+    if (isE2E) return { dir: store.dir, opened: false, note: '自检环境不打开资源管理器' };
+    const err = await shell.openPath(store.dir);
+    if (err) throw new storage.StorageError('OPEN_FAILED', err);
+    return { dir: store.dir, opened: true };
+  });
 }
 
 // ---------- 窗口 ----------
@@ -1054,6 +1165,16 @@ async function createWindow() {
   });
   win.on('closed', () => { win = null; });
   setupCloseFlow();
+
+  // 渲染进程崩溃 / 窗口无响应也记一条（主进程的 uncaughtException 抓不到渲染层崩溃）
+  win.webContents.on('render-process-gone', (_event, details) => {
+    const reason = (details && details.reason) || 'unknown';
+    logError('render-process-gone', {
+      code: reason,
+      message: `渲染进程退出：${reason}（exitCode ${details && details.exitCode}，appCrashed ${Boolean(details && details.appCrashed)}）`
+    });
+  });
+  win.on('unresponsive', () => logError('unresponsive', { message: '窗口无响应（界面可能卡住）' }));
 
   // Windows 关机/注销：尽力而为地拦住一次，提示先保存（系统不强等应用，不能保证）
   win.on('query-session-end', (event) => {
@@ -1154,7 +1275,8 @@ async function runAutomation() {
         screenshotDialog === 'settings' ||
         screenshotDialog === 'settings-snapshot' ||
         screenshotDialog === 'settings-stats' ||
-        screenshotDialog === 'settings-sensitive'
+        screenshotDialog === 'settings-sensitive' ||
+        screenshotDialog === 'settings-logs'
       ) {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
@@ -1179,6 +1301,13 @@ async function runAutomation() {
           await sleep(600);
           await win.webContents.executeJavaScript(
             `const el = document.getElementById('settings-sensitive-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-logs') {
+          // 开发截图用：滚到「诊断日志」分组（打开日志文件夹按钮 / 日志份数）
+          await sleep(700);
+          await win.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-logs-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         }
@@ -1375,6 +1504,8 @@ if (!gotLock) {
     } catch (err) {
       console.error('[config] 读取失败:', err);
     }
+    // 每次启动记一条 info（版本 / 平台 / Electron 版本），排查反馈时先看这里
+    logStartup();
     try {
       await createWindow();
     } catch (err) {

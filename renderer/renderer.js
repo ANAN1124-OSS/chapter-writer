@@ -148,6 +148,8 @@
     sensitiveWordList: null, // 当前词表状态：{ ok, path, name, count, code, message, stats }
     sensitiveWordsDraft: '', // 设置里刚选的词表路径（点「保存设置」才落配置）
     sensitiveWordsInfo: null, // 设置弹层里显示的词表状态（读取当前草稿对应的词表）
+    logInfo: null, // 设置弹层「诊断日志」显示的日志目录清单（只读；不含正文）
+    lastInternalError: null, // 主进程最近一次内部错误的固定提示（只用于提示 + 自检断言）
     tts: {
       open: false, // 朗读小条是否显示
       status: 'idle', // idle | playing | paused | done | error
@@ -5540,6 +5542,40 @@
     return state.sensitiveWordsInfo;
   }
 
+  // 设置弹层「诊断日志」：只显示日志目录里有几份、多大；正文永远不进日志
+  function renderLogSettings() {
+    const status = $('settings-logs-status');
+    if (!status) return;
+    const info = state.logInfo;
+    if (!info) {
+      status.textContent = '正在读取日志目录…';
+      status.className = 'muted small';
+      return;
+    }
+    if (info.error) {
+      status.textContent = `读取日志目录失败：${info.error}`;
+      status.className = 'muted small warn';
+      return;
+    }
+    const files = Array.isArray(info.files) ? info.files : [];
+    const bytes = files.reduce((sum, file) => sum + (Number(file.bytes) || 0), 0);
+    status.textContent = files.length
+      ? `已有 ${files.length} 个日志文件，共 ${formatBytes(bytes)}（不含正文）`
+      : '还没有日志文件（应用没有出错时不会写日志）';
+    status.className = 'muted small';
+  }
+
+  // 打开设置弹层时读一次日志目录（只读；写作页的按书设置里不显示这一组）
+  async function refreshLogInfo() {
+    try {
+      state.logInfo = await call(api.logInfo);
+    } catch (err) {
+      state.logInfo = { error: err.message };
+    }
+    renderLogSettings();
+    return state.logInfo;
+  }
+
   function readSnapshotForm() {
     return {
       snapshotEnabled: $('settings-snapshot-enabled').checked === true,
@@ -5577,6 +5613,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 诊断日志也是全局的（一个应用一份日志），写作页的按书设置里不显示
+    for (const id of ['settings-logs-group', 'settings-logs-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -5604,6 +5645,8 @@
     $('settings-backdrop').classList.remove('hidden');
     // 全局设置里顺手读一次词表状态（只读；写作页的按书设置里不显示这一组）
     if (state.settingsScope === 'global') await refreshSensitiveSettingsInfo();
+    // 诊断日志也只在全局设置里显示：顺手读一次日志目录（只读，不写任何文件）
+    if (state.settingsScope === 'global') await refreshLogInfo();
   }
 
   function closeSettings({ restore = true } = {}) {
@@ -5694,6 +5737,25 @@
       renderSensitiveSettings();
       toast('已清除敏感词表（点「保存设置」后生效）');
     });
+
+    // 诊断日志：只让主进程打开日志文件夹（渲染层没有 fs 权限）；日志内容从不进界面
+    const openLogsBtn = $('btn-open-logs');
+    if (openLogsBtn) {
+      openLogsBtn.addEventListener('click', async () => {
+        try {
+          const data = await call(api.openLogFolder);
+          const dir = (data && data.dir) || '';
+          if (dir) $('settings-logs-status').textContent = `日志文件夹：${dir}`;
+          toast(
+            data && data.opened
+              ? '已在资源管理器中打开日志文件夹'
+              : `日志文件夹：${dir}${data && data.note ? `（${data.note}）` : ''}`
+          );
+        } catch (err) {
+          toast(`打开日志文件夹失败：${err.message}`, 'error');
+        }
+      });
+    }
 
     // 自定义字体：选择 → 主进程读文件 → FontFace 注册 → 实时预览（点「保存设置」才记住）
     $('btn-pick-font').addEventListener('click', async () => {
@@ -6032,6 +6094,13 @@
 
     // 主进程拦截到关窗/退出时，由这里决定「保存并退出 / 不保存退出 / 取消」
     api.onCloseRequested(handleCloseRequest);
+
+    // 主进程内部错误（崩溃 / 未处理的 Promise）：只弹一句固定提示，细节留在日志里。
+    // 应用不退出，作者可以先 Ctrl+S 保存再重启。
+    api.onInternalError((info) => {
+      state.lastInternalError = info || null;
+      toast((info && info.message) || '程序遇到一个内部错误，已写进日志。', 'error');
+    });
 
     // 整本排版进度（主进程逐章汇报，显示在右下角进度条上）
     api.onFormatProgress((progress) => {
@@ -7074,6 +7143,12 @@
         enabled: $('settings-snapshot-enabled').checked === true,
         keepDays: Number($('settings-snapshot-days').value)
       }),
+      // 诊断日志（提案 7.4）：设置里的分组是否显示、状态文案、最近一次内部错误提示
+      logSettingsVisible: () => !$('settings-logs-field').classList.contains('hidden'),
+      logSettingsStatus: () => $('settings-logs-status').textContent,
+      logInfo: () => (state.logInfo ? JSON.parse(JSON.stringify(state.logInfo)) : null),
+      lastInternalError: () =>
+        state.lastInternalError ? JSON.parse(JSON.stringify(state.lastInternalError)) : null,
       // 每日字数统计 / 目标（v0.6-3）
       async refreshStats() {
         return refreshStats();

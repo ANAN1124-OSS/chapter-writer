@@ -634,6 +634,19 @@
         </div>
         <span id="settings-sensitive-status" class="muted small"></span>
       </label>
+      <div class="field-group" id="settings-logs-group">诊断日志</div>
+      <div class="field" id="settings-logs-field">
+        <span>
+          应用遇到错误（保存失败 / 内部异常 / IPC 出错）时，会把<strong>时间、错误类型、错误码、路径和调用栈</strong>
+          写进日志，方便排查问题；<strong>日志不含任何正文内容</strong>。按天 + 按大小滚动，
+          只保留最近 12 份（每份约 256KB），位置在 <code>%APPDATA%\chapter-writer\logs\</code>，
+          不写书库、不改 <code>书目.json</code> / 章节 txt。
+        </span>
+        <div class="field-row">
+          <button id="btn-open-logs" class="btn ghost" type="button">打开日志文件夹</button>
+          <span id="settings-logs-status" class="muted small"></span>
+        </div>
+      </div>
       </div>
       <div class="modal-buttons">
         <button id="btn-reset-book-display" class="btn ghost hidden" type="button" title="忘掉这本书的单独显示设置，恢复用全局默认">恢复本书默认</button>

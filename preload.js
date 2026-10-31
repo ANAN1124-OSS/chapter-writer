@@ -96,6 +96,9 @@ contextBridge.exposeInMainWorld('api', {
   readFont: (fontPath) => invoke('font:read', fontPath),
   pickFolder: () => invoke('shell:pick-folder'),
   openBookFolder: (bookPath) => invoke('shell:open-book-folder', bookPath),
+  // 诊断日志（提案 7.4）：只读目录清单 + 让主进程打开日志文件夹；渲染层仍然没有 fs 权限
+  logInfo: () => invoke('logs:info'),
+  openLogFolder: () => invoke('logs:open-folder'),
 
   onCloseRequested: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());
@@ -105,6 +108,10 @@ contextBridge.exposeInMainWorld('api', {
   },
   onFormatProgress: (cb) => {
     if (typeof cb === 'function') ipcRenderer.on('format:progress', (_event, progress) => cb(progress));
+  },
+  // 主进程内部错误（崩溃 / 未处理的 Promise）：界面只弹一句固定提示，错误细节只在日志里
+  onInternalError: (cb) => {
+    if (typeof cb === 'function') ipcRenderer.on('app:internal-error', (_event, info) => cb(info));
   },
   reportDirty: (dirty) => ipcRenderer.send('app:dirty', Boolean(dirty)),
   closeReady: (allowed) => ipcRenderer.send('app:close-ready', Boolean(allowed))
