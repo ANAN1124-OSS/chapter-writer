@@ -32,6 +32,7 @@ const storage = require('./core/storage');
 const repair = require('./core/repair');
 const importer = require('./core/importer');
 const exporter = require('./core/exporter');
+const chaptersLib = require('./core/chapters');
 const formatLib = require('./core/format');
 const findLib = require('./core/find');
 const textMenu = require('./core/textmenu');
@@ -376,7 +377,6 @@ function registerIpc() {
   // chars 回报的是「正文字数」（去掉空白/换行，和编辑页字数统计同一口径），不是文件字节数
   async function collectExportTexts(bookPath, meta, override) {
     const overrideIndex = exporter.chapterIndexOf(meta, override);
-    const chaptersLib = require('./core/chapters');
     const texts = [];
     let chars = 0;
     for (let i = 0; i < meta.chapters.length; i += 1) {
@@ -438,6 +438,34 @@ function registerIpc() {
     const text = exporter.composeBook(meta, texts);
     await clipboard.writeText(text);
     return { chapterCount: meta.chapters.length, chars, includedUnsaved };
+  });
+
+  // 复制本章（平台格式）：只取这一章的正文，段首缩进两个全角空格、段间空一行（空行也带缩进），
+  // 直接进剪贴板；不写盘。ref = { chapterId?, chapterFile?, text? }：
+  // 带了 text 就用它（编辑区里当前章未保存的最新内容，沿用户导出惯例），没带就读磁盘。
+  handleBook('chapter:copy-platform', async (bookPath, ref) => {
+    const meta = await storage.readBookMeta(bookPath);
+    const index = exporter.chapterRefIndex(meta, ref);
+    if (index < 0) throw new storage.StorageError('CHAPTER_NOT_FOUND', '找不到这一章（可能刚被删除）');
+    const chapter = meta.chapters[index];
+    const fromEditor = Boolean(ref && typeof ref.text === 'string');
+    const text = fromEditor
+      ? ref.text
+      : (await storage.loadChapterText(bookPath, chapter.file)).text;
+    const result = exporter.platformChapterText(text);
+    const title = chaptersLib.formatTitle(meta, index, chapter.name);
+    if (result.empty) {
+      // 空章不覆盖剪贴板：免得把作者刚复制的东西冲掉
+      return { empty: true, title, paragraphs: 0, chars: 0, includedUnsaved: fromEditor };
+    }
+    await clipboard.writeText(result.text);
+    return {
+      empty: false,
+      title,
+      paragraphs: result.paragraphs,
+      chars: result.chars,
+      includedUnsaved: fromEditor
+    };
   });
 
   handleBook('book:repair', async (bookPath, mode) => {

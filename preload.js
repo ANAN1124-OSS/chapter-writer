@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('api', {
 
   exportBook: (bookPath, override) => invoke('book:export', bookPath, override),
   copyBook: (bookPath, override) => invoke('book:copy', bookPath, override),
+  copyChapterPlatform: (bookPath, ref) => invoke('chapter:copy-platform', bookPath, ref),
   repairBook: (bookPath, mode) => invoke('book:repair', bookPath, mode),
   importBooks: (paths, options) => invoke('book:import', paths, options),
   deleteBook: (bookPath) => invoke('book:delete', bookPath),

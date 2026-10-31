@@ -1502,6 +1502,31 @@
     }
   }
 
+  // 复制本章（平台格式）：只复制正文（不含章名，平台后台的章名是单独一栏）。
+  // 正文套「段首缩进 + 空一行（含缩进）」后进剪贴板，不写盘；
+  // 当前章有未保存修改时，编辑区里的最新内容优先（和导出/复制整本一个惯例）。
+  async function copyChapterPlatformFlow(index) {
+    if (!state.bookPath) return null;
+    const chapter = state.chapters[index];
+    if (!chapter) return null;
+    const ref = { chapterId: chapter.id };
+    if (index === state.index && state.dirty) ref.text = editorEl.value;
+    try {
+      const data = await call(api.copyChapterPlatform, state.bookPath, ref);
+      if (data.empty) {
+        toast('本章还没有正文，没有可复制的内容（剪贴板没动）', 'warn');
+        return data;
+      }
+      const parts = [`${data.paragraphs} 段`, `${data.chars} 字`];
+      if (data.includedUnsaved) parts.push('含未保存内容');
+      toast(`已复制「${data.title}」正文（段首缩进 + 段间空行：${parts.join(' · ')}）`);
+      return data;
+    } catch (err) {
+      toast(`复制本章失败：${err.message}`, 'error');
+      return null;
+    }
+  }
+
   async function exportBookFlow() {
     if (!state.bookPath) return;
     try {
@@ -2990,6 +3015,7 @@
       else if (action === 'insert-after') await createChapterAt(index + 1);
       else if (action === 'move-volume') await moveChapterToVolumeFlow(index);
       else if (action === 'edit-note') await editChapterNoteAt(index);
+      else if (action === 'copy-platform') await copyChapterPlatformFlow(index);
       else if (action.startsWith('status-')) await setChapterStatusAt(index, action.slice('status-'.length));
     });
 
@@ -3085,6 +3111,14 @@
           runFind();
           return;
         }
+      }
+      // 复制本章（平台格式）：Ctrl+Shift+C；不抢 Ctrl+C 的普通复制
+      if (event.ctrlKey && event.shiftKey && !event.altKey && String(event.key).toLowerCase() === 'c') {
+        if (state.view === 'editor' && state.bookPath) {
+          event.preventDefault();
+          copyChapterPlatformFlow(state.index);
+        }
+        return;
       }
       const ctrl = event.ctrlKey && !event.altKey && !event.shiftKey;
       if (ctrl && String(event.key).toLowerCase() === 'f') {
@@ -3184,6 +3218,9 @@
       },
       async editChapterNoteAt(index) {
         return editChapterNoteAt(index);
+      },
+      async copyChapterPlatformAt(index) {
+        return copyChapterPlatformFlow(index == null ? state.index : index);
       },
       contextMenuItems: () =>
         Array.from(document.querySelectorAll('#context-menu button')).map((el) => el.textContent),
