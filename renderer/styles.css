@@ -1164,6 +1164,25 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 
 #settings-daily-goal { max-width: 160px; }
 
+/* 章节模板（v0.8-5）：多行文本框 + 展开预览；纯 CSS，不引库 */
+.template-input {
+  min-height: 64px;
+  resize: vertical;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.template-help { margin-top: 6px; line-height: 1.6; }
+.template-preview {
+  margin-top: 6px;
+  padding: 6px 8px;
+  min-height: 20px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: var(--paper-deep);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .text-input {
   width: 100%;
   padding: 8px 10px;

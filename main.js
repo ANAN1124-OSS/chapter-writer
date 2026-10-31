@@ -1845,6 +1845,7 @@ async function runAutomation() {
         screenshotDialog === 'settings-snapshot' ||
         screenshotDialog === 'settings-stats' ||
         screenshotDialog === 'settings-calendar' ||
+        screenshotDialog === 'settings-template' ||
         screenshotDialog === 'settings-sensitive' ||
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
@@ -1872,6 +1873,14 @@ async function runAutomation() {
           await sleep(700);
           await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-calendar-field'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-template') {
+          // 开发截图用：填一条示例模板（只改界面、不保存），展示展开预览
+          await sleep(500);
+          await automationWin.webContents.executeJavaScript(
+            `window.__cwTest.setChapterTemplateField(${JSON.stringify('第{n}章：{title}\n\n')});` +
+              `const el = document.getElementById('settings-template-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-sensitive') {

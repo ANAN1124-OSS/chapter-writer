@@ -7,6 +7,7 @@ const { writeJsonAtomic, stripBom } = require('./atomic');
 const formatLib = require('./format');
 const snapshotLib = require('./snapshot');
 const statsLib = require('./stats');
+const templateLib = require('./template');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -62,6 +63,9 @@ const DEFAULTS = Object.freeze({
   // 写作时长统计（v0.8-2）：默认关。开启后只在写作页手动点「写作计时」时累计秒数，
   // 只记时长不记内容，存 userData/stats.json；旧配置没有这个键 = 关。
   writeDurationEnabled: false,
+  // 章节模板（v0.8 P0 N5）：新建 / 插入章节时自动填进空章的文字，默认空 = 不套用。
+  // 可用占位符 {n} 章号 / {title} 章名 / {date} 今天；只改编辑区，不自动写盘。
+  chapterTemplate: '',
   // 敏感词预检用的词表（作者自己的 txt，每行一个词）。应用不内置任何词表；
   // 这里只记绝对路径，词表文件本身只读、不复制、不改写。没设置 = ''。
   sensitiveWordsPath: ''
@@ -193,6 +197,8 @@ function sanitize(raw) {
   cfg.dailyGoal = statsLib.normalizeGoal(cfg.dailyGoal, DEFAULTS.dailyGoal);
   // 写作时长统计：只认真正的 true（缺字段 / 写错类型都按「关」）。
   cfg.writeDurationEnabled = cfg.writeDurationEnabled === true;
+  // 章节模板：换行统一成 \n、去掉 NUL、夹到长度上限；非字符串 / 旧配置缺键都当空模板。
+  cfg.chapterTemplate = templateLib.sanitizeTemplate(cfg.chapterTemplate);
   // 敏感词表路径：只做基本清洗（非字符串 / 超长 → 未设置）；文件不存在时由预检面板提示，
   // 不会因为词表被移走就让应用起不来。旧配置没有这个键 = 未设置。
   const sensitiveWordsPath =

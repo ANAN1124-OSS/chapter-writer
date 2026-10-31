@@ -397,6 +397,47 @@ test('每日目标配置：写盘 / 读回，只影响 dailyGoal', async () => {
   assert.equal((await createConfigStore(dir).get()).dailyGoal, 0);
 });
 
+test('章节模板配置：默认空、旧配置缺字段照常启动、脏值清洗', async () => {
+  const dir = await mkTmp();
+  assert.equal((await createConfigStore(dir).get()).chapterTemplate, '', '默认不套用模板');
+  // 模拟 v0.4.1 / v0.8 N4 的旧配置：完全没有 chapterTemplate
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 800, writeDurationEnabled: true }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.chapterTemplate, '', '旧配置缺字段 = 空模板');
+  assert.equal(cfg.dailyGoal, 800, '旧配置其它字段不受影响');
+
+  assert.equal(sanitize({ chapterTemplate: 123 }).chapterTemplate, '');
+  assert.equal(sanitize({ chapterTemplate: null }).chapterTemplate, '');
+  // CRLF / CR 统一成 LF，NUL 去掉
+  assert.equal(sanitize({ chapterTemplate: '第{n}章：\r\n\r\n' }).chapterTemplate, '第{n}章：\n\n');
+  assert.equal(sanitize({ chapterTemplate: '前\u0000后' }).chapterTemplate, '前后');
+  // 超长夹到模板上限 2000
+  const long = '字'.repeat(2500);
+  assert.equal(sanitize({ chapterTemplate: long }).chapterTemplate.length, 2000);
+});
+
+test('章节模板配置：写盘 / 读回，清空后落盘为空', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  const template = '第{n}章：{title}\n\n';
+  await store.set({ chapterTemplate: template, editorFont: 'kai' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.chapterTemplate, template);
+  assert.equal(reopened.editorFont, 'kai');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.chapterTemplate, template);
+
+  // 清空模板 = 关掉，落盘是空串（不是删字段，旧版本读也安全）
+  await store.set({ chapterTemplate: '' });
+  assert.equal((await createConfigStore(dir).get()).chapterTemplate, '');
+  const cleared = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(cleared.chapterTemplate, '');
+});
+
 test('敏感词表配置：默认未设置，旧配置缺字段照常启动，脏值清洗成空', async () => {
   const dir = await mkTmp();
   assert.equal((await createConfigStore(dir).get()).sensitiveWordsPath, '');

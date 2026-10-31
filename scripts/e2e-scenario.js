@@ -4356,6 +4356,195 @@ module.exports = async function runScenario(ctx) {
     )
   );
 
+  // 44l. 章节模板（v0.8-5，提案 N5）：新建 / 插入章节时套用；只改编辑区、可撤销、不自动写盘
+  await exec("window.__cwTest.newBook('章节模板测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const tplBookPath = await exec('window.__cwTest.bookPathValue()');
+  const tplMetaPath = path.join(tplBookPath, '书目.json');
+  const tplConfigPath = path.join(userData, 'config.json');
+  await exec("window.__cwTest.setText('第一章正文。')");
+  await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+
+  // 44l-1. 默认关：没设置模板时配置里是空串，设置里也是空模板（旧配置缺键见单测）
+  const tplConfigBefore = JSON.parse(await fs.readFile(tplConfigPath, 'utf8'));
+  check(
+    '章节模板：没设置模板时配置里是空串（默认不套用）',
+    tplConfigBefore.chapterTemplate === '',
+    tplConfigBefore.chapterTemplate
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  const tplPreviewEmpty = await exec('window.__cwTest.chapterTemplatePreview()');
+  check(
+    '章节模板：全局设置里默认空模板、预览说明未设置',
+    (await exec('window.__cwTest.chapterTemplateField()')) === '' &&
+      (await exec('window.__cwTest.chapterTemplateSettingsVisible()')) === true &&
+      tplPreviewEmpty.includes('未设置模板'),
+    tplPreviewEmpty
+  );
+
+  // 44l-2. 输入模板（真实 input 事件）→ 预览展开 → 只点「保存设置」才落进 config.json
+  const tplText = '第{n}章：{title}\n\n';
+  await exec(
+    `(() => { const el = document.getElementById('settings-chapter-template'); el.value = ${JSON.stringify(
+      tplText
+    )}; el.dispatchEvent(new Event('input')); return true; })()`
+  );
+  const tplPreview = await exec('window.__cwTest.chapterTemplatePreview()');
+  check(
+    '章节模板：边输入边预览（占位符展开、空行保留）',
+    tplPreview.includes('预览（第 1 章）') &&
+      tplPreview.includes('第1章：示例章名') &&
+      tplPreview.includes('示例章名\n\n'),
+    tplPreview
+  );
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor(
+    `window.api.getConfig().then((r) => r.ok && r.data.chapterTemplate === ${JSON.stringify(tplText)})`
+  );
+  const tplConfigOnDisk = JSON.parse(await fs.readFile(tplConfigPath, 'utf8'));
+  check(
+    '章节模板：模板真的落进 config.json（只改一个字段）',
+    tplConfigOnDisk.chapterTemplate === tplText,
+    tplConfigOnDisk.chapterTemplate
+  );
+
+  // 44l-3. 写作页按书设置里不显示模板项（和统计 / 快照 / 词表一样是全局设置）
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(tplBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '章节模板：写作页按书设置里不显示模板（全局设置）',
+    (await exec('window.__cwTest.settingsScope()')) === 'book' &&
+      (await exec('window.__cwTest.chapterTemplateSettingsVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === false');
+
+  // 44l-4. 新建章节自动套用：占位符展开后只进编辑区（未保存），磁盘上的新章仍是空的
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await exec("window.__cwTest.newChapter('夜雨')");
+  await waitFor('window.__cwTest.dirty() === true');
+  const tplNewIndex = await exec('window.__cwTest.currentIndex()');
+  const tplNewText = await exec('window.__cwTest.text()');
+  const tplNewMeta = JSON.parse(await fs.readFile(tplMetaPath, 'utf8'));
+  const tplNewFile = tplNewMeta.chapters[tplNewIndex].file;
+  const tplNewDisk = await storage.loadChapterText(tplBookPath, tplNewFile);
+  check(
+    '章节模板：新建章节自动套用（{n}=全书章号、{title}=章名），仍是未保存',
+    tplNewIndex === 1 &&
+      tplNewText === '第2章：夜雨\n\n' &&
+      (await exec('window.__cwTest.statusText()')).includes('未保存'),
+    { tplNewIndex, tplNewText }
+  );
+  check(
+    '章节模板：只改编辑区，新章 txt 在磁盘上仍是空的（不自动写盘）',
+    tplNewDisk.text === '',
+    tplNewDisk
+  );
+
+  // 44l-5. 可 Ctrl+Z 撤销：撤销后回到空章、未保存状态清掉，磁盘仍空
+  const tplUndo = await exec('window.__cwTest.undoEditor()');
+  check(
+    '章节模板：可 Ctrl+Z 撤销（编辑区回空章、未保存状态清掉），磁盘仍空',
+    tplUndo.ok === true &&
+      tplUndo.text === '' &&
+      tplUndo.dirty === false &&
+      (await exec('window.__cwTest.currentIndex()')) === 1 &&
+      (await storage.loadChapterText(tplBookPath, tplNewFile)).text === '',
+    tplUndo
+  );
+
+  // 44l-6. 保存后才写盘（作者按 Ctrl+S / 保存按钮才落盘）
+  await exec("window.__cwTest.newChapter('归途')");
+  await waitFor('window.__cwTest.dirty() === true');
+  const tplSaveIndex = await exec('window.__cwTest.currentIndex()');
+  const tplSaveText = await exec('window.__cwTest.text()');
+  const tplSaveResult = await exec('window.__cwTest.save()');
+  await waitFor('window.__cwTest.dirty() === false');
+  const tplSavedMeta = JSON.parse(await fs.readFile(tplMetaPath, 'utf8'));
+  const tplSavedDisk = await storage.loadChapterText(
+    tplBookPath,
+    tplSavedMeta.chapters[tplSaveIndex].file
+  );
+  check(
+    '章节模板：保存后模板写进章节 txt（内容 = 展开后的模板）',
+    tplSaveResult &&
+      tplSaveResult.ok === true &&
+      tplSaveText === '第3章：归途\n\n' &&
+      tplSavedDisk.text === tplSaveText,
+    { tplSaveText, disk: tplSavedDisk.text }
+  );
+
+  // 44l-7. 插入章节同样套用，章号按插入位置算
+  await exec("window.__cwTest.insertAfter(0, '插曲')");
+  await waitFor('window.__cwTest.dirty() === true');
+  const tplInsertIndex = await exec('window.__cwTest.currentIndex()');
+  const tplInsertText = await exec('window.__cwTest.text()');
+  check(
+    '章节模板：插入章节同样套用，章号按插入位置（第 2 章）',
+    tplInsertIndex === 1 &&
+      tplInsertText === '第2章：插曲\n\n' &&
+      (await exec('window.__cwTest.chapterTitles()')).length === 4,
+    { tplInsertIndex, tplInsertText }
+  );
+
+  // 44l-8. 已有正文的章不会被套模板（切章只读已有内容）
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  check(
+    '章节模板：已有正文的章不会被套模板',
+    (await exec('window.__cwTest.text()')) === '第一章正文。'
+  );
+
+  // 44l-9. 不认识的占位符原样保留（不猜）；清空模板后新章回到空章
+  await exec("window.__cwTest.saveTemplateOnly('{n}-{x}-{N}-{title}')");
+  await exec("window.__cwTest.newChapter('未知占位符')");
+  await waitFor('window.__cwTest.dirty() === true');
+  const tplUnknownText = await exec('window.__cwTest.text()');
+  check(
+    '章节模板：不认识的占位符原样保留，不猜也不吞',
+    tplUnknownText === '5-{x}-{N}-未知占位符',
+    tplUnknownText
+  );
+  await exec("window.__cwTest.saveTemplateOnly('')");
+  await exec("window.__cwTest.newChapter('没有模板')");
+  check(
+    '章节模板：清空模板后新建章节回到空章（不套用、不算未保存）',
+    (await exec('window.__cwTest.text()')) === '' &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 44l-10. 设置里回填 / 清空；配置只多 chapterTemplate；书目录干净
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '章节模板：清空后设置回填为空、预览说明未设置',
+    (await exec('window.__cwTest.chapterTemplateField()')) === '' &&
+      (await exec('window.__cwTest.chapterTemplatePreview()')).includes('未设置模板')
+  );
+  await exec('window.__cwTest.closeSettings()');
+  const tplConfigFinal = JSON.parse(await fs.readFile(tplConfigPath, 'utf8'));
+  check(
+    '章节模板：配置只多 chapterTemplate 一个字段（没有按书模板字段）',
+    tplConfigFinal.chapterTemplate === '' &&
+      !('chapterTemplates' in tplConfigFinal) &&
+      !('bookTemplates' in tplConfigFinal),
+    Object.keys(tplConfigFinal).filter((key) => key.toLowerCase().includes('template'))
+  );
+  const tplDirEntries = (await fs.readdir(tplBookPath)).sort();
+  check(
+    '章节模板：书文件夹没有 _trash / 临时文件（章节文件数 = 章节数 6）',
+    tplDirEntries.every((name) => !name.startsWith('_trash') && !name.startsWith('.tmp-')) &&
+      tplDirEntries.filter((name) => name.endsWith('.txt')).length === 6,
+    tplDirEntries
+  );
+
   // 45. 导出 EPUB（v0.7-1）：整本书 → EPUB 3；分卷做目录级、一章一个 XHTML、纯文字封面
   await exec("window.__cwTest.newBook('EPUB导出测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");

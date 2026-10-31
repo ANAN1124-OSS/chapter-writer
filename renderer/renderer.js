@@ -19,6 +19,8 @@
   const readingLogic = window.CWReadingLogic;
   // 书籍信息（作者 / 简介 / 分组 / 标签）的清洗与匹配，core/bookinfo.js 里、Node 单测覆盖
   const bookInfoLib = window.CWBookInfo;
+  // 章节模板的清洗与占位符展开，core/template.js 里、Node 单测覆盖
+  const templateLib = window.CWTemplate;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -3490,6 +3492,46 @@
     return jumpToIndex(state.jumpMatches[0].index);
   }
 
+  // ---------- 章节模板（v0.8 P0 N5） ----------
+  // 模板只存在全局配置 chapterTemplate（旧配置没有 = 不套用）；这里只负责把展开后的
+  // 文字填进编辑区——不写盘、不改书目、不动章节文件，Ctrl+S 才保存，可 Ctrl+Z 撤销。
+  function chapterTemplateText() {
+    const cfg = state.globalConfig || state.config || {};
+    return templateLib.sanitizeTemplate(cfg.chapterTemplate);
+  }
+
+  function applyChapterTemplate(chapterIndex, chapterName) {
+    const template = chapterTemplateText();
+    if (!templateLib.hasTemplate(template)) return { applied: false, reason: 'NO_TEMPLATE' };
+    if (!templateLib.isBlankText(editorEl.value)) return { applied: false, reason: 'NOT_EMPTY' };
+    const text = templateLib.applyTemplate(template, {
+      chapterNumber: chapterIndex + 1,
+      chapterName: chapterName || '',
+      now: new Date()
+    });
+    if (!text.trim()) return { applied: false, reason: 'EMPTY_RESULT' };
+    // 空章（可能只剩空白）整段替换成模板；用原生输入保住 Ctrl+Z 撤销链
+    const before = editorEl.value;
+    editorEl.focus();
+    editorEl.setSelectionRange(0, before.length);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, text);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted || editorEl.value !== text) {
+      // 极端兜底：execCommand 不可用时手动替换（会丢原生撤销链，但不会丢内容）
+      editorEl.value = text;
+    }
+    // 统一走 onEditorInput：标记未保存、刷新字数 / 状态栏 / 标记层
+    onEditorInput();
+    const caret = editorEl.value.length;
+    editorEl.setSelectionRange(caret, caret);
+    scrollCaretIntoView(caret);
+    return { applied: true, text, chars: text.length };
+  }
+
   async function createChapterAt(insertIndex, nameOverride, volumeIdOverride) {
     if (!state.bookPath) return { ok: false };
     // 作者要求（2026-10-31）：新建 / 插入章节前，当前章有未保存修改就自动保存，不再弹窗
@@ -3518,9 +3560,12 @@
       state.meta = data.meta;
       state.chapters = data.meta.chapters;
       await loadChapterAt(data.index);
+      // 章节模板：只填进编辑区（未保存、可 Ctrl+Z），绝不自动写盘
+      const templateResult = applyChapterTemplate(data.index, data.chapter.name);
       const where = volumeId ? `（${volumeDisplayName(volumeId)}）` : '';
-      toast(`${appending ? '已新建' : '已插入'}：${chapterTitle(data.index, data.chapter.name)}${where}`);
-      return { ok: true, index: data.index };
+      const templateNote = templateResult.applied ? ' · 已套用章节模板（未保存，Ctrl+S 写盘）' : '';
+      toast(`${appending ? '已新建' : '已插入'}：${chapterTitle(data.index, data.chapter.name)}${where}${templateNote}`);
+      return { ok: true, index: data.index, template: templateResult };
     } catch (err) {
       toast(`新建章节失败：${err.message}`, 'error');
       return { ok: false, message: err.message };
@@ -6815,11 +6860,33 @@
     // 写作时长：默认关，只认真正的 true（旧配置没有这个键 = 关）
     $('settings-write-duration').checked = cfg.writeDurationEnabled === true;
     renderDurationSettings();
+    // 章节模板：全局设置，留空 = 不套用（旧配置没有这个键也回空）
+    $('settings-chapter-template').value = templateLib.sanitizeTemplate(cfg.chapterTemplate);
+    renderChapterTemplatePreview();
     // 敏感词表：只记路径，词表本身只读；具体状态在 openSettings 里异步读一次
     state.sensitiveWordsDraft = typeof cfg.sensitiveWordsPath === 'string' ? cfg.sensitiveWordsPath : '';
     state.sensitiveWordsInfo = null;
     renderSensitiveSettings();
     renderStatsChart();
+  }
+
+  // 章节模板预览：按「下一个新章」的章号 / 示例章名 / 今天展开一次，让作者看清实际效果。
+  // 只读草稿，不写配置；真正保存要点「保存设置」。
+  function renderChapterTemplatePreview() {
+    const el = $('settings-template-preview');
+    if (!el) return;
+    const template = $('settings-chapter-template').value;
+    if (!templateLib.hasTemplate(template)) {
+      el.textContent = '预览：（未设置模板，新建章节仍是空章）';
+      return;
+    }
+    const nextNumber = state.view === 'editor' && state.bookPath ? state.chapters.length + 1 : 1;
+    const text = templateLib.applyTemplate(template, {
+      chapterNumber: nextNumber,
+      chapterName: '示例章名',
+      now: new Date()
+    });
+    el.textContent = `预览（第 ${nextNumber} 章）：\n${text}`;
   }
 
   // 设置弹层里的词表状态（未设置 / 词表 N 个词 / 文件不存在 / 编码异常都直说）
@@ -7020,6 +7087,11 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 章节模板也是全局设置（新书 / 所有书共用一套），写作页的按书设置里不显示
+    for (const id of ['settings-template-group', 'settings-template-field']) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     // 诊断日志也是全局的（一个应用一份日志），写作页的按书设置里不显示
     for (const id of ['settings-logs-group', 'settings-logs-field']) {
       const el = $(id);
@@ -7119,6 +7191,7 @@
         ...form,
         ...readSnapshotForm(),
         ...readStatsForm(),
+        chapterTemplate: $('settings-chapter-template').value,
         sensitiveWordsPath: (state.sensitiveWordsDraft || '').trim()
       });
       state.globalConfig = cfg;
@@ -7140,6 +7213,9 @@
     $('btn-settings').addEventListener('click', openSettings);
     $('btn-settings-cancel').addEventListener('click', closeSettings);
     $('btn-settings-save').addEventListener('click', saveSettings);
+    // 章节模板：边打字边更新预览（只读草稿，保存仍要点「保存设置」）
+    const templateField = $('settings-chapter-template');
+    if (templateField) templateField.addEventListener('input', renderChapterTemplatePreview);
     $('btn-reset-book-display').addEventListener('click', resetBookDisplay);
     // 写作计时（v0.8-2）：手动开始 / 暂停；只记时长不记内容，不做番茄钟
     const writeTimerBtn = $('btn-write-timer');
@@ -8200,6 +8276,32 @@
       globalConfig: () => ({ ...(state.globalConfig || {}) }),
       settingsScope: () => state.settingsScope,
       resetBookDisplay: () => resetBookDisplay(),
+      // 章节模板（v0.8-5）：设置里的输入框 / 预览，以及把展开结果填进当前空章（自检用）
+      chapterTemplateField: () => $('settings-chapter-template').value,
+      chapterTemplatePreview: () => $('settings-template-preview').textContent,
+      setChapterTemplateField(value) {
+        $('settings-chapter-template').value = String(value == null ? '' : value);
+        renderChapterTemplatePreview();
+        return $('settings-chapter-template').value;
+      },
+      async saveTemplateOnly(value) {
+        // 自检 / 截图用：只写 chapterTemplate，不碰其它设置
+        state.globalConfig = await call(api.setConfig, { chapterTemplate: value });
+        state.config = effectiveConfig();
+        return state.globalConfig.chapterTemplate;
+      },
+      undoEditor() {
+        // 自检用：模拟 Ctrl+Z（原生 undo），用来验证模板可撤销
+        editorEl.focus();
+        let ok = false;
+        try {
+          ok = document.execCommand('undo');
+        } catch {
+          ok = false;
+        }
+        onEditorInput();
+        return { ok, text: editorEl.value, dirty: state.dirty };
+      },
       caret: () => editorEl.selectionStart,
       setCaret(pos) {
         editorEl.focus();
@@ -8933,6 +9035,8 @@
       },
       openSettings: () => openSettings(),
       settingsOpen: () => !$('settings-backdrop').classList.contains('hidden'),
+      chapterTemplateSettingsVisible: () =>
+        !$('settings-template-field').classList.contains('hidden'),
       closeSettings: () => closeSettings(),
       async saveSettings() {
         return saveSettings();
