@@ -2059,6 +2059,23 @@
     }
   }
 
+  // 导出 EPUB：整本书一本电子书（分卷 → 目录级、一章一个 XHTML、纯文字封面页）。
+  // 和 TXT 导出一样带上当前章未保存的内容（只参与这次导出，不写盘）。
+  async function exportEpubFlow() {
+    if (!state.bookPath) return;
+    try {
+      const data = await call(api.exportEpub, state.bookPath, currentChapterOverride());
+      if (data.canceled) return;
+      const parts = [`${data.chapterCount} 章`];
+      if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
+      parts.push(`${Number(data.chars) || 0} 字`);
+      if (data.includedUnsaved) parts.push('含当前章未保存内容');
+      toast(`已导出 EPUB：${data.filePath}（${parts.join(' · ')}）`);
+    } catch (err) {
+      toast(`导出 EPUB 失败：${err.message}`, 'error');
+    }
+  }
+
   async function openBookFolderFlow() {
     if (!state.bookPath) return;
     try {
@@ -3863,6 +3880,7 @@
       hideExportMenu();
       if (btn.dataset.action === 'copy') await copyBookFlow();
       else if (btn.dataset.action === 'txt') openExportDialog();
+      else if (btn.dataset.action === 'epub') await exportEpubFlow();
       else if (btn.dataset.action === 'folder') await openBookFolderFlow();
       else if (btn.dataset.action === 'history') await openHistoryForCurrentBook();
     });

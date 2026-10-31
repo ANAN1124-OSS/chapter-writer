@@ -38,6 +38,7 @@ const findLib = require('./core/find');
 const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
 const statsLib = require('./core/stats');
+const epubLib = require('./core/epub');
 
 let win = null;
 let configStore = null;
@@ -121,6 +122,19 @@ async function getConfig() {
 function getStatsStore() {
   if (!statsStore) statsStore = statsLib.createStatsStore(app.getPath('userData'));
   return statsStore;
+}
+
+// 记住这次导出保存到的目录（下次导出默认还开在这里）；记不住也绝不影响导出结果。
+async function rememberExportDir(dir) {
+  if (!dir) return;
+  const cfg = await getConfig();
+  if (dir === cfg.lastExportDir) return;
+  try {
+    const updated = await configStore.set({ lastExportDir: dir });
+    config = booksRootOverride ? { ...updated, booksRoot: booksRootOverride } : updated;
+  } catch {
+    /* 忽略：只是记个位置 */
+  }
 }
 
 // ---------- 「继续上次写作」：书架级记忆（只写配置，不碰书库） ----------
@@ -616,15 +630,7 @@ function registerIpc() {
     const text = exporter.composeBook(meta, texts, range);
     await atomicWriteFile(filePath, exporter.exportBufferFromText(text));
     // 记住这次导出的目录，下次导出默认还开在这里（记不住也不影响导出结果）
-    const chosenDir = path.dirname(filePath);
-    if (chosenDir && chosenDir !== cfg.lastExportDir) {
-      try {
-        const updated = await configStore.set({ lastExportDir: chosenDir });
-        config = booksRootOverride ? { ...updated, booksRoot: booksRootOverride } : updated;
-      } catch {
-        /* 忽略：只是记个位置 */
-      }
-    }
+    await rememberExportDir(path.dirname(filePath));
     return {
       canceled: false,
       filePath,
@@ -632,6 +638,45 @@ function registerIpc() {
       chars,
       includedUnsaved,
       rangeLabel: plan.label
+    };
+  });
+
+  // 导出 EPUB（提案 6.3）：整本书 → 一本 EPUB 3（分卷做目录级、一章一个 XHTML、
+  // 没有封面图就生成纯文字封面页）。排版沿用「段首缩进 + 空一行」，由 EPUB 里的 CSS 控制，
+  // 不动任何 txt 字节。和 TXT 导出一样：当前章未保存的内容参与拼接、只读、原子写盘。
+  handleBook('book:export-epub', async (bookPath, override) => {
+    const meta = await storage.readBookMeta(bookPath);
+    if (!meta.chapters.length) {
+      throw new storage.StorageError('EMPTY_BOOK', '这本书里还没有章节');
+    }
+    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
+    const cfg = await getConfig();
+    // 目录记忆和 TXT 导出共用：上次导到哪，这次默认还开在哪
+    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
+      try {
+        return fsSync.statSync(dir).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+    const defaultName = epubLib.epubFileName(meta);
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: '导出 EPUB',
+      defaultPath: path.join(defaultDir, defaultName),
+      filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }]
+    });
+    if (canceled || !filePath) return { canceled: true };
+    const built = epubLib.buildEpub({ meta, texts });
+    await atomicWriteFile(filePath, built.buffer);
+    await rememberExportDir(path.dirname(filePath));
+    return {
+      canceled: false,
+      filePath,
+      chapterCount: built.chapterCount,
+      volumeCount: built.volumeCount,
+      chars,
+      includedUnsaved,
+      bytes: built.bytes
     };
   });
 
@@ -910,6 +955,13 @@ async function runAutomation() {
       } else if (screenshotDialog === 'bookmenu') {
         await win.webContents.executeJavaScript(
           `const more = document.querySelector('.book-card-more'); if (more) more.click();`,
+          true
+        );
+        await sleep(500);
+      } else if (screenshotDialog === 'exportmenu') {
+        // 开发截图用：展开写作页「导出 ▾」菜单，展示 TXT / EPUB / 本书历史入口
+        await win.webContents.executeJavaScript(
+          `document.getElementById('btn-export').click();`,
           true
         );
         await sleep(500);
