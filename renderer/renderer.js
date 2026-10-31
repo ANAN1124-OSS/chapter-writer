@@ -37,6 +37,13 @@
     return `${(value / 100000000).toFixed(2)} 亿字`;
   }
 
+  function formatBytes(n) {
+    const value = Math.max(0, Number(n) || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
   function countChars(text) {
     return String(text == null ? '' : text).replace(/\s/g, '').length;
   }
@@ -92,7 +99,8 @@
     importing: false,
     sidebarWidth: 250,
     sidebarDragging: false,
-    formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了）
+    formatUndo: [], // 「整理本章」的快照栈（只存在内存里，关掉应用就没了；最多 50 步）
+    replaceBackups: [], // 当前书的「整本替换」备份列表（查找面板里展示 / 还原用）
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
     suppressChapterClick: 0, // 拖拽结束后短暂屏蔽 click，避免误切章
@@ -1253,6 +1261,8 @@
     $('find-backdrop').classList.remove('hidden');
     $('find-query').focus();
     $('find-query').select();
+    // 顺带看一眼这本书有没有「整本替换」的备份（有就显示「还原到替换前」入口）
+    refreshReplaceBackups();
   }
 
   function closeFindPanel() {
@@ -1266,6 +1276,170 @@
       scope: $('find-scope').value,
       caseSensitive: $('find-case').checked
     };
+  }
+
+  // ---------- 整本替换的备份还原 ----------
+  // 备份都在书内 _trash/替换备份-时间戳/（storage 负责读写），这里只负责展示和确认。
+  async function refreshReplaceBackups() {
+    const row = $('find-backup-row');
+    if (!state.bookPath) {
+      state.replaceBackups = [];
+      row.classList.add('hidden');
+      return state.replaceBackups;
+    }
+    try {
+      const backups = await call(api.listReplaceBackups, state.bookPath);
+      state.replaceBackups = Array.isArray(backups) ? backups : [];
+    } catch {
+      state.replaceBackups = [];
+    }
+    if (!state.replaceBackups.length) {
+      row.classList.add('hidden');
+      return state.replaceBackups;
+    }
+    const latest = state.replaceBackups[0];
+    $('find-backup-text').textContent =
+      `最近一次整本替换的备份：${latest.name}（${latest.fileCount} 个文件，${formatBytes(latest.totalBytes)}）`;
+    row.classList.remove('hidden');
+    return state.replaceBackups;
+  }
+
+  // 「只替换这一处」：只改编辑区（未保存），替换完自动选中下一处，方便连续按。
+  // 用 execCommand 替换当前选中文本，保住原生 Ctrl+Z 撤销链。
+  async function runReplaceOne() {
+    const options = readFindOptions();
+    if (!options.query.trim()) {
+      $('find-summary').textContent = '先在查找框里输入内容';
+      return { ok: false };
+    }
+    if (options.scope !== 'current') {
+      $('find-summary').textContent = '「替换这一处」只用于当前章；整本替换请用「全部替换」。';
+      return { ok: false };
+    }
+    const text = editorEl.value;
+    const from = editorEl.selectionStart || 0;
+    let picked;
+    try {
+      picked = await call(api.findNext, text, options.query, from, {
+        caseSensitive: options.caseSensitive
+      });
+    } catch (err) {
+      $('find-summary').textContent = `查找失败：${err.message}`;
+      return { ok: false };
+    }
+    if (!picked) {
+      $('find-summary').textContent = `光标之后没有找到「${options.query}」了`;
+      return { ok: false };
+    }
+    const match = picked.match;
+    const replacement = options.replacement;
+    editorEl.focus();
+    editorEl.setSelectionRange(match.index, match.index + match.length);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('insertText', false, replacement);
+    } catch {
+      inserted = false;
+    }
+    if (!inserted) {
+      // 极端兜底：execCommand 不可用时手动拼接（会丢原生撤销链，但不会丢内容）
+      const current = editorEl.value;
+      editorEl.value =
+        current.slice(0, match.index) + replacement + current.slice(match.index + match.length);
+    }
+    onEditorInput();
+
+    // 选中下一处，方便连续替换
+    let next = null;
+    try {
+      const after = match.index + replacement.length;
+      next = await call(api.findNext, editorEl.value, options.query, after, {
+        caseSensitive: options.caseSensitive
+      });
+    } catch { /* 找下一处失败不影响已经替换的内容 */ }
+    if (next) {
+      editorEl.setSelectionRange(next.match.index, next.match.index + next.match.length);
+      scrollCaretIntoView(next.match.index);
+    } else {
+      const caret = match.index + replacement.length;
+      editorEl.setSelectionRange(caret, caret);
+      scrollCaretIntoView(caret);
+    }
+    const nextHint = next ? `；已选中下一处（第 ${next.index + 1} 处）` : '；本章后面没有下一处了';
+    $('find-summary').textContent =
+      `已替换第 ${picked.index + 1}/${picked.total} 处（未保存：Ctrl+S 写盘，Ctrl+Z 可撤销）${nextHint}`;
+    return { ok: true, index: picked.index, total: picked.total, hasNext: Boolean(next) };
+  }
+
+  // 从最近的「整本替换」备份还原；还原前二次确认，并由 storage 把当前内容再备份一份。
+  async function restoreReplaceBackupFlow(backupName) {
+    if (!state.bookPath) {
+      toast('还没有打开一本书', 'warn');
+      return { ok: false };
+    }
+    await refreshReplaceBackups();
+    const target =
+      state.replaceBackups.find((item) => item.name === backupName) || state.replaceBackups[0];
+    if (!target) {
+      toast('这本书里没有可还原的替换备份', 'warn');
+      return { ok: false };
+    }
+    if (state.dirty) {
+      const action = await askUnsaved({
+        title: '还原前先处理未保存的修改',
+        message: '还原会用备份覆盖磁盘上的章节，并从磁盘重新载入正文；当前章的未保存修改会丢失。',
+        saveLabel: '保存修改后再还原',
+        discardLabel: '放弃修改并还原'
+      });
+      if (action === 'cancel') return { ok: false, canceled: true };
+      if (action === 'save') {
+        const saved = await saveCurrent();
+        if (!saved.ok) return saved;
+      }
+    }
+    const others = state.replaceBackups.length - 1;
+    const confirmed = await openModal({
+      title: '还原到替换前',
+      message:
+        `会用「${target.name}」里的 ${target.fileCount} 个章节文件覆盖书里的同名章节。\n\n` +
+        '还原前会先把当前内容再备份到书内 _trash/还原前备份-时间戳/，所以这一步也能找回。\n' +
+        (others > 0 ? `\n注意：这本书还有 ${others} 次更早的替换备份，这里只还原最近的一次。` : ''),
+      buttons: [
+        { label: '取消', value: 'cancel' },
+        { label: '还原', value: 'ok', kind: 'danger' }
+      ],
+      cancelValue: 'cancel'
+    });
+    if (confirmed.action !== 'ok') return { ok: false, canceled: true };
+    try {
+      const data = await call(api.restoreReplaceBackup, state.bookPath, target.name);
+      const currentId = state.chapters[state.index] && state.chapters[state.index].id;
+      const opened = await call(api.openBook, state.bookPath);
+      state.meta = opened.meta;
+      state.chapters = opened.meta.chapters;
+      state.dirty = false;
+      state.baseText = '';
+      $('book-title').textContent = opened.meta.title;
+      $('book-title').title = opened.meta.title;
+      const index = Math.max(
+        0,
+        state.chapters.findIndex((chapter) => chapter.id === currentId)
+      );
+      await loadChapterAt(index);
+      renderChapterList();
+      renderEditorHeader();
+      await refreshShelf();
+      await refreshReplaceBackups();
+      toast(
+        `已还原 ${data.restored} 个章节${
+          data.skipped ? `（跳过 ${data.skipped} 个已不存在的章节）` : ''
+        }，当前内容已备份到 _trash`
+      );
+      return { ok: true, data };
+    } catch (err) {
+      toast(`还原失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
   }
 
   function renderFindResults(payload) {
@@ -1467,8 +1641,12 @@
     blankLines: 'single',
     trimTrailing: true,
     normalizePunct: true,
-    removeCjkSpaces: false
+    removeCjkSpaces: false,
+    curlyQuotes: false,
+    ellipsis: false
   };
+  // 「撤销上次整理」的内存快照上限（只存内存，关掉应用就没了；50 步足够连续整理几十次）
+  const MAX_FORMAT_UNDO = 50;
 
   const DISPLAY_PRESETS = {
     compact: { label: '紧凑', patch: { editorLineHeight: 1.6, editorLetterSpacing: 0, editorPaddingX: 24, editorPageWidth: 0 } },
@@ -1506,7 +1684,9 @@
       blankLines: $('fmt-blank').value,
       trimTrailing: $('fmt-trailing').checked,
       normalizePunct: $('fmt-punct').checked,
-      removeCjkSpaces: $('fmt-cjkspace').checked
+      removeCjkSpaces: $('fmt-cjkspace').checked,
+      curlyQuotes: $('fmt-quotes').checked,
+      ellipsis: $('fmt-ellipsis').checked
     };
   }
 
@@ -1517,6 +1697,8 @@
     $('fmt-indent').value = ['none', '0', '2'].includes(indent) ? indent : '2';
     $('fmt-trailing').checked = opts.trimTrailing !== false;
     $('fmt-punct').checked = opts.normalizePunct !== false;
+    $('fmt-quotes').checked = Boolean(opts.curlyQuotes);
+    $('fmt-ellipsis').checked = Boolean(opts.ellipsis);
     $('fmt-cjkspace').checked = Boolean(opts.removeCjkSpaces);
     $('fmt-blank').value = ['keep', 'single', 'singleIndent', 'none'].includes(opts.blankLines)
       ? opts.blankLines
@@ -1527,7 +1709,12 @@
     const menu = $('format-menu');
     const willShow = menu.classList.contains('hidden');
     hideExportMenu();
-    if (willShow) $('format-undo-item').disabled = !canUndoFormat();
+    if (willShow) {
+      const steps = formatUndoSteps();
+      $('format-undo-item').disabled = steps === 0;
+      $('format-undo-item').textContent =
+        steps > 0 ? `撤销上次整理（可撤销 ${steps} 步）` : '撤销上次整理';
+    }
     menu.classList.toggle('hidden');
   }
 
@@ -1564,6 +1751,8 @@
       `标点转全角 ${s.punctFixed} 处`
     ];
     if (s.cjkSpacesRemoved) parts.push(`中文间空格 ${s.cjkSpacesRemoved} 处`);
+    if (s.quotesFixed) parts.push(`直引号转弯引号 ${s.quotesFixed} 处`);
+    if (s.ellipsisFixed) parts.push(`省略号转中文 ${s.ellipsisFixed} 处`);
     $('fmt-summary').textContent = res.changed
       ? parts.join(' · ')
       : '本章已经是整理后的格式，没有可改的地方。';
@@ -1661,19 +1850,28 @@
     const chapter = state.chapters[state.index];
     if (!chapter) return;
     state.formatUndo.push({ bookPath: state.bookPath, chapterId: chapter.id, before, after });
-    while (state.formatUndo.length > 10) state.formatUndo.shift();
+    while (state.formatUndo.length > MAX_FORMAT_UNDO) state.formatUndo.shift();
+  }
+
+  // 当前章还能连续撤销几步：从栈顶往下，只有当第 N 步的 after 正好等于第 N-1 步的 before
+  // 时才真正连得上（中间如果手动改过字，链条就断了）。
+  function formatUndoSteps() {
+    const chapter = state.chapters[state.index];
+    if (!chapter) return 0;
+    let steps = 0;
+    let expected = editorEl.value;
+    for (let i = state.formatUndo.length - 1; i >= 0; i -= 1) {
+      const snap = state.formatUndo[i];
+      if (snap.bookPath !== state.bookPath || snap.chapterId !== chapter.id) break;
+      if (snap.after !== expected) break;
+      steps += 1;
+      expected = snap.before;
+    }
+    return steps;
   }
 
   function canUndoFormat() {
-    const top = state.formatUndo[state.formatUndo.length - 1];
-    const chapter = state.chapters[state.index];
-    return Boolean(
-      top &&
-        chapter &&
-        top.bookPath === state.bookPath &&
-        top.chapterId === chapter.id &&
-        editorEl.value === top.after
-    );
+    return formatUndoSteps() > 0;
   }
 
   function undoFormat() {
@@ -1866,8 +2064,10 @@
     $('btn-save').addEventListener('click', () => saveCurrent());
     $('btn-find').addEventListener('click', openFindPanel);
     $('btn-find-run').addEventListener('click', runFind);
+    $('btn-find-replace-one').addEventListener('click', runReplaceOne);
     $('btn-find-replace').addEventListener('click', runReplaceAll);
     $('btn-find-close').addEventListener('click', closeFindPanel);
+    $('btn-restore-replace').addEventListener('click', () => restoreReplaceBackupFlow());
     $('find-query').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -1918,7 +2118,7 @@
     });
 
     // 整理对话框：勾选/切换规则时实时刷新预览
-    for (const id of ['fmt-indent', 'fmt-trailing', 'fmt-punct', 'fmt-cjkspace']) {
+    for (const id of ['fmt-indent', 'fmt-trailing', 'fmt-punct', 'fmt-quotes', 'fmt-ellipsis', 'fmt-cjkspace']) {
       $(id).addEventListener('change', () => scheduleFormatPreview());
     }
     $('fmt-blank').addEventListener('change', () => scheduleFormatPreview());
@@ -2140,6 +2340,8 @@
       canUndoFormat: () => canUndoFormat(),
       undoFormat: () => undoFormat(),
       formatUndoDepth: () => state.formatUndo.length,
+      formatUndoSteps: () => formatUndoSteps(),
+      formatUndoItemText: () => $('format-undo-item').textContent,
       applyDisplayPreset: (name) => setDisplayPreset(name),
       // 查找替换 / 拖拽排序
       openFindPanel: () => openFindPanel(),
@@ -2157,6 +2359,17 @@
       },
       async findReplaceAll() {
         return runReplaceAll();
+      },
+      async findReplaceOne() {
+        return runReplaceOne();
+      },
+      selection: () => ({ start: editorEl.selectionStart || 0, end: editorEl.selectionEnd || 0 }),
+      async refreshReplaceBackups() {
+        return refreshReplaceBackups();
+      },
+      replaceBackups: () => state.replaceBackups.map((item) => ({ ...item })),
+      async restoreReplaceBackupFlow(backupName) {
+        return restoreReplaceBackupFlow(backupName);
       },
       findSummary: () => $('find-summary').textContent,
       findResultCount: () => $('find-results').querySelectorAll('.find-result').length,

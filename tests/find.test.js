@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { findMatches, countMatches, replaceAllLiteral, makeSnippet } = require('../core/find');
+const { findMatches, countMatches, replaceAllLiteral, makeSnippet, findNextMatch } = require('../core/find');
 
 test('查找：字面量匹配、多个结果、中文与英文', () => {
   assert.deepEqual(findMatches('阿明说：阿明走了', '阿明').map((m) => m.index), [0, 4]);
@@ -55,4 +55,35 @@ test('上下文片段：去掉换行、头尾省略标记', () => {
   const tail = makeSnippet('短句', 0, 1, 50);
   assert.equal(tail.ellipsisStart, false);
   assert.equal(tail.ellipsisEnd, false);
+});
+
+test('替换这一处：从光标位置往后找下一处（光标落在命中内部时算这一处）', () => {
+  const text = '阿明走了，阿明回头，阿明笑了。';
+  const first = findNextMatch(text, '阿明', 0);
+  assert.equal(first.index, 0, '第 1 处');
+  assert.equal(first.total, 3);
+  assert.deepEqual(first.match, { index: 0, length: 2 });
+
+  const second = findNextMatch(text, '阿明', 5); // 第 1 处之后
+  assert.equal(second.index, 1, '第 2 处');
+  assert.equal(second.match.index, 5);
+
+  const inside = findNextMatch(text, '阿明', 6); // 光标正好在第 2 处里面
+  assert.equal(inside.index, 1);
+  assert.equal(inside.match.index, 5);
+
+  assert.equal(findNextMatch(text, '阿明', text.length), null, '文末之后没有下一处');
+  assert.equal(findNextMatch(text, '不存在', 0), null);
+  assert.equal(findNextMatch('', '阿明', 0), null);
+});
+
+test('替换这一处：沿用字面量与大小写策略', () => {
+  assert.equal(findNextMatch('Foo foo', 'foo', 0).index, 0);
+  const sensitive = findNextMatch('Foo foo', 'foo', 0, { caseSensitive: true });
+  assert.equal(sensitive.index, 0, '区分大小写时只有一处命中');
+  assert.equal(sensitive.match.index, 4);
+  assert.equal(findNextMatch('价格 3.14 元', '3.14', 0).match.index, 3);
+  // 越界/非法 fromIndex：负数按 0；超过文末按「后面没有了」处理
+  assert.equal(findNextMatch('阿明阿明', '阿明', -10).index, 0);
+  assert.equal(findNextMatch('阿明阿明', '阿明', 999), null);
 });

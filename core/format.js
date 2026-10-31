@@ -7,13 +7,18 @@ const FULL_PUNCT = new Set(['，', '。', '；', '：', '！', '？']);
 const PUNCT_MAP = { ',': '，', '.': '。', ';': '；', ':': '：', '!': '！', '?': '？' };
 const BLANK_MODES = ['keep', 'single', 'singleIndent', 'none'];
 const INDENT_MODES = ['none', '0', '2'];
+// 中文语境邻接字符：汉字、中文标点、中文引号、破折号/省略号、全角空格
+const CJK_NEIGHBOR_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff，。；：！？、…—（）《》“”‘’\u3000]/;
+const ASCII_ALNUM_RE = /[A-Za-z0-9]/;
 
 const DEFAULT_OPTIONS = Object.freeze({
   indent: '2',             // 段首缩进：none 不处理 / '0' 去掉缩进 / '2' 两个全角空格
   blankLines: 'single',    // 段间空行：keep 保持原样 / single 空一行 / singleIndent 空一行（含缩进）/ none 不空行
   trimTrailing: true,      // 删除每行行尾空白
   normalizePunct: true,    // 中文旁边的半角标点转全角（，。；：！？）
-  removeCjkSpaces: false   // 删除中文之间的多余空格（默认关：可能影响语感）
+  removeCjkSpaces: false,  // 删除中文之间的多余空格（默认关：可能影响语感）
+  curlyQuotes: false,      // 直引号 → 中文弯引号（只在中文语境里转，默认关）
+  ellipsis: false          // 连续三个以上英文句点 → 中文省略号 ……（默认关）
 });
 
 // 兼容旧配置：以前 indent 是布尔值（true=缩进两格 / false=不管）
@@ -30,7 +35,9 @@ function sanitizeOptions(raw) {
     blankLines: BLANK_MODES.includes(merged.blankLines) ? merged.blankLines : DEFAULT_OPTIONS.blankLines,
     trimTrailing: Boolean(merged.trimTrailing),
     normalizePunct: Boolean(merged.normalizePunct),
-    removeCjkSpaces: Boolean(merged.removeCjkSpaces)
+    removeCjkSpaces: Boolean(merged.removeCjkSpaces),
+    curlyQuotes: Boolean(merged.curlyQuotes),
+    ellipsis: Boolean(merged.ellipsis)
   };
 }
 
@@ -91,6 +98,63 @@ function removeCjkSpaces(text) {
   return { text: out, count };
 }
 
+// 「...」→「……」：只认连续 3 个以上的英文句点；已经是 …… 的不动（幂等）。
+function convertEllipsis(text) {
+  let count = 0;
+  const out = String(text == null ? '' : text).replace(/\.{3,}/g, () => {
+    count += 1;
+    return '……';
+  });
+  return { text: out, count };
+}
+
+// 直引号 → 中文弯引号（“ ” ‘ ’）。只在中文语境里转：
+// 引号两侧必须至少一侧是中文/中文标点，且不能挨着英文/数字（避免把 don't、英文引语改坏）。
+// 方向判断：① 后面是中文、前面是行首/标点/空白 → 开引号；② 前面是中文/标点、后面不是中文 → 收引号；
+// ③ 两边都是中文（如 他说"你好"）→ 按本段内还没配对的引号交替判断。
+function convertCurlyQuotes(text) {
+  const source = String(text == null ? '' : text);
+  let count = 0;
+  let out = '';
+  let doubleOpen = false;
+  let singleOpen = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch !== '"' && ch !== "'") {
+      out += ch;
+      continue;
+    }
+    const prev = out ? out[out.length - 1] : '';
+    const next = source[i + 1] || '';
+    const prevCjk = CJK_NEIGHBOR_RE.test(prev);
+    const nextCjk = CJK_NEIGHBOR_RE.test(next);
+    const prevAlnum = ASCII_ALNUM_RE.test(prev);
+    const nextAlnum = ASCII_ALNUM_RE.test(next);
+    // 中文语境：至少一侧是中文，且两侧都不挨着英文/数字
+    if (!((prevCjk || nextCjk) && !prevAlnum && !nextAlnum)) {
+      out += ch;
+      continue;
+    }
+    const isDouble = ch === '"';
+    const opened = isDouble ? doubleOpen : singleOpen;
+    const prevHan = HAN_RE.test(prev);
+    const nextHan = HAN_RE.test(next);
+    let isOpen;
+    if (nextHan && (!prev || (prevCjk && !prevHan))) {
+      isOpen = true; // 行首/标点/空白 + 后面是中文 → 开
+    } else if (prevCjk && !nextHan) {
+      isOpen = false; // 前面是中文 + 后面不是中文（行尾/标点）→ 收
+    } else {
+      isOpen = !opened; // 两边都是中文 → 按本段内配对状态交替
+    }
+    out += isOpen ? (isDouble ? '“' : '‘') : (isDouble ? '”' : '’');
+    count += 1;
+    if (isDouble) doubleOpen = isOpen;
+    else singleOpen = isOpen;
+  }
+  return { text: out, count };
+}
+
 function formatText(text, rawOptions) {
   const options = sanitizeOptions(rawOptions);
   const indent = options.indent;
@@ -100,7 +164,9 @@ function formatText(text, rawOptions) {
     trailingTrimmed: 0,
     blankCollapsed: 0,
     punctFixed: 0,
-    cjkSpacesRemoved: 0
+    cjkSpacesRemoved: 0,
+    quotesFixed: 0,
+    ellipsisFixed: 0
   };
 
   const source = String(text == null ? '' : text)
@@ -137,6 +203,12 @@ function formatText(text, rawOptions) {
       line = next;
     }
 
+    if (options.ellipsis) {
+      const res = convertEllipsis(line);
+      line = res.text;
+      stats.ellipsisFixed += res.count;
+    }
+
     if (options.removeCjkSpaces) {
       const res = removeCjkSpaces(line);
       line = res.text;
@@ -147,6 +219,13 @@ function formatText(text, rawOptions) {
       const res = convertPunct(line);
       line = res.text;
       stats.punctFixed += res.count;
+    }
+
+    // 引号放在标点转换之后：这样「他说,"你好"」里的引号挨着的是已经变成全角的「，」
+    if (options.curlyQuotes) {
+      const res = convertCurlyQuotes(line);
+      line = res.text;
+      stats.quotesFixed += res.count;
     }
 
     paragraphs.push({ text: line, gap });
@@ -195,5 +274,7 @@ module.exports = {
   formatText,
   // 供测试/预览使用
   convertPunct,
-  removeCjkSpaces
+  removeCjkSpaces,
+  convertCurlyQuotes,
+  convertEllipsis
 };

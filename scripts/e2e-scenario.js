@@ -813,5 +813,170 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.text()')) === '小明走进屋里。\n小明坐下。'
   );
 
+  // 29. 只替换这一处：只改编辑区、替换后选中下一处、只作用于当前章
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await exec("window.__cwTest.setText('阿明一。阿明二。阿明三。')");
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '阿明', replacement: '小红', scope: 'book' })");
+  const oneOnBook = await exec('window.__cwTest.findReplaceOne()');
+  check('替换这一处：整本范围下不会执行', oneOnBook && oneOnBook.ok === false, oneOnBook);
+  check(
+    '替换这一处：整本范围下正文不动',
+    (await exec('window.__cwTest.text()')) === '阿明一。阿明二。阿明三。'
+  );
+
+  await exec("window.__cwTest.setFindFields({ query: '阿明', replacement: '小红', scope: 'current' })");
+  await exec('window.__cwTest.findRun()');
+  await sleep(200);
+  check('替换这一处：查找后选中第 1 处', (await exec('window.__cwTest.selection()')).start === 0);
+  const firstOne = await exec('window.__cwTest.findReplaceOne()');
+  check(
+    '替换这一处：只改第 1 处，其余命中保留',
+    (await exec('window.__cwTest.text()')) === '小红一。阿明二。阿明三。',
+    await exec('window.__cwTest.text()')
+  );
+  check('替换这一处：替换后自动选中第 2 处', (await exec('window.__cwTest.selection()')).start === 4);
+  check(
+    '替换这一处：返回替换序号与总数',
+    firstOne && firstOne.ok === true && firstOne.index === 0 && firstOne.total === 3,
+    firstOne
+  );
+  check('替换这一处：仍是未保存状态', (await exec('window.__cwTest.dirty()')) === true);
+  check(
+    '替换这一处：磁盘上还是旧内容',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '阿明一。阿明二。阿明三。'
+  );
+  await exec('window.__cwTest.findReplaceOne()');
+  check(
+    '替换这一处：连按第二次替换第 2 处',
+    (await exec('window.__cwTest.text()')) === '小红一。小红二。阿明三。'
+  );
+  check('替换这一处：第 3 处也被选中', (await exec('window.__cwTest.selection()')).start === 8);
+  await exec('window.__cwTest.save()');
+  await exec('window.__cwTest.closeFindPanel()');
+  check(
+    '替换这一处：保存后才写盘',
+    (await exec('window.__cwTest.chapterTextAt(0)')) === '小红一。小红二。阿明三。'
+  );
+
+  // 30. 整本替换的备份还原：列出备份 → 二次确认 → 正文回到替换前（当前内容再备份一份）
+  await exec('window.__cwTest.openFindPanel()');
+  const backups = await exec('window.__cwTest.refreshReplaceBackups()');
+  check(
+    '替换备份：查找面板能列出最近一次整本替换的备份',
+    Array.isArray(backups) && backups.length >= 1 && backups[0].fileCount === 2,
+    backups && backups.map((item) => ({ name: item.name, fileCount: item.fileCount }))
+  );
+  const restorePromise = exec('window.__cwTest.restoreReplaceBackupFlow()');
+  await waitFor('window.__cwTest.modalOpen()');
+  check('替换备份：还原前会二次确认', (await exec('window.__cwTest.dialog()')) === '还原到替换前');
+  await exec("window.__cwTest.answerModal('ok')");
+  const restoreResult = await restorePromise;
+  check('替换备份：还原成功', restoreResult && restoreResult.ok === true, restoreResult);
+  await sleep(300);
+  const restoredMeta = await storage.readBookMeta(sortBookPath);
+  const restoredText0 = (await storage.loadChapterText(sortBookPath, restoredMeta.chapters[0].file)).text;
+  const restoredText2 = (await storage.loadChapterText(sortBookPath, restoredMeta.chapters[2].file)).text;
+  check('替换备份：正文回到替换前', restoredText0 === '阿明走进屋里。\n阿明坐下。', restoredText0);
+  check('替换备份：其他命中章节也回到替换前', restoredText2 === '阿明抬头看了看天。', restoredText2);
+  const trashAfterRestore = await fs.readdir(path.join(sortBookPath, '_trash'));
+  check(
+    '替换备份：还原前把当前内容又备份了一份',
+    trashAfterRestore.some((name) => name.startsWith('还原前备份-')),
+    trashAfterRestore
+  );
+  check(
+    '替换备份：字数缓存已按还原后的正文更新',
+    restoredMeta.chapters[0].chars === 12 && restoredMeta.chapters[2].chars === 9,
+    restoredMeta.chapters.map((chapter) => chapter.chars)
+  );
+  check(
+    '替换备份：编辑器已从磁盘重新载入',
+    (await exec('window.__cwTest.text()')) === '阿明走进屋里。\n阿明坐下。'
+  );
+  check(
+    '替换备份：原备份还在，可以重复还原',
+    (await exec('window.__cwTest.replaceBackups()')).length === 1
+  );
+  await exec('window.__cwTest.closeFindPanel()');
+
+  // 31. 撤销整理：快照上限 10 → 50，菜单显示还能撤销几步
+  await exec('window.__cwTest.switchTo(0, "discard")');
+  await exec("window.__cwTest.setText('段落一。\\n\\n段落二。')");
+  await exec('window.__cwTest.save()');
+  const undoDepthBefore = await exec('window.__cwTest.formatUndoDepth()');
+  for (let i = 0; i < 11; i += 1) {
+    const options = { indent: i % 2 === 0 ? '2' : '0', blankLines: 'keep', trimTrailing: true, normalizePunct: true };
+    await exec(`window.__cwTest.writeFormatOptions(${JSON.stringify(options)})`);
+    await exec('window.__cwTest.applyFormat()');
+  }
+  const undoDepthNow = await exec('window.__cwTest.formatUndoDepth()');
+  check(
+    '撤销整理：连续整理 11 次都留得下（不再被 10 步截断）',
+    undoDepthNow === undoDepthBefore + 11 && undoDepthNow > 10,
+    { undoDepthBefore, undoDepthNow }
+  );
+  check('撤销整理：11 步都能连续撤回', (await exec('window.__cwTest.formatUndoSteps()')) === 11);
+  await exec('window.__cwTest.openFormatMenu()');
+  const undoItemLabel = await exec('window.__cwTest.formatUndoItemText()');
+  check('撤销整理：菜单显示还能撤销几步', undoItemLabel.includes('可撤销 11 步'), undoItemLabel);
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec('window.__cwTest.undoFormat()');
+  await exec('window.__cwTest.undoFormat()');
+  check('撤销整理：连续撤销两步后还剩 9 步', (await exec('window.__cwTest.formatUndoSteps()')) === 9);
+
+  // 32. 标点扩展：直引号 / 省略号（默认关，勾上才转，预览里给统计）
+  await exec("window.__cwTest.setText('他说,\"你好...\"')");
+  const punctOptions = {
+    indent: '2',
+    blankLines: 'keep',
+    trimTrailing: true,
+    normalizePunct: true,
+    curlyQuotes: true,
+    ellipsis: true
+  };
+  await exec('window.__cwTest.openFormatDialog()');
+  await exec(`window.__cwTest.writeFormatOptions(${JSON.stringify(punctOptions)})`);
+  await exec(
+    "document.getElementById('fmt-quotes').dispatchEvent(new Event('change', { bubbles: true }))"
+  );
+  await waitFor("window.__cwTest.formatSummary().includes('直引号转弯引号')");
+  const punctSummary = await exec('window.__cwTest.formatSummary()');
+  check(
+    '标点扩展：预览统计引号与省略号的转换数',
+    punctSummary.includes('直引号转弯引号 2 处') && punctSummary.includes('省略号转中文 1 处'),
+    punctSummary
+  );
+  const punctPreview = await exec('window.__cwTest.formatPreview()');
+  check('标点扩展：预览里能看到转换后的引号/省略号', punctPreview.includes('“你好……”'), punctPreview);
+  await exec("document.getElementById('btn-format-apply').click()");
+  await waitFor('window.__cwTest.formatDialogOpen() === false');
+  await sleep(150);
+  check(
+    '标点扩展：套用后直引号转弯引号、三个点转省略号',
+    (await exec('window.__cwTest.text()')) === '　　他说，“你好……”',
+    await exec('window.__cwTest.text()')
+  );
+  check('标点扩展：套用后仍是未保存状态', (await exec('window.__cwTest.dirty()')) === true);
+  const cfgWithPunct = await exec('window.api.getConfig().then((r) => (r.ok ? r.data : null))');
+  check(
+    '标点扩展：两个开关会记住（写进配置）',
+    cfgWithPunct.formatOptions.curlyQuotes === true && cfgWithPunct.formatOptions.ellipsis === true,
+    cfgWithPunct.formatOptions
+  );
+
+  // 默认关：换一段没转过标点的正文，只套默认规则 → 引号/省略号原样
+  await exec("window.__cwTest.setText('他说,\"你好...\"')");
+  await exec(
+    "window.__cwTest.writeFormatOptions({ indent: '0', blankLines: 'keep', trimTrailing: true, normalizePunct: true })"
+  );
+  await exec('window.__cwTest.applyFormat()');
+  check(
+    '标点扩展：两项默认关时引号/省略号保持原样',
+    (await exec('window.__cwTest.text()')) === '他说，"你好..."',
+    await exec('window.__cwTest.text()')
+  );
+
   return { ok: true, checks: checks.length, details: checks };
 };

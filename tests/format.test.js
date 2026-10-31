@@ -99,7 +99,9 @@ test('整理：全部规则关闭时原样返回', () => {
     blankLines: 'keep',
     trimTrailing: false,
     normalizePunct: false,
-    removeCjkSpaces: false
+    removeCjkSpaces: false,
+    curlyQuotes: false,
+    ellipsis: false
   };
   assert.equal(F(input, off), input);
 });
@@ -119,6 +121,11 @@ test('规则清洗：非法值回落到默认', () => {
   assert.equal(sanitizeOptions({ indent: false }).indent, 'none');
   assert.equal(sanitizeOptions({ indent: '0' }).indent, '0');
   assert.equal(sanitizeOptions({ blankLines: 'singleIndent' }).blankLines, 'singleIndent');
+  // 新增的引号 / 省略号开关默认关
+  assert.equal(sanitizeOptions({}).curlyQuotes, false);
+  assert.equal(sanitizeOptions({}).ellipsis, false);
+  assert.equal(sanitizeOptions({ curlyQuotes: 1, ellipsis: 'yes' }).curlyQuotes, true);
+  assert.equal(sanitizeOptions({ curlyQuotes: 1, ellipsis: 'yes' }).ellipsis, true);
 });
 
 test('智能排版：段首缩进可选「不处理 / 0 字符 / 2 字符」', () => {
@@ -145,4 +152,63 @@ test('智能排版：空行「含缩进」（粘贴到吃空行的平台也不�
   // 缩进 0 字符时没有缩进可带，退化成普通空行
   assert.equal(F('第一段\n\n第二段', { blankLines: 'singleIndent', indent: '0' }), '第一段\n\n第二段');
   assert.equal(F('第一段\n\n第二段', { blankLines: 'singleIndent', indent: 'none' }), '第一段\n\n第二段');
+});
+
+test('标点扩展：直引号默认不动，开启后只在中文语境转弯引号', () => {
+  const input = '他说,"你好."';
+  // 默认关：引号原样
+  assert.equal(F(input, { indent: false, blankLines: 'keep' }), '他说，"你好。"');
+  const on = { indent: false, blankLines: 'keep', curlyQuotes: true };
+  assert.equal(F(input, on), '他说，“你好。”');
+  // 已经转好的不再变（幂等）
+  const once = formatText(input, on);
+  const twice = formatText(once.text, on);
+  assert.equal(twice.text, once.text);
+  assert.equal(twice.changed, false);
+  // 统计
+  assert.equal(formatText(input, on).stats.quotesFixed, 2);
+});
+
+test('标点扩展：英文撇号、英文引语、数字里的直引号不动', () => {
+  const on = { indent: false, blankLines: 'keep', curlyQuotes: true };
+  assert.equal(F("don't stop", on), "don't stop");
+  assert.equal(F('He said "hi"', on), 'He said "hi"');
+  assert.equal(F("他说 3'5 寸", on), "他说 3'5 寸");
+  // 中文句子里的英文名引号也保持原样（避免把 Jack 的引号改坏）
+  assert.equal(F('他叫"Jack"。', on), '他叫"Jack"。');
+  // 单引号在中文语境里也能转
+  assert.equal(F("她说,'别走.'", on), "她说，‘别走。’");
+});
+
+test('标点扩展：省略号默认不动，开启后三个点以上转中文省略号（幂等）', () => {
+  const input = '他说..."等等..."';
+  // 默认关：省略号仍是三个点（标点规则也不会动它）
+  assert.equal(F(input, { indent: false, blankLines: 'keep' }), input);
+  const on = { indent: false, blankLines: 'keep', ellipsis: true };
+  assert.equal(F(input, on), '他说……"等等……"');
+  // 六个点也合成一个中文省略号
+  assert.equal(F('他走了......', on), '他走了……');
+  // 数字/网址里的点不动
+  assert.equal(F('圆周率3.14，网址www.a.com', on), '圆周率3.14，网址www.a.com');
+  // 幂等
+  const once = formatText(input, on);
+  const twice = formatText(once.text, on);
+  assert.equal(twice.text, once.text);
+  assert.equal(twice.changed, false);
+  // 统计
+  assert.equal(formatText(input, on).stats.ellipsisFixed, 2);
+});
+
+test('标点扩展：引号 + 省略号 + 全角标点同时开启', () => {
+  const res = formatText('他说,"你好..."\n\n第二段', {
+    indent: false,
+    blankLines: 'keep',
+    normalizePunct: true,
+    curlyQuotes: true,
+    ellipsis: true
+  });
+  assert.equal(res.text, '他说，“你好……”\n\n第二段');
+  assert.equal(res.stats.punctFixed, 1);
+  assert.equal(res.stats.quotesFixed, 2);
+  assert.equal(res.stats.ellipsisFixed, 1);
 });

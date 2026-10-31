@@ -68,7 +68,9 @@ test('显示排版配置：默认值 + 持久化', async () => {
     blankLines: 'single',
     trimTrailing: true,
     normalizePunct: true,
-    removeCjkSpaces: false
+    removeCjkSpaces: false,
+    curlyQuotes: false,
+    ellipsis: false
   });
 
   await store.set({

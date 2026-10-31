@@ -10,6 +10,9 @@ const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
 const TRASH_DIR = '_trash';
 const CORRUPT_PREFIX = '书目.json.corrupt-';
+// 整本替换的备份目录（写盘前把原章节复制到这里）与「还原前」的反向备份目录
+const REPLACE_BACKUP_PREFIX = '替换备份-';
+const RESTORE_BACKUP_PREFIX = '还原前备份-';
 
 class StorageError extends Error {
   constructor(code, message) {
@@ -497,6 +500,133 @@ async function replaceInBook(bookPath, options = {}) {
   };
 }
 
+// 在 _trash 下生成一个不重名的备份目录（同名就加 -2、-3…）
+async function uniqueTrashDir(trashDir, prefix) {
+  const stamp = timestampForFile();
+  let name = `${prefix}${stamp}`;
+  let i = 2;
+  while (await exists(path.join(trashDir, name))) {
+    name = `${prefix}${stamp}-${i}`;
+    i += 1;
+  }
+  return path.join(trashDir, name);
+}
+
+// 列出书内 _trash 下的「整本替换」备份（最近的在最前），供「还原到替换前」使用。
+async function listReplaceBackups(bookPath) {
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  let entries;
+  try {
+    entries = await fs.readdir(trashDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const backups = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(REPLACE_BACKUP_PREFIX)) continue;
+    const dir = path.join(trashDir, entry.name);
+    let files;
+    try {
+      files = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // 目录刚好被删/被占用，跳过
+    }
+    const names = [];
+    let totalBytes = 0;
+    let mtimeMs = 0;
+    for (const file of files) {
+      if (!file.isFile() || !/\.txt$/i.test(file.name)) continue;
+      try {
+        const stat = await fs.stat(path.join(dir, file.name));
+        totalBytes += stat.size;
+        mtimeMs = Math.max(mtimeMs, stat.mtimeMs);
+        names.push(file.name);
+      } catch { /* 单个文件读不到就跳过 */ }
+    }
+    if (!names.length) continue;
+    backups.push({
+      name: entry.name,
+      fileCount: names.length,
+      totalBytes,
+      mtimeMs: Math.round(mtimeMs),
+      files: names
+    });
+  }
+  // 目录名里带时间戳，倒序 = 最近一次替换在最前
+  backups.sort((a, b) => b.name.localeCompare(a.name, 'zh-Hans-CN'));
+  return backups;
+}
+
+// 还原一次「整本替换」：把备份目录里的章节文件覆盖回书内。
+// 安全措施：只还原书目里当前存在的章节文件（已删章节不偷偷复活）；
+// 还原前先把书里「现在的内容」备份到 _trash/还原前备份-时间戳/，还原本身点错了也还有退路。
+async function restoreReplaceBackup(bookPath, backupName) {
+  const meta = await readBookMeta(bookPath);
+  const rawName = String(backupName == null ? '' : backupName).trim();
+  const name = path.basename(rawName);
+  if (!name || name !== rawName || !name.startsWith(REPLACE_BACKUP_PREFIX)) {
+    throw new StorageError('BAD_BACKUP', '替换备份目录名不合法');
+  }
+  const trashDir = path.join(bookPath, TRASH_DIR);
+  const backupDir = path.join(trashDir, name);
+  if (!(await exists(backupDir))) {
+    throw new StorageError('BACKUP_MISSING', '这个替换备份已经不存在了');
+  }
+
+  let entries;
+  try {
+    entries = await fs.readdir(backupDir, { withFileTypes: true });
+  } catch (err) {
+    throw new StorageError('BACKUP_UNREADABLE', `替换备份读不出来：${err.message}`);
+  }
+  const currentFiles = new Set(meta.chapters.map((chapter) => chapter.file));
+  const fileEntries = entries.filter((entry) => entry.isFile());
+  if (!fileEntries.length) throw new StorageError('BACKUP_EMPTY', '这个替换备份里没有文件');
+  const restorable = fileEntries.filter((entry) => currentFiles.has(entry.name));
+  if (!restorable.length) {
+    throw new StorageError('BACKUP_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
+  }
+
+  const restoreDir = await uniqueTrashDir(trashDir, RESTORE_BACKUP_PREFIX);
+  let restored = 0;
+  let skipped = 0;
+  for (const entry of fileEntries) {
+    if (!currentFiles.has(entry.name)) {
+      skipped += 1; // 章节可能已经删掉了，别偷偷复活
+      continue;
+    }
+    const target = assertInside(bookPath, entry.name);
+    if (await exists(target)) {
+      await ensureDir(restoreDir);
+      await fs.copyFile(target, path.join(restoreDir, entry.name));
+    }
+    const buffer = await fs.readFile(path.join(backupDir, entry.name));
+    await atomicWriteFile(target, buffer);
+    restored += 1;
+  }
+
+  // 正文被覆盖了，字数缓存要重算；书目改动走 writeBookMeta（写前留 .bak）
+  if (restored) {
+    for (const chapter of meta.chapters) {
+      try {
+        const text = await fs.readFile(assertInside(bookPath, chapter.file), 'utf8');
+        chapter.chars = chaptersLib.countChars(stripBom(text));
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+    }
+    await writeBookMeta(bookPath, meta);
+  }
+
+  return {
+    restored,
+    skipped,
+    total: fileEntries.length,
+    restoreBackupDir: restored ? restoreDir : null
+  };
+}
+
 async function renameBook(bookPath, title) {
   const meta = await readBookMeta(bookPath);
   const nextTitle = String(title == null ? '' : title).trim() || meta.title;
@@ -569,6 +699,8 @@ module.exports = {
   moveChapter: locked(moveChapter),
   searchBook,
   replaceInBook: locked(replaceInBook),
+  listReplaceBackups,
+  restoreReplaceBackup: locked(restoreReplaceBackup),
   renameBook: locked(renameBook),
   trashBook,
   setLastOpenChapter: locked(setLastOpenChapter),

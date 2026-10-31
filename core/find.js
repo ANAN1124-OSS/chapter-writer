@@ -64,4 +64,19 @@ function makeSnippet(text, index, length, radius = 18) {
   };
 }
 
-module.exports = { findMatches, countMatches, replaceAllLiteral, makeSnippet };
+// 「只替换这一处」用：从 fromIndex 往后找第一处命中。
+// fromIndex 落在某一处命中内部时返回那一处（作者可能在编辑区里点了一下那个词）；
+// 否则返回 fromIndex 及之后的下一处；找不到返回 null。
+function findNextMatch(text, query, fromIndex = 0, options = {}) {
+  const source = String(text == null ? '' : text);
+  const matches = findMatches(source, query, options);
+  if (!matches.length) return null;
+  const rawFrom = Number(fromIndex);
+  const from = Math.max(0, Math.min(Number.isFinite(rawFrom) ? Math.floor(rawFrom) : 0, source.length));
+  let index = matches.findIndex((match) => match.index <= from && from < match.index + match.length);
+  if (index < 0) index = matches.findIndex((match) => match.index >= from);
+  if (index < 0) return null;
+  return { index, total: matches.length, match: matches[index] };
+}
+
+module.exports = { findMatches, countMatches, replaceAllLiteral, makeSnippet, findNextMatch };

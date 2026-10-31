@@ -305,3 +305,78 @@ test('全书替换：先备份原文件到 _trash，再原子写盘并更新字�
   assert.equal(res2.chaptersChanged, 0);
   assert.equal(res2.backupDir, null);
 });
+
+test('替换备份：列出最近一次整本替换的备份（最近在前）', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '备份列表书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '阿明来了。');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '阿明走了。');
+
+  assert.deepEqual(await storage.listReplaceBackups(bookPath), [], '没替换过时没有备份');
+
+  const first = await storage.replaceInBook(bookPath, { query: '阿明', replacement: '小明' });
+  const list = await storage.listReplaceBackups(bookPath);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, path.basename(first.backupDir));
+  assert.equal(list[0].fileCount, 2);
+  assert.ok(list[0].totalBytes > 0);
+  assert.deepEqual(
+    list[0].files.slice().sort(),
+    meta.chapters.map((chapter) => chapter.file).sort()
+  );
+});
+
+test('替换备份：还原回替换前正文，并把当前内容再备份一份（可回头）', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '还原书');
+  const meta = await storage.readBookMeta(bookPath);
+  const file0 = meta.chapters[0].file;
+  await storage.saveChapterText(bookPath, file0, '阿明来了。');
+  const replaced = await storage.replaceInBook(bookPath, { query: '阿明', replacement: '小明' });
+  assert.equal((await storage.loadChapterText(bookPath, file0)).text, '小明来了。');
+
+  const backupName = path.basename(replaced.backupDir);
+  const res = await storage.restoreReplaceBackup(bookPath, backupName);
+  assert.equal(res.restored, 1);
+  assert.equal(res.skipped, 0);
+  assert.equal((await storage.loadChapterText(bookPath, file0)).text, '阿明来了。');
+  // 还原前把「替换后」的内容也备份了一份，点错了还能找回
+  assert.ok(res.restoreBackupDir && res.restoreBackupDir.includes('还原前备份-'));
+  const safety = await fs.readFile(path.join(res.restoreBackupDir, file0), 'utf8');
+  assert.equal(safety, '小明来了。');
+  // 字数缓存跟着还原后的正文更新
+  const updated = await storage.readBookMeta(bookPath);
+  assert.equal(updated.chapters[0].chars, 5);
+  // 原替换备份还在（不消耗），可以再还原；还原前备份不算「替换备份」
+  const list = await storage.listReplaceBackups(bookPath);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, backupName);
+});
+
+test('替换备份：非法目录名 / 不存在的备份 / 已删章节都被安全处理', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '安全书');
+  let meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[0].file, '阿明一。');
+  await storage.createChapter(bookPath, 1, '第二章');
+  meta = await storage.readBookMeta(bookPath);
+  await storage.saveChapterText(bookPath, meta.chapters[1].file, '阿明二。');
+  const replaced = await storage.replaceInBook(bookPath, { query: '阿明', replacement: '小明' });
+  const backupName = path.basename(replaced.backupDir);
+
+  await assert.rejects(
+    () => storage.restoreReplaceBackup(bookPath, `../${backupName}`),
+    /不合法|不存在/
+  );
+  await assert.rejects(() => storage.restoreReplaceBackup(bookPath, '替换备份-2099'), /不存在/);
+
+  // 删掉第二章后再还原：只还原还在书里的章节，已删章节跳过（不偷偷复活）
+  await storage.deleteChapter(bookPath, meta.chapters[1].id);
+  const res = await storage.restoreReplaceBackup(bookPath, backupName);
+  assert.equal(res.restored, 1);
+  assert.equal(res.skipped, 1);
+  assert.equal((await storage.loadChapterText(bookPath, meta.chapters[0].file)).text, '阿明一。');
+});

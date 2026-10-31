@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('api', {
   saveChapter: (bookPath, chapterId, text) => invoke('chapter:save', bookPath, chapterId, text),
   formatText: (text, options) => invoke('text:format', text, options),
   findInText: (text, query, options) => invoke('text:find', text, query, options),
+  findNext: (text, query, fromIndex, options) =>
+    invoke('text:find-next', text, query, fromIndex, options),
   replaceInText: (text, query, replacement, options) =>
     invoke('text:replace', text, query, replacement, options),
   createChapter: (bookPath, insertIndex, name) => invoke('chapter:create', bookPath, insertIndex, name),
@@ -30,6 +32,9 @@ contextBridge.exposeInMainWorld('api', {
   moveChapter: (bookPath, chapterId, toIndex) => invoke('chapter:move', bookPath, chapterId, toIndex),
   searchBook: (bookPath, options) => invoke('book:search', bookPath, options),
   replaceBook: (bookPath, options) => invoke('book:replace', bookPath, options),
+  listReplaceBackups: (bookPath) => invoke('book:list-replace-backups', bookPath),
+  restoreReplaceBackup: (bookPath, backupName) =>
+    invoke('book:restore-replace-backup', bookPath, backupName),
 
   exportBook: (bookPath) => invoke('book:export', bookPath),
   copyBook: (bookPath) => invoke('book:copy', bookPath),

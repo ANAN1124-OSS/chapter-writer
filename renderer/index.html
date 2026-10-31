@@ -15,7 +15,7 @@
         <div class="brand">
           <span class="brand-mark">章</span>
           <span class="brand-name">章节写作器</span>
-          <span class="version muted small">v0.1</span>
+          <span class="version muted small">v0.2</span>
         </div>
         <div class="topbar-right">
           <span id="books-root-label" class="muted small"></span>
@@ -110,13 +110,19 @@
           </select>
         </label>
         <button id="btn-find-run" class="btn ghost" type="button">查找</button>
+        <button id="btn-find-replace-one" class="btn ghost" type="button" title="只替换光标处的这一处，然后跳到下一处（只用于当前章，不写盘）">替换这一处</button>
         <button id="btn-find-replace" class="btn primary" type="button">全部替换</button>
       </div>
       <div class="find-summary muted small" id="find-summary"></div>
       <div class="find-results" id="find-results"></div>
+      <div class="find-backup hidden" id="find-backup-row">
+        <span id="find-backup-text"></span>
+        <button id="btn-restore-replace" class="btn ghost tiny" type="button" title="把书内最近一次整本替换的原文还原回来">还原到替换前…</button>
+      </div>
       <p class="muted small">
-        整本替换是显式动作：替换前会把原章节备份到书内 <code>_trash\替换备份-时间戳\</code>，可人工找回。
-        当前章替换只改编辑区（未保存），按 Ctrl+S 才写盘，Ctrl+Z 可撤销。
+        「替换这一处」只改编辑区（未保存、Ctrl+Z 可撤销），只用于当前章；「全部替换」在整本范围内是显式写盘动作，
+        替换前会把原章节备份到书内 <code>_trash\替换备份-时间戳\</code>，替换后也可以在上面「还原到替换前」一键退回。
+        当前章替换只改编辑区，按 Ctrl+S 才写盘。
       </p>
       <div class="modal-buttons">
         <button id="btn-find-close" class="btn ghost" type="button">关闭</button>
@@ -138,35 +144,40 @@
   <div id="format-backdrop" class="backdrop hidden">
     <div class="modal format-modal" role="dialog" aria-modal="true">
       <h2 class="modal-title">智能排版 · 仅当前章</h2>
-      <p class="modal-message">
-        只处理正在编辑的这一章，不改章名、不碰别的章。整理结果先放进编辑区，仍是「未保存」状态：
-        按 Ctrl+S 才写盘，Ctrl+Z 或「排版 → 撤销上次整理」可退回。
-      </p>
-      <div class="format-rules">
-        <label class="field inline">
-          <span>段首缩进</span>
-          <select id="fmt-indent" class="text-input">
-            <option value="2">缩进 2 字符（全角空格）</option>
-            <option value="0">缩进 0 字符（去掉原有缩进）</option>
-            <option value="none">不处理缩进</option>
-          </select>
-        </label>
-        <label class="field inline">
-          <span>段落之间</span>
-          <select id="fmt-blank" class="text-input">
-            <option value="keep">保持原样</option>
-            <option value="single">空一行</option>
-            <option value="singleIndent">空一行（含缩进）</option>
-            <option value="none">不空行（紧凑）</option>
-          </select>
-        </label>
-        <label class="check-row"><input type="checkbox" id="fmt-trailing" /> 删除每行行尾空白</label>
-        <label class="check-row"><input type="checkbox" id="fmt-punct" /> 中文旁边的半角标点转全角（，。；：！？）</label>
-        <label class="check-row"><input type="checkbox" id="fmt-cjkspace" /> 删除中文之间的多余空格（可能影响语感，默认不勾）</label>
+      <div class="format-scroll">
+        <p class="modal-message">
+          只处理当前这一章，不改章名、不碰别的章。结果先放进编辑区，仍是「未保存」：Ctrl+S 才写盘，Ctrl+Z 或「排版 → 撤销上次整理」可退回。
+        </p>
+        <div class="format-rules">
+          <label class="field inline">
+            <span>段首缩进</span>
+            <select id="fmt-indent" class="text-input">
+              <option value="2">缩进 2 字符（全角空格）</option>
+              <option value="0">缩进 0 字符（去掉原有缩进）</option>
+              <option value="none">不处理缩进</option>
+            </select>
+          </label>
+          <label class="field inline">
+            <span>段落之间</span>
+            <select id="fmt-blank" class="text-input">
+              <option value="keep">保持原样</option>
+              <option value="single">空一行</option>
+              <option value="singleIndent">空一行（含缩进）</option>
+              <option value="none">不空行（紧凑）</option>
+            </select>
+          </label>
+          <label class="check-row"><input type="checkbox" id="fmt-trailing" /> 删除每行行尾空白</label>
+          <label class="check-row"><input type="checkbox" id="fmt-punct" /> 中文旁边的半角标点转全角（，。；：！？）</label>
+          <div class="check-row-pair">
+            <label class="check-row" title="只在中文语境里转；英文撇号、英文引语不动"><input type="checkbox" id="fmt-quotes" /> 直引号转弯引号（"…" → “…”）</label>
+            <label class="check-row" title="连续三个以上英文句点转成中文省略号；数字、网址里的点不动"><input type="checkbox" id="fmt-ellipsis" /> 省略号（... → ……）</label>
+          </div>
+          <label class="check-row"><input type="checkbox" id="fmt-cjkspace" /> 删除中文之间的多余空格（可能影响语感，默认不勾）</label>
+        </div>
+        <div class="format-summary" id="fmt-summary"></div>
+        <pre class="format-preview" id="fmt-preview"></pre>
+        <p class="muted small">预览只显示整理后的开头，实际套用会处理整章。引号和省略号两项默认关闭，由你自己勾。</p>
       </div>
-      <div class="format-summary" id="fmt-summary"></div>
-      <pre class="format-preview" id="fmt-preview"></pre>
-      <p class="muted small">预览只显示整理后的开头，实际套用会处理整章。</p>
       <div class="modal-buttons">
         <button id="btn-format-reset" class="btn ghost" type="button" title="恢复默认规则">默认规则</button>
         <button id="btn-format-cancel" class="btn ghost" type="button">取消</button>

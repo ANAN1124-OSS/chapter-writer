@@ -212,6 +212,12 @@ function registerIpc() {
     return findLib.replaceAllLiteral(text, query, replacement, options);
   });
 
+  // 「只替换这一处」：从编辑区光标位置往后找下一处命中（纯计算，不写盘）
+  handle('text:find-next', async (text, query, fromIndex, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    return findLib.findNextMatch(text, query, fromIndex, options);
+  });
+
   handle('chapter:save', async (bookPath, chapterId, text) => {
     return storage.withBookLock(bookPath, async () => {
       const meta = await storage.readBookMeta(bookPath);
@@ -268,6 +274,12 @@ function registerIpc() {
   // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
   handle('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
   handle('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options));
+
+  // 整本替换的还原：列出 / 还原书内 _trash/替换备份-*/（还原前把当前内容再备份一份）
+  handle('book:list-replace-backups', async (bookPath) => storage.listReplaceBackups(bookPath));
+  handle('book:restore-replace-backup', async (bookPath, backupName) =>
+    storage.restoreReplaceBackup(bookPath, backupName)
+  );
 
   handle('book:export', async (bookPath) => {
     const meta = await storage.readBookMeta(bookPath);
