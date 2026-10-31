@@ -197,6 +197,39 @@ html, body {
   white-space: nowrap;
 }
 
+/* 书架顶部的今日字数（只统计保存动作；没有目标时只显示字数） */
+.shelf-stats {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: -6px 0 14px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  user-select: none;
+}
+.shelf-stats-today { color: var(--ink); font-weight: 600; }
+.shelf-stats-goal { color: var(--ink-soft); }
+.shelf-stats .goal-track { width: 96px; }
+
+/* 细进度条：状态栏 / 书架共用 */
+.goal-track {
+  display: inline-block;
+  width: 64px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  background: var(--paper-deep);
+  overflow: hidden;
+}
+.goal-track > i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width .2s ease;
+}
+
 .shelf-body { flex: 1; overflow: auto; padding: 26px 34px; }
 
 .book-grid {
@@ -603,6 +636,14 @@ body.resizing .editor {
 .dot.dirty { background: var(--warn); }
 .dot.saving { background: var(--accent-soft); }
 .dot.error { background: var(--danger); }
+.status-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.status-stats .goal-track { width: 54px; height: 4px; }
 .kbd {
   padding: 1px 6px;
   border: 1px solid var(--line-strong);
@@ -704,6 +745,36 @@ body.resizing .editor {
   letter-spacing: .08em;
   user-select: none;
 }
+/* 设置里的近 30 天柱状图：纯 CSS，不引库 */
+.stats-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 54px;
+  margin-top: 8px;
+  padding: 6px 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+}
+.stats-bar {
+  display: flex;
+  align-items: flex-end;
+  flex: 1 1 0;
+  height: 100%;
+  min-width: 0;
+}
+.stats-bar > i {
+  display: block;
+  width: 100%;
+  height: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent-soft);
+}
+.stats-bar.today > i { background: var(--accent); }
+.stats-bar:hover > i { background: var(--accent); }
+#settings-daily-goal { max-width: 160px; }
+
 .text-input {
   width: 100%;
   padding: 8px 10px;

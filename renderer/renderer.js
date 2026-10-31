@@ -126,6 +126,7 @@
     conflictBook: null, // 正在看「同步冲突副本」弹层的那本书（只用于打开文件夹）
     history: null, // 正在看的「本书历史」：{ path, title, groups, preview, loading, error, token }
     shelfQuery: '', // 书架搜索词（书名 / 章节名）
+    stats: null, // 每日字数摘要：{ day, todayChars, goal, goalPercent, goalMet, recentTotal, days[] }
     jumpMatches: [], // Ctrl+G 跳章的当前匹配结果
     jumpQuery: '', // 跳章输入框里的词
     jumpOutOfRange: false, // 输入的是章号但超出本书章数
@@ -246,6 +247,7 @@
     $('shelf-view').classList.toggle('hidden', view !== 'shelf');
     $('editor-view').classList.toggle('hidden', view !== 'editor');
     updateWindowTitle();
+    renderStatsUi();
   }
 
   function updateWindowTitle() {
@@ -402,6 +404,8 @@
     } catch {
       state.recentBook = null;
     }
+    // 今日字数 / 近 30 天统计（主进程算本地日期，界面不自己算）
+    await refreshStats();
     try {
       state.books = await call(api.listBooks);
     } catch (err) {
@@ -1131,6 +1135,96 @@
     }, 400);
   }
 
+  // ---------- 每日字数统计（提案 3.2） ----------
+  // 只统计「保存动作」带来的新增字数：没保存的编辑不计数，删字也不会倒扣今天。
+  // 日期 / 增量都在主进程算，渲染层只负责显示；统计文件在 userData，不碰书库。
+  async function refreshStats() {
+    try {
+      state.stats = await call(api.getStats);
+    } catch {
+      /* 统计读不到不影响写作，保留上一次显示 */
+    }
+    renderStatsUi();
+    return state.stats;
+  }
+
+  function statsTodayText(stats) {
+    const today = Math.max(0, Math.round(Number(stats && stats.todayChars) || 0));
+    return today > 0 ? `今天 +${formatChars(today)}` : '今天还没写字';
+  }
+
+  function renderStatsUi() {
+    const stats = state.stats;
+    const shelf = $('shelf-stats');
+    const status = $('status-stats');
+    const today = Math.max(0, Math.round(Number(stats && stats.todayChars) || 0));
+    const goal = Math.max(0, Math.round(Number(stats && stats.goal) || 0));
+    const percent = Math.max(0, Math.min(100, Math.floor(Number(stats && stats.goalPercent) || 0)));
+    const met = Boolean(stats && stats.goalMet);
+    const title =
+      `只统计保存动作写下的字数（不含未保存内容；删字不倒扣）。` +
+      (goal > 0 ? `今日目标 ${goal} 字。` : '可在「设置 → 写作统计」里设每日目标。');
+
+    if (shelf) {
+      shelf.classList.toggle('hidden', !stats);
+      if (stats) {
+        $('shelf-stats-today').textContent = statsTodayText(stats);
+        $('shelf-stats-goal').textContent = goal > 0 ? `目标 ${formatChars(goal)} · ${percent}%${met ? ' · 已达标' : ''}` : '';
+        $('shelf-stats-goal').hidden = goal <= 0;
+        $('shelf-goal-track').classList.toggle('hidden', goal <= 0);
+        $('shelf-goal-fill').style.width = goal > 0 ? `${percent}%` : '0%';
+        shelf.title = title;
+      }
+    }
+    if (status) {
+      status.classList.toggle('hidden', !stats);
+      if (stats) {
+        $('status-stats-text').textContent =
+          goal > 0 ? `今日 ${formatChars(today)} / ${formatChars(goal)}` : `今日 ${formatChars(today)}`;
+        $('status-goal-track').classList.toggle('hidden', goal <= 0);
+        $('status-goal-fill').style.width = goal > 0 ? `${percent}%` : '0%';
+        $('status-stats-text').title = title;
+        status.title = title;
+      }
+    }
+    renderStatsChart();
+  }
+
+  // 设置里的近 30 天柱状图：纯 CSS 高度，不引第三方库。今天那根高亮。
+  function renderStatsChart() {
+    const chart = $('settings-stats-chart');
+    if (!chart) return;
+    const stats = state.stats;
+    const days = stats && Array.isArray(stats.days) ? stats.days : [];
+    const goal = Math.max(0, Math.round(Number(stats && stats.goal) || 0));
+    const values = days.map((item) => Math.max(0, Math.round(Number(item && item.chars) || 0)));
+    const max = Math.max(goal, ...values, 1);
+    chart.innerHTML = '';
+    days.forEach((item, index) => {
+      const value = values[index];
+      const bar = document.createElement('div');
+      bar.className = 'stats-bar' + (index === days.length - 1 ? ' today' : '');
+      const fill = document.createElement('i');
+      const height = value > 0 ? Math.max(2, Math.round((value / max) * 100)) : 0;
+      fill.style.height = `${Math.min(100, height)}%`;
+      bar.appendChild(fill);
+      bar.title = `${item.day} · ${formatChars(value)}`;
+      chart.appendChild(bar);
+    });
+    const summaryEl = $('settings-stats-summary');
+    if (summaryEl) {
+      summaryEl.textContent = stats
+        ? `今天 ${formatChars(stats.todayChars)} · 近 30 天 ${formatChars(stats.recentTotal)}` +
+          (goal > 0 ? ` · 目标 ${formatChars(goal)}（${Math.min(100, Math.floor(Number(stats.goalPercent) || 0))}%）` : ' · 未设目标')
+        : '还没有统计数据（保存一次后开始记录）';
+    }
+    const goalState = $('settings-goal-state');
+    if (goalState) {
+      const percent = Math.max(0, Math.min(100, Math.floor(Number(stats && stats.goalPercent) || 0)));
+      goalState.textContent = goal > 0 ? `今天完成 ${percent}%${stats && stats.goalMet ? ' · 已达标' : ''}` : '未设目标';
+    }
+  }
+
   function updateStatus() {
     const dot = $('status-dot');
     dot.className = 'dot';
@@ -1225,6 +1319,12 @@
       state.savedAt = new Date();
       state.saveError = null;
       state.dirty = false;
+      // 主进程已经把「这次保存带来的新增字数」记进 stats.json，返回的摘要直接显示，
+      // 不再多跑一次 IPC（统计失败时 data.stats 为 null，界面保留旧数字）。
+      if (data.stats) {
+        state.stats = data.stats;
+        renderStatsUi();
+      }
       updateStatus();
       // 「保存整本」语义：保存后顺带校验全书章节文件是否齐全
       try {
@@ -3475,6 +3575,9 @@
     setSelectValue('settings-paper', cfg.editorPaper, 'paper');
     $('settings-snapshot-enabled').checked = cfg.snapshotEnabled === true;
     setSelectValue('settings-snapshot-days', cfg.snapshotKeepDays, 7);
+    const goal = Math.max(0, Math.round(Number(cfg.dailyGoal) || 0));
+    $('settings-daily-goal').value = String(goal);
+    renderStatsChart();
   }
 
   function readSnapshotForm() {
@@ -3482,6 +3585,12 @@
       snapshotEnabled: $('settings-snapshot-enabled').checked === true,
       snapshotKeepDays: Number($('settings-snapshot-days').value)
     };
+  }
+
+  // 每日目标是全局设置（0 = 不设目标）；主进程/配置层还会再清洗一次范围。
+  function readStatsForm() {
+    const n = Number($('settings-daily-goal').value);
+    return { dailyGoal: Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0 };
   }
 
   function updateSettingsScopeUi() {
@@ -3493,6 +3602,16 @@
     if (snapshotField) snapshotField.classList.toggle('hidden', isBook);
     const snapshotDays = $('settings-snapshot-days-field');
     if (snapshotDays) snapshotDays.classList.toggle('hidden', isBook);
+    // 写作统计 / 每日目标也是全局设置：按书覆盖没有意义，写作页里不显示
+    for (const id of [
+      'settings-stats-group',
+      'settings-daily-goal-field',
+      'settings-stats-chart-field',
+      'settings-stats-hint'
+    ]) {
+      const el = $(id);
+      if (el) el.classList.toggle('hidden', isBook);
+    }
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -3509,10 +3628,12 @@
     applyEditorStyle({ ...state.settingsBackup, ...readDisplayForm() });
   }
 
-  function openSettings() {
+  async function openSettings() {
     state.settingsScope = settingsScopeForView();
     const cfg = state.config || {};
     state.settingsBackup = state.config ? { ...state.config } : null;
+    // 打开时刷新一次今天 / 近 30 天，避免跨过午夜后还显示昨天的数字
+    await refreshStats();
     fillSettingsFields(cfg);
     updateSettingsScopeUi();
     $('settings-backdrop').classList.remove('hidden');
@@ -3566,7 +3687,8 @@
       const cfg = await call(api.setConfig, {
         booksRoot: $('settings-root').value.trim(),
         ...form,
-        ...readSnapshotForm()
+        ...readSnapshotForm(),
+        ...readStatsForm()
       });
       state.globalConfig = cfg;
       state.config = effectiveConfig();
@@ -4454,6 +4576,30 @@
         enabled: $('settings-snapshot-enabled').checked === true,
         keepDays: Number($('settings-snapshot-days').value)
       }),
+      // 每日字数统计 / 目标（v0.6-3）
+      async refreshStats() {
+        return refreshStats();
+      },
+      statsSummary: () => (state.stats ? JSON.parse(JSON.stringify(state.stats)) : null),
+      shelfStatsVisible: () => !$('shelf-stats').classList.contains('hidden'),
+      shelfStatsText: () => $('shelf-stats').textContent.replace(/\s+/g, ' ').trim(),
+      shelfGoalWidth: () => $('shelf-goal-fill').style.width,
+      statusStatsVisible: () => !$('status-stats').classList.contains('hidden'),
+      statusStatsText: () => $('status-stats-text').textContent,
+      statusGoalWidth: () => $('status-goal-fill').style.width,
+      dailyGoalSettings: () => Number($('settings-daily-goal').value),
+      statsSettingsVisible: () => !$('settings-daily-goal-field').classList.contains('hidden'),
+      statsChartBarCount: () => document.querySelectorAll('#settings-stats-chart .stats-bar').length,
+      statsChartBarHeights: () =>
+        Array.from(document.querySelectorAll('#settings-stats-chart .stats-bar > i')).map((el) => el.style.height),
+      statsChartSummary: () => $('settings-stats-summary').textContent,
+      setInput(id, value) {
+        const el = $(id);
+        el.value = String(value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return el.value;
+      },
       setSelect(id, value) {
         const el = $(id);
         el.value = String(value);

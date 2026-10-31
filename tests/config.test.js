@@ -357,3 +357,42 @@ test('每日快照配置：写盘 / 读回，不影响其它配置', async () =>
   await store.set({ snapshotEnabled: false });
   assert.equal((await createConfigStore(dir).get()).snapshotEnabled, false);
 });
+
+test('每日目标配置：默认 0（不设目标），旧配置没有 dailyGoal 也照常启动', async () => {
+  const dir = await mkTmp();
+  // 模拟 v0.4.1 / v0.6-2 的旧配置：没有 dailyGoal 字段
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', snapshotEnabled: true, snapshotKeepDays: 3 }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.dailyGoal, 0, '旧配置缺字段 = 不设目标');
+  assert.equal(cfg.snapshotEnabled, true, '旧配置其它字段不受影响');
+  assert.equal(cfg.snapshotKeepDays, 3);
+});
+
+test('每日目标配置：脏值清洗（负数/NaN 回落 0，超大夹到上限）', () => {
+  assert.equal(sanitize({ dailyGoal: -100 }).dailyGoal, 0);
+  assert.equal(sanitize({ dailyGoal: 'abc' }).dailyGoal, 0);
+  assert.equal(sanitize({ dailyGoal: null }).dailyGoal, 0);
+  assert.equal(sanitize({ dailyGoal: 2000 }).dailyGoal, 2000);
+  assert.equal(sanitize({ dailyGoal: '2500' }).dailyGoal, 2500);
+  assert.equal(sanitize({ dailyGoal: 2000.4 }).dailyGoal, 2000);
+  assert.equal(sanitize({ dailyGoal: 99999999 }).dailyGoal, 1000000);
+});
+
+test('每日目标配置：写盘 / 读回，只影响 dailyGoal', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ dailyGoal: 2000, editorFont: 'kai' });
+  const reopened = await createConfigStore(dir).get();
+  assert.equal(reopened.dailyGoal, 2000);
+  assert.equal(reopened.editorFont, 'kai');
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.dailyGoal, 2000);
+
+  // 0 = 关掉目标，能落盘
+  await store.set({ dailyGoal: 0 });
+  assert.equal((await createConfigStore(dir).get()).dailyGoal, 0);
+});

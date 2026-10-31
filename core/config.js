@@ -6,6 +6,7 @@ const path = require('node:path');
 const { writeJsonAtomic, stripBom } = require('./atomic');
 const formatLib = require('./format');
 const snapshotLib = require('./snapshot');
+const statsLib = require('./stats');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -54,7 +55,10 @@ const DEFAULTS = Object.freeze({
   // 可选「每日快照」：默认关（不给作者添意外写盘）。开启后每次 Ctrl+S 成功时，
   // 当天第一次保存会把这一章的上一版复制到书内 _trash/快照-YYYYMMDD/。
   snapshotEnabled: false,
-  snapshotKeepDays: snapshotLib.DEFAULT_KEEP_DAYS
+  snapshotKeepDays: snapshotLib.DEFAULT_KEEP_DAYS,
+  // 每日写作目标（字数）：0 = 不设目标；只统计保存动作写下的正字数。
+  // 统计本身存在 userData/stats.json，不写进书库。
+  dailyGoal: statsLib.DEFAULT_GOAL
 });
 
 function clampInt(value, min, max, fallback) {
@@ -179,6 +183,8 @@ function sanitize(raw) {
     cfg.snapshotKeepDays,
     snapshotLib.DEFAULT_KEEP_DAYS
   );
+  // 每日目标：0 = 不设目标；负数 / NaN 回落 0，超大值夹到上限；旧配置没有这个键照常启动。
+  cfg.dailyGoal = statsLib.normalizeGoal(cfg.dailyGoal, DEFAULTS.dailyGoal);
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {

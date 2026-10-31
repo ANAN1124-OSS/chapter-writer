@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld('api', {
 
   getConfig: () => invoke('config:get'),
   setConfig: (patch) => invoke('config:set', patch),
+  getStats: () => invoke('stats:get'),
   getBookDisplay: (bookId) => invoke('book:get-display', bookId),
   setBookDisplay: (bookId, patch) => invoke('book:set-display', bookId, patch),
   resetBookDisplay: (bookId) => invoke('book:reset-display', bookId),

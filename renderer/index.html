@@ -28,6 +28,11 @@
         </div>
       </header>
       <div class="shelf-body">
+        <div id="shelf-stats" class="shelf-stats hidden">
+          <span id="shelf-stats-today" class="shelf-stats-today"></span>
+          <span id="shelf-stats-goal" class="shelf-stats-goal"></span>
+          <span class="goal-track" id="shelf-goal-track"><i id="shelf-goal-fill"></i></span>
+        </div>
         <div id="shelf-continue" class="shelf-continue hidden">
           <button id="btn-continue-writing" class="continue-writing" type="button" title="打开这本书，回到上次编辑的章节">
             <span class="continue-label">继续上次写作</span>
@@ -97,6 +102,10 @@
           <span class="dot ok" id="status-dot"></span>
           <span id="status-text">已保存</span>
           <span class="spacer"></span>
+          <span id="status-stats" class="status-stats hidden">
+            <span id="status-stats-text"></span>
+            <span class="goal-track" id="status-goal-track"><i id="status-goal-fill"></i></span>
+          </span>
           <span id="char-count" class="muted small"></span>
           <span class="kbd">Ctrl+G 跳章</span>
           <span class="kbd">Ctrl+S 保存</span>
@@ -400,6 +409,23 @@
           <option value="grid">网格纸 · 纹理</option>
         </select>
       </label>
+      <div class="field-group" id="settings-stats-group">写作统计</div>
+      <label class="field" id="settings-daily-goal-field">
+        <span>每日写作目标（0 = 不设目标；只统计按下保存时写下的字数，不包含还没保存的内容）</span>
+        <div class="field-row">
+          <input id="settings-daily-goal" class="text-input" type="number" min="0" max="1000000" step="100" value="0" />
+          <span id="settings-goal-state" class="muted small"></span>
+        </div>
+      </label>
+      <div class="field" id="settings-stats-chart-field">
+        <span>近 30 天（含今天，最右一根是今天）</span>
+        <div id="settings-stats-summary" class="muted small"></div>
+        <div id="settings-stats-chart" class="stats-chart"></div>
+      </div>
+      <p class="muted small" id="settings-stats-hint">
+        统计只存在应用配置目录的 <code>stats.json</code>，不写进书库、不改章节 txt；只统计保存动作带来的新增字数，
+        删字不会倒扣当天进度。旧配置没有目标字段时按「不设目标」处理。
+      </p>
       <div class="field-group">数据安全</div>
       <div class="field" id="settings-snapshot-field">
         <label class="check-row">

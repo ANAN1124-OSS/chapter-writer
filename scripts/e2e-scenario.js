@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const chaptersLib = require('../core/chapters');
 const exporter = require('../core/exporter');
+const statsLib = require('../core/stats');
 
 module.exports = async function runScenario(ctx) {
   const { win, clipboard, config, userData, storage, sleep, exec, getCloseReady, resetCloseReady } = ctx;
@@ -3028,6 +3029,351 @@ module.exports = async function runScenario(ctx) {
     '每日快照：关掉后当天快照目录没有多出新章文件',
     (await fs.readdir(snapshotTodayDir)).length === 2
   );
+
+  // 44. 每日字数统计 + 写作目标（v0.6-3，提案 3.2）
+  // 只统计「保存动作」带来的正字数增量；统计文件在 userData/stats.json，绝不写进书库；
+  // 目标可选（0 = 不设目标），旧配置缺字段按默认 0。
+  const statsPath = path.join(userData, 'stats.json');
+  const readStatsDisk = async () => {
+    try {
+      return JSON.parse(await fs.readFile(statsPath, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const readConfigDisk = async () => JSON.parse(await fs.readFile(path.join(userData, 'config.json'), 'utf8'));
+
+  const statsConfigBefore = await exec('window.api.getConfig()');
+  check(
+    '每日统计：旧配置没有 dailyGoal 时按不设目标启动',
+    statsConfigBefore && statsConfigBefore.ok && statsConfigBefore.data.dailyGoal === 0,
+    statsConfigBefore && statsConfigBefore.data && statsConfigBefore.data.dailyGoal
+  );
+
+  const statsInitial = await exec('window.__cwTest.refreshStats()');
+  check(
+    '每日统计：摘要是今天 + 近 30 天，未设目标时 0%',
+    statsInitial &&
+      statsInitial.day === statsLib.localDayKey() &&
+      statsInitial.goal === 0 &&
+      statsInitial.goalPercent === 0 &&
+      statsInitial.goalMet === false &&
+      statsInitial.days.length === 30 &&
+      statsInitial.days[29].day === statsInitial.day,
+    statsInitial && {
+      day: statsInitial.day,
+      goal: statsInitial.goal,
+      days: statsInitial.days && statsInitial.days.length
+    }
+  );
+  const statsTodayBefore = statsInitial.todayChars;
+  const statsMeta = await storage.readBookMeta(historyBookPath);
+  const statsCurrentId = await exec('window.__cwTest.currentChapterId()');
+  const statsChapter = statsMeta.chapters.find((chapter) => chapter.id === statsCurrentId);
+  check('每日统计：当前章在书目里（用于算增量）', Boolean(statsChapter), statsCurrentId);
+  const statsDiskBefore = await readStatsDisk();
+  const statsBookBefore =
+    statsDiskBefore && statsDiskBefore.days && statsDiskBefore.days[statsInitial.day]
+      ? statsDiskBefore.days[statsInitial.day].books[statsMeta.id] || 0
+      : 0;
+
+  const statsBaseText = (await storage.loadChapterText(historyBookPath, statsChapter.file)).text;
+  const statsAppend1 = '第一次增加五字';
+  await exec(`window.__cwTest.setText(${JSON.stringify(statsBaseText + statsAppend1)})`);
+  const statsAfterTyping = await exec('window.__cwTest.refreshStats()');
+  check(
+    '每日统计：未保存的输入不计入今天',
+    statsAfterTyping.todayChars === statsTodayBefore,
+    { before: statsTodayBefore, after: statsAfterTyping.todayChars }
+  );
+  const statsSave1 = await exec('window.__cwTest.save()');
+  const statsDelta1 = chaptersLib.countChars(statsAppend1);
+  check(
+    '每日统计：保存后按正字数增量累计',
+    statsSave1 &&
+      statsSave1.ok &&
+      statsSave1.data.statsDelta === statsDelta1 &&
+      statsSave1.data.stats.todayChars === statsTodayBefore + statsDelta1,
+    statsSave1 && statsSave1.data && { delta: statsSave1.data.statsDelta, stats: statsSave1.data.stats }
+  );
+  const statsTodayAfter1 = statsTodayBefore + statsDelta1;
+  const statsDisk1 = await readStatsDisk();
+  check(
+    '每日统计：stats.json 落在应用配置目录，按书分桶',
+    statsDisk1 &&
+      statsDisk1.version === 1 &&
+      statsDisk1.days[statsInitial.day].books[statsMeta.id] === statsBookBefore + statsDelta1,
+    statsDisk1 && statsDisk1.days && statsDisk1.days[statsInitial.day]
+  );
+  check(
+    '每日统计：书库/书内不出现 stats.json',
+    !(await fileExists(path.join(historyBookPath, 'stats.json'))) &&
+      !(await fileExists(path.join(booksRoot, 'stats.json')))
+  );
+
+  // 44a. 删字不倒扣；删完再写只累计这次新增
+  await exec("window.__cwTest.setText('短')");
+  const statsSaveShrink = await exec('window.__cwTest.save()');
+  check(
+    '每日统计：删字不扣今天进度（增量 0，没有负数）',
+    statsSaveShrink &&
+      statsSaveShrink.ok &&
+      statsSaveShrink.data.statsDelta === 0 &&
+      statsSaveShrink.data.stats.todayChars === statsTodayAfter1,
+    statsSaveShrink && statsSaveShrink.data && statsSaveShrink.data.stats
+  );
+  const statsAppend2 = '再写三个字';
+  await exec(`window.__cwTest.setText(${JSON.stringify(`短${statsAppend2}`)})`);
+  const statsSave2 = await exec('window.__cwTest.save()');
+  const statsDelta2 = chaptersLib.countChars(statsAppend2);
+  check(
+    '每日统计：删后再写只累计这次的新增',
+    statsSave2 &&
+      statsSave2.ok &&
+      statsSave2.data.statsDelta === statsDelta2 &&
+      statsSave2.data.stats.todayChars === statsTodayAfter1 + statsDelta2,
+    statsSave2 && statsSave2.data && statsSave2.data.stats
+  );
+  const statsTodayAfter2 = statsTodayAfter1 + statsDelta2;
+
+  // 44b. 书架顶部今日字数 + 设置里的目标和近 30 天柱状图
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const statsShelfText = await exec('window.__cwTest.shelfStatsText()');
+  check(
+    '每日统计：书架顶部显示今天字数',
+    (await exec('window.__cwTest.shelfStatsVisible()')) === true && statsShelfText.includes('今天 +'),
+    statsShelfText
+  );
+
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '每日统计：设置里默认 0（不设目标），写作统计可见',
+    (await exec('window.__cwTest.dailyGoalSettings()')) === 0 &&
+      (await exec('window.__cwTest.statsSettingsVisible()')) === true
+  );
+  check('每日统计：近 30 天柱状图有 30 根柱子', (await exec('window.__cwTest.statsChartBarCount()')) === 30);
+  const statsHeights = await exec('window.__cwTest.statsChartBarHeights()');
+  check(
+    '每日统计：今天那根柱子有高度，空白天为 0',
+    Array.isArray(statsHeights) &&
+      statsHeights.length === 30 &&
+      parseFloat(statsHeights[29]) > 0 &&
+      parseFloat(statsHeights[0]) === 0,
+    statsHeights
+  );
+  const statsChartSummaryBefore = await exec('window.__cwTest.statsChartSummary()');
+  check(
+    '每日统计：柱状图摘要显示今天/近 30 天/未设目标',
+    statsChartSummaryBefore.includes('今天') &&
+      statsChartSummaryBefore.includes('近 30 天') &&
+      statsChartSummaryBefore.includes('未设目标'),
+    statsChartSummaryBefore
+  );
+
+  const statsGoal = statsTodayAfter2 + 100;
+  await exec(`window.__cwTest.setInput('settings-daily-goal', ${statsGoal})`);
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor(`window.api.getConfig().then((r) => r.ok && r.data.dailyGoal === ${statsGoal})`);
+  const statsCfgDisk = await readConfigDisk();
+  check('每日统计：目标真的落进 config.json', statsCfgDisk.dailyGoal === statsGoal, statsCfgDisk.dailyGoal);
+  const statsAfterGoal = await exec('window.__cwTest.statsSummary()');
+  check(
+    '每日统计：目标生效后按今天字数算完成度',
+    statsAfterGoal &&
+      statsAfterGoal.goal === statsGoal &&
+      statsAfterGoal.goalPercent === Math.floor((statsTodayAfter2 / statsGoal) * 100) &&
+      statsAfterGoal.goalMet === false,
+    statsAfterGoal && { goal: statsAfterGoal.goal, percent: statsAfterGoal.goalPercent }
+  );
+  const statsShelfGoal = await exec('window.__cwTest.shelfStatsText()');
+  check(
+    '每日统计：书架显示目标与百分比',
+    statsShelfGoal.includes('目标') && statsShelfGoal.includes('%'),
+    statsShelfGoal
+  );
+  const statsShelfWidth = await exec('window.__cwTest.shelfGoalWidth()');
+  check('每日统计：书架目标进度条有宽度', parseFloat(statsShelfWidth) > 0, statsShelfWidth);
+
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '每日统计：重新打开设置回填目标',
+    (await exec('window.__cwTest.dailyGoalSettings()')) === statsGoal
+  );
+  const statsChartSummaryGoal = await exec('window.__cwTest.statsChartSummary()');
+  check(
+    '每日统计：柱状图摘要带目标',
+    statsChartSummaryGoal.includes('目标') && statsChartSummaryGoal.includes('今天'),
+    statsChartSummaryGoal
+  );
+  await exec('window.__cwTest.closeSettings()');
+
+  // 44c. 写作页状态栏显示今日 / 目标 + 细进度条；按书设置里不显示全局统计项
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const statsStatusText = await exec('window.__cwTest.statusStatsText()');
+  check(
+    '每日统计：状态栏显示今日 / 目标',
+    (await exec('window.__cwTest.statusStatsVisible()')) === true &&
+      statsStatusText.includes('今日') &&
+      statsStatusText.includes('/') &&
+      statsStatusText.includes('字'),
+    statsStatusText
+  );
+  const statsStatusWidth = await exec('window.__cwTest.statusGoalWidth()');
+  check('每日统计：状态栏细进度条有宽度', parseFloat(statsStatusWidth) > 0, statsStatusWidth);
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '每日统计：写作页设置里不显示全局目标/柱状图',
+    (await exec('window.__cwTest.statsSettingsVisible()')) === false
+  );
+  await exec('window.__cwTest.closeSettings()');
+
+  // 44d. 达标：目标 = 今天 + 1，再写 1 个字 → 已达标 / 100%
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const statsGoalMet = statsTodayAfter2 + 1;
+  await exec('window.__cwTest.openSettings()');
+  await exec(`window.__cwTest.setInput('settings-daily-goal', ${statsGoalMet})`);
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor(`window.api.getConfig().then((r) => r.ok && r.data.dailyGoal === ${statsGoalMet})`);
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const statsMeta3 = await storage.readBookMeta(historyBookPath);
+  const statsCurrentId3 = await exec('window.__cwTest.currentChapterId()');
+  const statsChapter3 = statsMeta3.chapters.find((chapter) => chapter.id === statsCurrentId3);
+  const statsText3 = (await storage.loadChapterText(historyBookPath, statsChapter3.file)).text;
+  await exec(`window.__cwTest.setText(${JSON.stringify(`${statsText3}一`)})`);
+  const statsSaveMet = await exec('window.__cwTest.save()');
+  check(
+    '每日统计：达到目标后标记已达标且进度 100%',
+    statsSaveMet &&
+      statsSaveMet.ok &&
+      statsSaveMet.data.stats.todayChars === statsGoalMet &&
+      statsSaveMet.data.stats.goalMet === true &&
+      statsSaveMet.data.stats.goalPercent === 100,
+    statsSaveMet && statsSaveMet.data && statsSaveMet.data.stats
+  );
+  check(
+    '每日统计：达标后状态栏进度条 100%',
+    (await exec('window.__cwTest.statusGoalWidth()')) === '100%',
+    await exec('window.__cwTest.statusGoalWidth()')
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const statsShelfMet = await exec('window.__cwTest.shelfStatsText()');
+  check('每日统计：书架显示已达标', statsShelfMet.includes('已达标'), statsShelfMet);
+
+  // 44e. 目标设为 0 = 关掉：书架/状态栏不再显示目标，但今天字数保留
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setInput('settings-daily-goal', '0')");
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor('window.api.getConfig().then((r) => r.ok && r.data.dailyGoal === 0)');
+  const statsShelfOff = await exec('window.__cwTest.shelfStatsText()');
+  check(
+    '每日统计：目标设为 0 后书架不再显示目标',
+    !statsShelfOff.includes('目标') &&
+      (await exec('window.__cwTest.shelfGoalWidth()')) === '0%' &&
+      statsShelfOff.includes('今天 +'),
+    statsShelfOff
+  );
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(historyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const statsStatusOff = await exec('window.__cwTest.statusStatsText()');
+  check(
+    '每日统计：目标关掉后状态栏只显示今天字数',
+    statsStatusOff.includes('今日') && !statsStatusOff.includes('/'),
+    statsStatusOff
+  );
+
+  // 44f. 多本书：同一份 stats.json 按书分桶，今天总字数相加
+  const statsTodayBeforeBook2 = (await exec('window.__cwTest.statsSummary()')).todayChars;
+  await exec("window.__cwTest.newBook('每日统计第二本')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const statsBook2Id = await exec('window.__cwTest.bookId()');
+  const statsBook2Text = '第二本书写三个字';
+  await exec(`window.__cwTest.setText(${JSON.stringify(statsBook2Text)})`);
+  const statsSaveBook2 = await exec('window.__cwTest.save()');
+  const statsBook2Chars = chaptersLib.countChars(statsBook2Text);
+  check(
+    '每日统计：多本书按书分桶、总字数相加',
+    statsSaveBook2 &&
+      statsSaveBook2.ok &&
+      statsSaveBook2.data.stats.todayChars === statsTodayBeforeBook2 + statsBook2Chars,
+    statsSaveBook2 && statsSaveBook2.data && statsSaveBook2.data.stats
+  );
+  const statsDiskBook2 = await readStatsDisk();
+  const statsDayBooks = statsDiskBook2.days[statsLib.localDayKey()].books;
+  check(
+    '每日统计：stats.json 里两本书各自记字数',
+    statsDayBooks[statsBook2Id] === statsBook2Chars &&
+      statsDayBooks[statsMeta.id] >= statsBookBefore + statsDelta1 + statsDelta2 + 1,
+    { book2: statsDayBooks[statsBook2Id], firstBook: statsDayBooks[statsMeta.id] }
+  );
+  check(
+    '每日统计：统计文件只存在 userData（不在书架根目录）',
+    (await fileExists(statsPath)) && !(await fileExists(path.join(booksRoot, 'stats.json')))
+  );
+
+  // 44g. 统计写盘失败不能阻塞正文保存（临时把 stats.json 换成同名目录，原子 rename 必然失败）
+  const statsFailBackup = `${statsPath}.fail-backup`;
+  await fs.rename(statsPath, statsFailBackup);
+  await fs.mkdir(statsPath);
+  let statsFailRestored = false;
+  try {
+    const statsFailTodayBefore = (await exec('window.__cwTest.statsSummary()')).todayChars;
+    const statsFailBookPath = await exec('window.__cwTest.bookPathValue()');
+    const statsFailText = '统计写盘失败也要保存正文';
+    await exec(`window.__cwTest.setText(${JSON.stringify(statsFailText)})`);
+    const statsFailSave = await exec('window.__cwTest.save()');
+    check(
+      '每日统计：统计写盘失败不阻塞正文保存，只把原因带回来',
+      statsFailSave &&
+        statsFailSave.ok === true &&
+        statsFailSave.data.stats === null &&
+        typeof statsFailSave.data.statsError === 'string' &&
+        statsFailSave.data.statsError.length > 0,
+      statsFailSave && statsFailSave.data && {
+        stats: statsFailSave.data.stats,
+        statsError: statsFailSave.data.statsError
+      }
+    );
+    const statsFailMeta = await storage.readBookMeta(statsFailBookPath);
+    const statsFailChapterId = await exec('window.__cwTest.currentChapterId()');
+    const statsFailChapter = statsFailMeta.chapters.find((chapter) => chapter.id === statsFailChapterId);
+    check(
+      '每日统计：统计失败时正文照常落盘',
+      statsFailChapter && (await storage.loadChapterText(statsFailBookPath, statsFailChapter.file)).text === statsFailText,
+      statsFailChapter && statsFailChapter.file
+    );
+    await fs.rm(statsPath, { recursive: true, force: true });
+    await fs.rename(statsFailBackup, statsPath);
+    statsFailRestored = true;
+    const statsRecovered = await exec('window.__cwTest.refreshStats()');
+    check(
+      '每日统计：统计文件恢复后照常读回，失败的那次不虚增内存数字',
+      statsRecovered && statsRecovered.todayChars === statsFailTodayBefore,
+      { before: statsFailTodayBefore, after: statsRecovered && statsRecovered.todayChars }
+    );
+    // 恢复后下一次保存还能继续累计（缓存没有因为失败而前进）
+    const statsAfterFailText = (await storage.loadChapterText(statsFailBookPath, statsFailChapter.file)).text + '一';
+    await exec(`window.__cwTest.setText(${JSON.stringify(statsAfterFailText)})`);
+    const statsAfterFailSave = await exec('window.__cwTest.save()');
+    check(
+      '每日统计：统计写盘恢复后继续正常累计',
+      statsAfterFailSave &&
+        statsAfterFailSave.ok &&
+        statsAfterFailSave.data.stats &&
+        statsAfterFailSave.data.stats.todayChars === statsFailTodayBefore + 1,
+      statsAfterFailSave && statsAfterFailSave.data && statsAfterFailSave.data.stats
+    );
+  } finally {
+    if (!statsFailRestored) {
+      // 检查中途失败时把临时目录换回真正的 stats.json，避免后续复跑/调试遇到坏状态
+      await fs.rm(statsPath, { recursive: true, force: true }).catch(() => {});
+      await fs.rename(statsFailBackup, statsPath).catch(() => {});
+    }
+  }
 
   return { ok: true, checks: checks.length, details: checks };
 };

@@ -37,10 +37,12 @@ const formatLib = require('./core/format');
 const findLib = require('./core/find');
 const jumpLib = require('./core/jump');
 const textMenu = require('./core/textmenu');
+const statsLib = require('./core/stats');
 
 let win = null;
 let configStore = null;
 let config = null;
+let statsStore = null; // 每日字数统计（userData/stats.json，绝不写书库）
 let configWarning = null; // 配置损坏被归档时的提示，界面启动后取一次
 let forceClose = false;
 let closePending = false;
@@ -113,6 +115,12 @@ async function getConfig() {
     if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
   }
   return config;
+}
+
+// 每日统计只存在应用配置目录；首次用到时才建，读写失败不能影响保存正文。
+function getStatsStore() {
+  if (!statsStore) statsStore = statsLib.createStatsStore(app.getPath('userData'));
+  return statsStore;
 }
 
 // ---------- 「继续上次写作」：书架级记忆（只写配置，不碰书库） ----------
@@ -251,6 +259,12 @@ function registerIpc() {
     return config;
   });
 
+  // 每日字数统计摘要：今天多少字 + 近 30 天（含今天）。统计文件在 userData，不在书库。
+  handle('stats:get', async () => {
+    const cfg = await getConfig();
+    return getStatsStore().summary({ goal: cfg.dailyGoal, days: statsLib.DEFAULT_RECENT_DAYS });
+  });
+
   // 每本书的显示设置覆盖（写作页里改的字体/背景/间距/章节栏宽度只影响这本书）
   handle('book:get-display', async (bookId) => {
     await getConfig();
@@ -356,6 +370,19 @@ function registerIpc() {
       const meta = await storage.readBookMeta(bookPath);
       const chapter = meta.chapters.find((c) => c.id === chapterId);
       if (!chapter) throw new storage.StorageError('CHAPTER_NOT_FOUND', '章节不存在（可能已被删除）');
+      // 每日字数的「上次已知值」：优先书目里缓存的正文字符数；缓存缺失（老书/新章）时
+      // 只在这一次读一遍旧文件，保证第一次保存的增量仍然准确。
+      let previousChars = null;
+      if (chapter.chars != null && chapter.chars !== '' && Number.isFinite(Number(chapter.chars))) {
+        previousChars = Math.max(0, Math.round(Number(chapter.chars)));
+      } else {
+        try {
+          const previous = await storage.loadChapterText(bookPath, chapter.file);
+          previousChars = chaptersLib.countChars(previous.text);
+        } catch {
+          previousChars = null; // 旧文件读不到就当「不知道」，这次不计入统计
+        }
+      }
       // 可选每日快照：在写正文之前复制「上一版」。默认关；失败只记原因，绝不阻塞保存。
       let snapshot = { taken: false, reason: 'DISABLED', dir: null, file: chapter.file, bytes: 0, cleanup: null };
       if (cfg.snapshotEnabled) {
@@ -380,6 +407,22 @@ function registerIpc() {
       // 同步章节字数缓存，书架就不用为了算字数去重读整本书
       chapter.chars = result.chars;
       await storage.writeBookMeta(bookPath, meta);
+      // 每日字数统计：只记这次保存带来的正字数增量（删字不扣今天的进度）。
+      // 统计写盘失败绝不影响正文保存，只把原因带回去（界面不提示）。
+      let stats = null;
+      let statsDelta = 0;
+      let statsError = null;
+      try {
+        if (previousChars !== null && result.chars > previousChars) statsDelta = result.chars - previousChars;
+        const recorded = await getStatsStore().record({
+          day: statsLib.localDayKey(),
+          bookId: meta.id,
+          delta: statsDelta
+        });
+        stats = statsLib.summary(recorded.stats, { goal: cfg.dailyGoal });
+      } catch (err) {
+        statsError = err.message;
+      }
       // 保存也算「写作过」：书架「继续上次写作」的时间戳跟着更新（只写配置，不碰书库）
       await rememberRecentBook(bookPath, {
         title: meta.title,
@@ -387,7 +430,7 @@ function registerIpc() {
         chapterIndex: meta.chapters.indexOf(chapter),
         chapterName: chapter.name
       });
-      return { ...result, file: chapter.file, snapshot };
+      return { ...result, file: chapter.file, snapshot, stats, statsDelta, statsError };
     });
   });
 
@@ -839,7 +882,11 @@ async function runAutomation() {
           true
         );
         await sleep(500);
-      } else if (screenshotDialog === 'settings' || screenshotDialog === 'settings-snapshot') {
+      } else if (
+        screenshotDialog === 'settings' ||
+        screenshotDialog === 'settings-snapshot' ||
+        screenshotDialog === 'settings-stats'
+      ) {
         await win.webContents.executeJavaScript(
           `document.getElementById('btn-settings').click();`,
           true
@@ -849,6 +896,13 @@ async function runAutomation() {
           await sleep(300);
           await win.webContents.executeJavaScript(
             `const sc = document.querySelector('.settings-scroll'); if (sc) sc.scrollTop = sc.scrollHeight;`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-stats') {
+          // 开发截图用：滚到「写作统计 / 近 30 天柱状图」
+          await sleep(600);
+          await win.webContents.executeJavaScript(
+            `const el = document.getElementById('settings-stats-group'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         }
