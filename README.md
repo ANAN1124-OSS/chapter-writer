@@ -1,4 +1,4 @@
-# 章节写作器 v0.8
+# 章节写作器 v0.8.5
 
 给写个人自用的 Windows 桌面写作工具：**整本书一键保存、绝不丢稿**；新建章节自动生成「第12章：」这样的标题，你只填名字。
 
@@ -32,7 +32,7 @@
 
 ### 方式一：安装包（推荐，不用命令行）
 
-**下载**：从 [GitHub Releases](https://github.com/ANAN1124-OSS/chapter-writer/releases/latest) 下载 `chapter-writer-0.8.0-win-x64-setup.exe`，或者直接用本机打包产物 `dist\chapter-writer-0.8.0-win-x64-setup.exe`。
+**下载**：从 [GitHub Releases](https://github.com/ANAN1124-OSS/chapter-writer/releases/latest) 下载 `chapter-writer-0.8.5-win-x64-setup.exe`，或者直接用本机打包产物 `dist\chapter-writer-0.8.5-win-x64-setup.exe`。
 
 安装：
 
@@ -449,7 +449,7 @@ chapter-writer/
 └─ 验收清单.md
 ```
 
-## 已知限制（v0.8 仍有意不做）
+## 已知限制（v0.8.5 仍有意不做）
 
 - 安装包**未签名**：首次安装 Windows SmartScreen 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可；自动更新只做了**轻量版**（手动检查 → 打开 GitHub 下载页），**没有自动下载、自动安装、后台静默升级，也没有代码签名**，升级仍需你自己下载安装包覆盖安装
 - 无自动保存、**默认无每日备份**、无云同步、无多端（按作者要求；自动保存只有「新建 / 插入章节前自动保存当前章」这一处例外；每日备份是手动打开的「可选每日快照」，默认关）
