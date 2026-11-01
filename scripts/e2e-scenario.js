@@ -9050,6 +9050,10 @@ module.exports = async function runScenario(ctx) {
   // 键盘：Tab 聚焦「整理」按钮也出卡；Esc 收起
   // 先 blur 再 focus：保证焦点确实发生「变化」（若按钮已经是 activeElement，focus() 是空操作，
   // 不会派发 focusin，这里会白等到超时——2026-11-01 基线首跑偶发过一次）。
+  // 再确认窗口有系统焦点（2026-11-01 v0.9 B-4 第二轮复跑踩到：跑到这里时窗口被别的窗口抢走焦点，
+  // `document.hasFocus()` 为 false，Chromium 不给程序化的 focus() 派发 focusin，
+  // 现场是 `{activeId:"btn-format", hasFocus:false}`——按钮已经是 activeElement，卡片却不出）。
+  await ensureWindowFocus();
   await exec('if (document.activeElement && document.activeElement.blur) document.activeElement.blur()');
   await exec("document.getElementById('btn-format').focus()");
   await waitFor('window.__cwTest.formatCardOpen() === true');
