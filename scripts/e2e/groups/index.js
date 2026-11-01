@@ -11,7 +11,8 @@ const groups = [
   require('./61-ipc-limits'),
   require('./62-common-tools'),
   require('./63-chapter-list-perf'),
-  require('./64-data-safety')
+  require('./64-data-safety'),
+  require('./65-marks-lazy-spans')
 ];
 
 module.exports = groups;

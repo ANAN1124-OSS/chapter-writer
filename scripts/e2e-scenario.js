@@ -7567,9 +7567,15 @@ module.exports = async function runScenario(ctx) {
   );
   await waitFor('window.__cwTest.marksOverlayVisible() === true');
   const marksLegacyAfter = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  // v0.9 A-3：干净行现在合并成文本节点，旧书正文没有超长段 / 标记时 .marks-line 可以一行都没有，
+  // 所以这条不再数 span，改成「影子层真的把正文镜像出来了」——比数节点更贴近要证明的事。
+  const marksLegacyMirror = await exec(
+    "window.__cwTest.marksText().split(String.fromCharCode(0x2423)).join('').split(String.fromCharCode(0xb7)).join('')"
+  );
   check(
     '编辑器小件：没有 schemaVersion 的旧书照常用标记，书目不被补字段',
-    (await exec('window.__cwTest.marksLineCount()')) >= 1 &&
+    marksLegacyMirror.length > 0 &&
+      marksLegacyMirror === (await exec('window.__cwTest.text()')) &&
       marksLegacyAfter === marksLegacyBefore &&
       marksLegacyAfter.includes('"schemaVersion"') === false
   );

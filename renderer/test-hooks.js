@@ -115,6 +115,11 @@
         editorEl.value = String(text == null ? '' : text);
         onEditorInput();
       },
+      // 自检 / 基准用：不碰正文，只跑一次「输入事件处理」，用来量渲染层每次输入的同步开销
+      // （字数统计 / 状态栏 / 窗口标题 / 标记层排期）。A-3 的输入延迟拆账靠它。
+      inputTick() {
+        onEditorInput();
+      },
       text: () => editorEl.value,
       async save() {
         return saveCurrent({ silent: true });

@@ -2192,55 +2192,51 @@
     const longLines = new Set(longResult.items.map((item) => item.line));
     const marks = invisibleResult.items;
     const fragment = document.createDocumentFragment();
-    const lines = text.split('\n');
-    let lineStart = 0;
-    let markIndex = 0;
-    for (let i = 0; i < lines.length; i += 1) {
-      const raw = lines[i];
-      const lineEnd = lineStart + raw.length;
-      if (raw.length) {
-        const lineEl = document.createElement('span');
-        lineEl.className = 'marks-line';
-        lineEl.dataset.line = String(i + 1);
-        if (longLines.has(i + 1)) lineEl.classList.add('long-para');
-        if (state.marks.caretLine === i + 1) lineEl.classList.add('caret-para');
-        let cursor = lineStart;
-        while (cursor < lineEnd) {
-          while (markIndex < marks.length && marks[markIndex].end <= cursor) markIndex += 1;
-          const mark = markIndex < marks.length && marks[markIndex].start < lineEnd ? marks[markIndex] : null;
-          if (!mark) {
-            lineEl.appendChild(document.createTextNode(text.slice(cursor, lineEnd)));
-            cursor = lineEnd;
-            break;
-          }
-          if (mark.start > cursor) {
-            lineEl.appendChild(document.createTextNode(text.slice(cursor, mark.start)));
-            cursor = mark.start;
-            continue;
-          }
-          const markEl = document.createElement('span');
-          const rawMark = text.slice(mark.start, Math.min(mark.end, lineEnd));
-          if (mark.type === 'trailing') {
-            markEl.className = 'mark-trail';
-            markEl.appendChild(document.createTextNode(rawMark));
-            const dot = document.createElement('i');
-            dot.textContent = '·';
-            markEl.appendChild(dot);
-          } else {
-            markEl.className = 'mark-fw';
-            markEl.appendChild(document.createTextNode(rawMark));
-            const glyph = document.createElement('i');
-            glyph.textContent = '␣';
-            markEl.appendChild(glyph);
-          }
-          lineEl.appendChild(markEl);
-          cursor = Math.min(mark.end, lineEnd);
-          markIndex += 1;
-        }
-        fragment.appendChild(lineEl);
+    // v0.9 A-3：不再「一行一个 span」。逐行 span 只是 .long-para / .caret-para 的锚点，
+    // 干净行合并成一个文本节点后，10 万字整层重建从 35.1ms 降到 ~7ms（1500 个行内盒太贵）。
+    // 切法由纯逻辑 editorLogic.marksPlan() 决定（单测覆盖），这里只按计划建节点。
+    for (const segment of editorLogic.marksPlan(text, {
+      longLines,
+      caretLine: state.marks.caretLine,
+      marks
+    })) {
+      if (segment.kind === 'text') {
+        fragment.appendChild(document.createTextNode(segment.text));
+        continue;
       }
-      if (i < lines.length - 1) fragment.appendChild(document.createTextNode('\n'));
-      lineStart = lineEnd + 1;
+      const lineEl = document.createElement('span');
+      lineEl.className = 'marks-line';
+      lineEl.dataset.line = String(segment.line);
+      if (segment.long) lineEl.classList.add('long-para');
+      if (segment.caret) lineEl.classList.add('caret-para');
+      let cursor = 0;
+      for (const mark of segment.marks) {
+        if (mark.start > cursor) {
+          lineEl.appendChild(document.createTextNode(segment.text.slice(cursor, mark.start)));
+          cursor = mark.start;
+        }
+        const markEl = document.createElement('span');
+        const rawMark = segment.text.slice(mark.start, mark.end);
+        if (mark.type === 'trailing') {
+          markEl.className = 'mark-trail';
+          markEl.appendChild(document.createTextNode(rawMark));
+          const dot = document.createElement('i');
+          dot.textContent = '·';
+          markEl.appendChild(dot);
+        } else {
+          markEl.className = 'mark-fw';
+          markEl.appendChild(document.createTextNode(rawMark));
+          const glyph = document.createElement('i');
+          glyph.textContent = '␣';
+          markEl.appendChild(glyph);
+        }
+        lineEl.appendChild(markEl);
+        cursor = mark.end;
+      }
+      if (cursor < segment.text.length) {
+        lineEl.appendChild(document.createTextNode(segment.text.slice(cursor)));
+      }
+      fragment.appendChild(lineEl);
     }
     overlay.appendChild(fragment);
     syncMarksScroll();
@@ -2248,13 +2244,15 @@
     renderLongParaChip();
   }
 
-  // 光标移动时只改 class（不重画整层）：把上一段的高亮摘掉、给新段落加上。
+  // 光标移动时尽量只改 class（不重画整层）：把上一段的高亮摘掉、给新段落加上。
   // 空行（只有空白）不高亮；正文超过 30 万字时 renderEditorMarks 入口已把整层收起（带 hidden），
   // 这里判断 overlay 隐藏就直接跳过——不是在「已经建好的空层」上补高亮。
   function updateCaretParagraph() {
     const overlay = $('editor-marks');
     if (!overlay || overlay.classList.contains('hidden') || !state.marks.caretParagraph) return;
     if (state.view !== 'editor' || !state.bookPath || state.index < 0) return;
+    // 输入法拼字中不重画也不动高亮（中间态会闪）：compositionend 会再整层重画一次。
+    if (state.marks.composing) return;
     const caret = currentCaretParagraph();
     const line = caret && !caret.blank ? caret.line : 0;
     if (line === state.marks.caretLine) return;
@@ -2263,7 +2261,14 @@
     state.marks.caretLine = line;
     if (!line) return;
     const next = overlay.querySelector(`.marks-line[data-line="${line}"]`);
-    if (next) next.classList.add('caret-para');
+    if (next) {
+      next.classList.add('caret-para');
+      return;
+    }
+    // v0.9 A-3：干净行现在合并成文本节点（不再一行一个 span），光标移到这种行时没有现成的
+    // span 可以挂 class —— 整层重建一次（重建后这一行就是 span）。10 万字实测约 8.7ms，
+    // 只在光标跨到「本次没被标记的行」时发生；同一行内继续打字仍然是 O(1) 改 class。
+    renderEditorMarks();
   }
 
   function longParagraphsTitle() {

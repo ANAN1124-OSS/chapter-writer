@@ -165,6 +165,111 @@ function benchScenario(cfg) {
       );
     }
 
+    // ---------- A-3 编辑器手感（都要求在 10 万字大章上量，先确认真的在那章） ----------
+    const onLongChapter = Number.isFinite(longIndex) && T.state.index === longIndex;
+    if (onLongChapter) {
+      // 6b) 输入延迟：真的插一个字（浏览器原生插入 → input 事件 → 渲染层 → 布局）。
+      //     为什么用 document.execCommand('insertText')：它走浏览器真实输入路径、会派发 input
+      //     事件，和执行一次键入最接近；setRangeText 不派发事件，要自己补 dispatchEvent。
+      //     光标位置在 prepare 里摆好（不计时），插入点固定在正文靠前的位置，样本之间口径一致。
+      const caretAt = Math.min(1200, Math.max(0, document.getElementById('editor').value.length - 10));
+      await measure(
+        '输入延迟（10 万字大章，插 1 字）',
+        async () => {
+          const ta = document.getElementById('editor');
+          ta.focus();
+          ta.setSelectionRange(caretAt, caretAt);
+        },
+        async () => {
+          const ta = document.getElementById('editor');
+          const before = ta.value.length;
+          let inserted = false;
+          try {
+            inserted = document.execCommand('insertText', false, '字');
+          } catch {
+            inserted = false;
+          }
+          // execCommand 在窗口没有系统焦点时可能拒绝执行：退回「改值 + 手动派发 input」，
+          // 两种路径都经过同一个 onEditorInput，量到的仍是「插入 + 输入处理 + 布局」。
+          if (!inserted || ta.value.length === before) {
+            ta.setRangeText('字', caretAt, caretAt, 'end');
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return ta.value.length;
+        },
+        {
+          note:
+            '插入 1 个字符到正文第 ' +
+            caretAt +
+            ' 字处：浏览器插入 + input 事件 + 字数 / 状态栏 / 标记层排期 + 布局；detail = 插入后正文长度'
+        }
+      );
+
+      // 6c) 输入处理（不含插入）：正文一个字节不动，只让渲染层跑一次输入处理。
+      //     和 6b 相减就是「浏览器自己插入 + 布局」那一段，用来判断瓶颈在自己还是在浏览器。
+      await measure(
+        '输入处理（不含插入）',
+        null,
+        async () => {
+          T.inputTick();
+        },
+        { note: '只跑 onEditorInput：字数统计 / 状态栏 / 窗口标题 / 标记层排期（正文不变）' }
+      );
+
+      // 6d) 标记层重画（三开关全开）：打字停顿后那一笔的真实成本。
+      //     setMarksToggle 每次调用都会同步重画整层（哪怕开关值没变），所以：
+      //     prepare 把三个开关都打开（不计时，可能连着重画几次），action 只对**已经打开**的
+      //     caretParagraph 再调一次 → 一次调用 = 一次完整重建，样本之间不会叠加。
+      const marksOn = T.marksFlags();
+      await measure(
+        '标记层重画（10 万字，三开关全开）',
+        async () => {
+          for (const name of ['invisibles', 'longParagraphs', 'caretParagraph']) {
+            if (!T.marksFlags()[name]) T.setMarksToggle(name, true);
+          }
+        },
+        async () => {
+          T.setMarksToggle('caretParagraph', true); // 已经开着：只触发一次重画
+          return T.marksLineCount();
+        },
+        {
+          times: Math.max(3, runs),
+          note: '三开关全开 + 10 万字：一次完整的标记层重建（正文镜像 + 标记 + 长段黄线）；detail = 行 span 数'
+        }
+      );
+
+      // 6e) 标记层滚动同步：滚动一格时影子层要跟着对齐（syncMarksScroll + 长段黄线重定位）。
+      //     这是「滚动跟不跟手」的直接指标；detail 带两个 scrollTop 与镜像行数。
+      await measure(
+        '标记层滚动同步',
+        null,
+        async () => {
+          const ta = document.getElementById('editor');
+          const target = Math.min(900, Math.max(1, ta.scrollHeight - ta.clientHeight));
+          T.setEditorScroll(target);
+          const metrics = T.marksMetrics();
+          return {
+            editorTop: metrics.editorScrollTop,
+            overlayTop: metrics.overlayScrollTop,
+            scrollLocked: metrics.scrollLocked,
+            lines: T.marksLineCount()
+          };
+        },
+        { note: '滚动一格时影子层跟随 + 长段黄线重定位；detail = 两个 scrollTop 与镜像行数' }
+      );
+
+      // 采样会不停往正文插字 / 开关标记层：量完复原（关标记、回滚到本章原文），
+      // 免得污染后面「章节栏渲染」那一项。
+      for (const name of ['invisibles', 'longParagraphs', 'caretParagraph']) {
+        T.setMarksToggle(name, Boolean(marksOn[name]));
+      }
+      const neighbor = longIndex === 0 ? Math.min(1, total - 1) : longIndex - 1;
+      if (neighbor !== longIndex) {
+        await T.switchTo(neighbor, 'discard');
+        await T.switchTo(longIndex, 'discard');
+      }
+    }
+
     // 7) 章节栏重渲染：折叠第 1 卷（只渲染其余章）→ 展开（整表重建）。
     //    这是真实交互（点分卷标题），只改内存里的折叠状态，不写书目。
     const volumes =

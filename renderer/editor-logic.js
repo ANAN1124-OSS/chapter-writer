@@ -342,6 +342,84 @@
     return hours > 0 ? `${hours}:${pad2(minutes)}:${pad2(seconds)}` : `${Math.floor(total / 60)}:${pad2(seconds)}`;
   }
 
+  // 影子层（#editor-marks）的「节点计划」：把正文切成若干段，只有真需要样式的行才单独成
+  // 一个 span，其余连续的行合并成一个文本节点。
+  //
+  // 为什么要这样切（v0.9 A-3 实测）：以前是「一行一个 <span class="marks-line">」——10 万字 /
+  // 约 1500 行时整层重建要 35.1ms；同一个影子块只放一个文本节点只要 6.5ms（布局本身不贵，
+  // 贵的是 1500 个行内盒）。而逐行 span 只是 .long-para / .caret-para 的锚点，干净行根本不需要。
+  // 现在的规则：超长段落行、当前段落高亮行、含标记的行 → 单独成 span；其它行 → 合并进文本节点。
+  //
+  // 返回 [{ kind: 'text', text } | { kind: 'line', line, text, long, caret, marks }]，
+  // marks 里是**相对本行**的片段：[{ type: 'fullwidth' | 'trailing', start, end }]。
+  // 把每个 segment 的正文按顺序拼起来恒等于原正文（单测钉了这条不变量），所以影子层的换行 /
+  // 行高与编辑区完全一致——只画底色，不改一个字。
+  function marksPlan(text, options) {
+    const source = toText(text);
+    const opts = options || {};
+    const longSet =
+      opts.longLines instanceof Set
+        ? opts.longLines
+        : new Set(Array.isArray(opts.longLines) ? opts.longLines : []);
+    const caretLine = Math.max(0, Math.floor(Number(opts.caretLine) || 0));
+    const marks = Array.isArray(opts.marks) ? opts.marks : [];
+    const lines = source.split('\n');
+    const segments = [];
+    let pending = ''; // 干净行攒着的正文（含行尾换行），凑够一段再输出一个文本节点
+    let lineStart = 0;
+    let markIndex = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const raw = lines[i];
+      const lineEnd = lineStart + raw.length;
+      const line = i + 1;
+      // 已经结束在上一行之前（含正好在行首结束）的标记先跳过；标记不会跨行存但在这一层兜住
+      while (markIndex < marks.length && marks[markIndex].end <= lineStart) markIndex += 1;
+      let probe = markIndex;
+      const lineMarks = [];
+      while (probe < marks.length && marks[probe].start < lineEnd) {
+        const item = marks[probe];
+        const start = Math.max(item.start, lineStart);
+        const end = Math.min(item.end, lineEnd);
+        if (end > start) {
+          lineMarks.push({ type: item.type, start: start - lineStart, end: end - lineStart });
+        }
+        probe += 1;
+      }
+      const isLong = longSet.has(line);
+      const isCaret = caretLine === line;
+      const hasNewline = i < lines.length - 1;
+      if (raw.length && (isLong || isCaret || lineMarks.length)) {
+        if (pending) {
+          segments.push({ kind: 'text', text: pending });
+          pending = '';
+        }
+        segments.push({
+          kind: 'line',
+          line,
+          text: raw,
+          long: isLong,
+          caret: isCaret,
+          marks: lineMarks
+        });
+        // 换行照旧单独一个文本节点（和原来逐行实现一致：换行不属于任何一行的高亮范围）
+        if (hasNewline) segments.push({ kind: 'text', text: '\n' });
+      } else {
+        if (raw.length) pending += raw;
+        if (hasNewline) pending += '\n';
+      }
+      lineStart = lineEnd + 1;
+    }
+    if (pending) segments.push({ kind: 'text', text: pending });
+    // 相邻的文本节点合并成一个（干净行、换行、空行都进同一段，少建节点）
+    const merged = [];
+    for (const segment of segments) {
+      const last = merged[merged.length - 1];
+      if (segment.kind === 'text' && last && last.kind === 'text') last.text += segment.text;
+      else merged.push(segment.kind === 'text' ? { kind: 'text', text: segment.text } : segment);
+    }
+    return merged;
+  }
+
   // 「超长段落 N 段」那个小标签点一下：从光标往后找下一段，到末尾就绕回第一段
   function nextLongParagraph(items, position) {
     if (!Array.isArray(items) || !items.length) return null;
@@ -372,6 +450,7 @@
     longParagraphs,
     marksTooLarge,
     invisibleMarks,
+    marksPlan,
     compareChapterChars,
     formatCharsShort,
     formatDuration,
