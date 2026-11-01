@@ -41,7 +41,6 @@ const FULL_VALIDATE_INTERVAL_MS = 10000; // 后台深度校验的节流（外部
 // 搜索自身不做逐章 stat（太慢），但距上次深度校验超过 1 分钟时会顺带做一次兜底校验，
 // 保证「一直在书架搜、不回书架」也能发现外部改过的 txt。
 const SEARCH_DEEP_INTERVAL_MS = 60000;
-const SAVE_DEBOUNCE_MS = 2500;
 const PROGRESS_INTERVAL_MS = 150;
 
 function nowIso(clock) {
@@ -470,9 +469,6 @@ function createSearchStore(options = {}) {
   const validateIntervalMs = Number.isFinite(options.validateIntervalMs)
     ? Math.max(0, options.validateIntervalMs)
     : FULL_VALIDATE_INTERVAL_MS;
-  const saveDebounceMs = Number.isFinite(options.saveDebounceMs)
-    ? Math.max(0, options.saveDebounceMs)
-    : SAVE_DEBOUNCE_MS;
 
   let index = emptyIndex('');
   let loaded = false;
@@ -482,7 +478,6 @@ function createSearchStore(options = {}) {
   let lastFullValidateAt = 0;
   let lastProgress = null;
   let lastRun = null;
-  let saveTimer = null;
   let savePromise = Promise.resolve();
   let lastSaveError = null;
   const dirtyBooks = new Set();
@@ -550,20 +545,10 @@ function createSearchStore(options = {}) {
     }
   }
 
-  function scheduleSave(delay = saveDebounceMs) {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      savePromise = savePromise.then(saveNow, saveNow).catch(() => false);
-    }, Math.max(0, delay));
-    if (saveTimer.unref) saveTimer.unref();
-  }
-
+  // 落盘只在 flush() 里串行做（保存失败只记 lastSaveError、不影响搜索）。
+  // 以前这里还有一个 scheduleSave() 做防抖延迟写，但从来没有人调用它（v0.9 B-4 死代码扫描
+  // 扫出来，连它的 saveDebounceMs 选项一起删掉了）——现在写索引只有 flush() 这一条路径。
   async function flush() {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-    }
     savePromise = savePromise.then(saveNow, saveNow).catch(() => false);
     await savePromise;
     return status();

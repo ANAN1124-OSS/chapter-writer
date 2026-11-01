@@ -120,11 +120,6 @@ function createSession(browserWin) {
   return session;
 }
 
-function sessionOfWindow(browserWin) {
-  if (!browserWin || browserWin.isDestroyed()) return null;
-  return windowSessions.get(browserWin.id) || null;
-}
-
 function sessionOfSender(event) {
   if (!event || !event.sender) return null;
   return webContentsSessions.get(event.sender.id) || null;
@@ -449,11 +444,9 @@ function fail(err, channel) {
   return { ok: false, code: described.code, message: described.message };
 }
 
-// 只接受来自本应用管理的窗口的 IPC（防止将来引入 webview / 远程内容后越权）
-function isTrustedSender(event) {
-  return Boolean(sessionOfSender(event));
-}
-
+// 只接受来自本应用管理的窗口的 IPC（防止将来引入 webview / 远程内容后越权）：
+// 判定在 handle() 里做（sessionOfSender(event) 为空就回 BAD_SENDER），
+// 以前那个单独包一层 Boolean() 的 isTrustedSender() 没有任何调用点，v0.9 B-4 删掉了。
 function runInWindowFlow(session, fn) {
   return ipcFlow.run({ windowId: session.id }, fn);
 }
