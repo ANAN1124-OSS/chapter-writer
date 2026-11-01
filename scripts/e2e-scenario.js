@@ -7808,7 +7808,12 @@ module.exports = async function runScenario(ctx) {
   // 塞进 #editor-marks（每次按键重建约 1MB 的 DOM 镜像）——现在 renderEditorMarks 入口直接整层收起。
   await exec('window.__cwTest.clearToasts()');
   await exec("window.__cwTest.setText('长'.repeat(300001))");
-  await sleep(250);
+  // 标记层渲染是 80ms 防抖的 setTimeout；窗口被遮挡时 Chromium 会把后台定时器节流到 1s 以上，
+  // 以前固定 sleep(250) 偶发不够（2026-11-01 v0.9 B-2 实测连挂两次：标记层还是上一次 21 行的旧镜像）。
+  // 这里等「超长提示真的弹出来」——那句 toast 只有在 renderEditorMarks 的超长分支里才发，
+  // 所以它出现就等于入口门控跑过、整层已收起。断言一个字没变，只是不再靠猜时间。
+  // （不能等 marksCaretTooLarge：光标移动时 currentCaretParagraph 也会把它置 true，不等价。）
+  await waitFor('window.__cwTest.toasts().length === 1', 8000);
   const marksTooLargeToasts = await exec('window.__cwTest.toasts()');
   check(
     '标记层超长门控：正文超过 30 万字时整层镜像不建（只开当前段落高亮也不建），正文照常可编辑',
@@ -7846,7 +7851,8 @@ module.exports = async function runScenario(ctx) {
       (await exec('window.__cwTest.marksCaretParaCount()')) === 1
   );
   await exec("window.__cwTest.setText('长'.repeat(300001))");
-  await sleep(250);
+  // 同上：等第二句超长提示出现（同样只有入口门控会发），不靠固定 sleep
+  await waitFor('window.__cwTest.toasts().length === 2', 8000);
   check(
     '标记层超长门控：回到上限以内后再次超长会重新提示一次（不是永久静音）',
     (await exec('window.__cwTest.toasts()')).length === 2 &&
