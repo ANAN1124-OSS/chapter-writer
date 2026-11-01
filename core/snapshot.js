@@ -2,16 +2,14 @@
 // 这里不读不写文件系统（复制 / 清理在 core/storage.js，必须原子写、只在保存时发生），
 // 方便单测覆盖日期边界与「只认自己生成的目录」这条安全规则。
 
+const { pad2 } = require('./common');
+
 const SNAPSHOT_PREFIX = '快照-';
 const DEFAULT_KEEP_DAYS = 7;
 const MIN_KEEP_DAYS = 1;
 const MAX_KEEP_DAYS = 90;
 // 目录名：快照-YYYYMMDD（本地日期，一天一个目录）
 const SNAPSHOT_DIR_RE = /^快照-(\d{4})(\d{2})(\d{2})$/;
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
 
 function toDate(value) {
   const date = value instanceof Date ? value : new Date(value == null ? Date.now() : value);

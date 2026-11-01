@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { atomicWriteFile, writeJsonAtomic, stripBom } = require('./atomic');
+const { pad2 } = require('./common');
 const chaptersLib = require('./chapters');
 const findLib = require('./find');
 const formatLib = require('./format');
@@ -662,8 +663,7 @@ async function updateBookInfo(bookPath, patch = {}) {
 }
 
 function timestampForFile(date = new Date()) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}-${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
 }
 
 async function moveToTrash(bookPath, file) {

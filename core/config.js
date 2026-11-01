@@ -91,7 +91,10 @@ const DEFAULTS = Object.freeze({
   findBookmarks: []
 });
 
-function clampInt(value, min, max, fallback) {
+// 四舍五入的整数夹紧（和 core/common.js 的 clampInt 不是一件事：那个是向下取整、
+// 参数是 [下限, 上限] 数组）。这里保留自己的参数顺序，因为 12 个调用点都是「常量下限 + 常量上限 + 默认值」；
+// v0.9 B-3 把名字改清楚，避免和公共 clampInt 混在一起。
+function clampRoundedInt(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.round(n)));
@@ -117,9 +120,9 @@ function sanitizeBookDisplayEntry(raw) {
   if (has('editorCustomFontName')) {
     out.editorCustomFontName = typeof raw.editorCustomFontName === 'string' ? raw.editorCustomFontName.trim() : '';
   }
-  if (has('editorFontSize')) out.editorFontSize = clampInt(raw.editorFontSize, 12, 30, DEFAULTS.editorFontSize);
+  if (has('editorFontSize')) out.editorFontSize = clampRoundedInt(raw.editorFontSize, 12, 30, DEFAULTS.editorFontSize);
   if (has('editorSidebarWidth')) {
-    out.editorSidebarWidth = clampInt(raw.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
+    out.editorSidebarWidth = clampRoundedInt(raw.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
   }
   if (has('editorLineHeight')) {
     out.editorLineHeight = clampFloat(raw.editorLineHeight, 1.2, 3, DEFAULTS.editorLineHeight);
@@ -130,10 +133,10 @@ function sanitizeBookDisplayEntry(raw) {
   if (has('editorPageWidth')) {
     const width = Number(raw.editorPageWidth);
     out.editorPageWidth = Number.isFinite(width) && width > 0
-      ? clampInt(width, 600, 1600, DEFAULTS.editorPageWidth)
+      ? clampRoundedInt(width, 600, 1600, DEFAULTS.editorPageWidth)
       : 0;
   }
-  if (has('editorPaddingX')) out.editorPaddingX = clampInt(raw.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
+  if (has('editorPaddingX')) out.editorPaddingX = clampRoundedInt(raw.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
   if (has('editorPaper')) {
     out.editorPaper = PAPER_THEMES.includes(raw.editorPaper) ? raw.editorPaper : DEFAULTS.editorPaper;
   }
@@ -174,7 +177,7 @@ function sanitizeLastBook(raw) {
     path: bookPath,
     title,
     chapterId,
-    chapterIndex: clampInt(raw.chapterIndex, 0, 1000000, 0),
+    chapterIndex: clampRoundedInt(raw.chapterIndex, 0, 1000000, 0),
     chapterName,
     at: Number.isFinite(at) && at > 0 ? Math.round(at) : 0
   };
@@ -188,9 +191,9 @@ function sanitize(raw) {
   }
 
   cfg.editorFont = FONTS.includes(cfg.editorFont) ? cfg.editorFont : DEFAULTS.editorFont;
-  cfg.editorFontSize = clampInt(cfg.editorFontSize, 12, 30, DEFAULTS.editorFontSize);
+  cfg.editorFontSize = clampRoundedInt(cfg.editorFontSize, 12, 30, DEFAULTS.editorFontSize);
   // 章节栏宽度（拖动分隔条调整，双击恢复默认）
-  cfg.editorSidebarWidth = clampInt(cfg.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
+  cfg.editorSidebarWidth = clampRoundedInt(cfg.editorSidebarWidth, 180, 800, DEFAULTS.editorSidebarWidth);
 
   // 自定义字体：路径只做基本清洗，选中的字体没了会回落到内置字体
   cfg.editorCustomFontPath = typeof cfg.editorCustomFontPath === 'string' ? cfg.editorCustomFontPath.trim() : '';
@@ -202,9 +205,9 @@ function sanitize(raw) {
   cfg.editorLetterSpacing = clampFloat(cfg.editorLetterSpacing, 0, 0.2, DEFAULTS.editorLetterSpacing);
   const pageWidth = Number(cfg.editorPageWidth);
   cfg.editorPageWidth = Number.isFinite(pageWidth) && pageWidth > 0
-    ? clampInt(pageWidth, 600, 1600, DEFAULTS.editorPageWidth)
+    ? clampRoundedInt(pageWidth, 600, 1600, DEFAULTS.editorPageWidth)
     : 0;
-  cfg.editorPaddingX = clampInt(cfg.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
+  cfg.editorPaddingX = clampRoundedInt(cfg.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
   cfg.editorPaper = PAPER_THEMES.includes(cfg.editorPaper) ? cfg.editorPaper : DEFAULTS.editorPaper;
   // 当前段落高亮（v0.8-10b）：旧配置没有这两个键 = 关 / 跟随主题，行为和以前完全一样。
   cfg.caretParagraph = cfg.caretParagraph === true;
@@ -250,8 +253,8 @@ function sanitize(raw) {
     cfg.windowBounds = {
       x: Number.isFinite(Number(b.x)) ? Math.round(Number(b.x)) : DEFAULTS.windowBounds.x,
       y: Number.isFinite(Number(b.y)) ? Math.round(Number(b.y)) : DEFAULTS.windowBounds.y,
-      width: clampInt(b.width, 960, 4000, DEFAULTS.windowBounds.width),
-      height: clampInt(b.height, 620, 3000, DEFAULTS.windowBounds.height)
+      width: clampRoundedInt(b.width, 960, 4000, DEFAULTS.windowBounds.width),
+      height: clampRoundedInt(b.height, 620, 3000, DEFAULTS.windowBounds.height)
     };
   } else {
     cfg.windowBounds = { ...DEFAULTS.windowBounds };

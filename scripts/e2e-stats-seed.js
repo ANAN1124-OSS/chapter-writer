@@ -5,16 +5,13 @@
 // 日期全部按运行时本机日期算：种子月 = 两个月前（避开「今天 / 近 30 天」的既有断言），
 // 昨天固定 150 字，用来验证「今天还没写时连续天数不中断 / 今天写了变 2 天」。
 const statsLib = require('../core/stats');
+const { pad2 } = require('../core/common');
 
 const SEED_BOOK_ID = 'e2e-stats-seed';
 const MONTH_OFFSET = -2;
 const SEED_DAYS_OF_MONTH = [5, 6, 7];
 const SEED_CHARS = [120, 80, 200];
 const YESTERDAY_CHARS = 150;
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
 
 function buildSeed(now = new Date()) {
   const todayKey = statsLib.localDayKey(now);

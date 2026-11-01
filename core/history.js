@@ -4,6 +4,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { stripBom } = require('./atomic');
+const { pad2 } = require('./common');
 
 const TRASH_DIR = '_trash';
 const BOOK_BAK = '书目.json.bak';
@@ -62,10 +63,6 @@ class HistoryError extends Error {
     this.name = 'HistoryError';
     this.code = code;
   }
-}
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
 }
 
 // 目录名里的时间戳是 moveToTrash/uniqueTrashDir 生成的本地时间：YYYY-MM-DD-HHMMSS[-序号]。

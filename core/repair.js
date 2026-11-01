@@ -2,14 +2,14 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { stripBom } = require('./atomic');
+const { pad2 } = require('./common');
 const chaptersLib = require('./chapters');
 const schemaLib = require('./schema');
 const conflictLib = require('./conflict');
 const storage = require('./storage');
 
 function stampForBackup(date = new Date()) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}-${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
 }
 
 async function archiveCorruptMeta(bookPath) {

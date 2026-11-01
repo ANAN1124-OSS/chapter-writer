@@ -9,6 +9,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { atomicWriteFile, stripBom } = require('./atomic');
+const { pad2 } = require('./common');
 
 const FRAGMENT_DIR_NAME = '_碎片';
 const NAME_RE = /^(\d{4})-(\d{2})-(\d{2})-(\d+)\.txt$/;
@@ -25,10 +26,6 @@ class FragmentError extends Error {
     this.name = 'FragmentError';
     this.code = code;
   }
-}
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
 }
 
 // 本机时区的日期戳（YYYY-MM-DD）；坏日期退回「现在」，保证永远是合法文件名。

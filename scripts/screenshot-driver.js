@@ -6,10 +6,8 @@
 // 约束：本文件不 require electron（窗口 / app / 剪贴板 / 文件系统全部由 host 传入），
 // 因此单元测试可以直接 require 它（tests/screenshot-driver.test.js）。
 
-// 与 main.js 的同名小工具同语义（setTimeout）；本文件要能脱离主进程单独 require，所以自带一份。
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// sleep 用 core/common.js 的同一份实现（纯逻辑、不 require electron），本文件仍能脱离主进程单独 require。
+const { sleep } = require('../core/common');
 
 async function waitForRenderer(win, expr, timeout = 12000) {
   const startedAt = Date.now();

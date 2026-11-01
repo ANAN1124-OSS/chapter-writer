@@ -11,6 +11,9 @@
   // 章节标题 / 编号 / 文件名净化 / 分卷等纯逻辑，core/chapters.js 里、Node 单测覆盖；
   // UMD 加载后挂成 window.CWChapters，渲染层不再自己复制一套「第N章：」规则
   // （v0.8.6 R3，代码审计 F6：以前界面不认书目里的 titleTemplate，和导出 / 复制不一致）。
+  // 跨模块公共小工具（pad2 / clampInt / sleep），core/common.js 里、Node 与渲染层共用，
+  // index.html 里排在最前面（v0.9 B-3：不再各模块各抄一份）。
+  const commonLib = window.CWCommon;
   const chaptersLib = window.CWChapters;
   // 编辑器小件的纯逻辑（选中字数 / 段落导航 / 超长段落 / 不可见字符 / 章节字数对比），
   // 在 editor-logic.js 里、Node 单测覆盖；这里只负责显示和事件。
@@ -51,7 +54,7 @@
   const WRITE_TIMER_FLUSH_MS = 30000;
 
   // ---------- 小工具 ----------
-  const pad2 = (n) => String(n).padStart(2, '0');
+  const pad2 = commonLib.pad2;
 
   function formatClock(date) {
     if (!date) return '';

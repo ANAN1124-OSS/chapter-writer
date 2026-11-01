@@ -3,7 +3,7 @@
  * 为什么要单独一个文件：这些计算（选中字数、段落导航、超长段落、不可见字符、章节字数对比）
  * 每次按键 / 选区变化都要跑，走 IPC 去主进程太吵；但逻辑又不能只写在 renderer.js 里
  * （那样没法单测）。所以放成「浏览器挂到 window，Node 里可以 require」的模块：
- *   - 渲染层：index.html 先加载 editor-logic.js（window.CWEditorLogic），再加载 renderer.js；
+ *   - 渲染层：index.html 先加载 core/common.js，再加载 editor-logic.js（window.CWEditorLogic），最后 renderer.js；
  *   - 单测：tests/editor-logic.test.js 直接 require('../renderer/editor-logic.js')。
  *
  * 段落定义与「朗读」的 core/tts.js 完全一致（一个非空行 = 一段，首尾空白不算），
@@ -13,12 +13,18 @@
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../core/common'));
   } else if (root) {
-    root.CWEditorLogic = factory();
+    root.CWEditorLogic = factory(root.CWCommon);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (common) {
   'use strict';
+
+  // core/common.js 必须先加载（index.html 里排在最前面）；缺了直接报错，不要悄悄退回旧副本。
+  if (!common || typeof common.clampInt !== 'function' || typeof common.pad2 !== 'function') {
+    throw new Error('CWEditorLogic：core/common.js 没有先加载');
+  }
+  const { clampInt, pad2 } = common;
 
   // 覆盖层最多渲染这么多字符的标记：再长就只给「超长段落」结论、不往 DOM 里塞标记。
   // （正常一章远小于这个数；「整本一章」导入的百万字单章会走到这里。）
@@ -45,12 +51,6 @@
   function toCount(value) {
     const n = Math.round(Number(value));
     return Number.isFinite(n) && n > 0 ? n : 0;
-  }
-
-  function clampInt(value, fallback, range) {
-    const n = Math.floor(Number(value));
-    if (!Number.isFinite(n)) return fallback;
-    return Math.min(Math.max(n, range[0]), range[1]);
   }
 
   function clampIndex(length, value) {
@@ -339,8 +339,7 @@
     const seconds = total % 60;
     const minutes = Math.floor(total / 60) % 60;
     const hours = Math.floor(total / 3600);
-    const pad = (n) => String(n).padStart(2, '0');
-    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${Math.floor(total / 60)}:${pad(seconds)}`;
+    return hours > 0 ? `${hours}:${pad2(minutes)}:${pad2(seconds)}` : `${Math.floor(total / 60)}:${pad2(seconds)}`;
   }
 
   // 「超长段落 N 段」那个小标签点一下：从光标往后找下一段，到末尾就绕回第一段

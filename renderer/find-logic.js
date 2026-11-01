@@ -3,7 +3,7 @@
  * 为什么要单独一个文件：当前章的「上一处 / 下一处」和「结果持续高亮」每次按 F3 / 回车都要算，
  * 但这些计算只是数组下标和文字切分，不该走 IPC，也不能只写在 renderer.js 里（那样没法单测）。
  * 所以放成「浏览器挂到 window，Node 里可以 require」的模块：
- *   - 渲染层：index.html 先加载 find-logic.js（window.CWFindLogic），再加载 renderer.js；
+ *   - 渲染层：index.html 先加载 core/common.js，再加载 find-logic.js（window.CWFindLogic），最后 renderer.js；
  *   - 单测：tests/find-logic.test.js 直接 require('../renderer/find-logic.js')。
  *
  * 命中位置由主进程 core/find.js 的 findMatches 提供（字面量查找、不区分大小写可配），
@@ -13,12 +13,18 @@
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../core/common'));
   } else if (root) {
-    root.CWFindLogic = factory();
+    root.CWFindLogic = factory(root.CWCommon);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (common) {
   'use strict';
+
+  // core/common.js 必须先加载（index.html 里排在最前面）；缺了直接报错，不要悄悄退回旧副本。
+  if (!common || typeof common.clampInt !== 'function') {
+    throw new Error('CWFindLogic：core/common.js 没有先加载');
+  }
+  const { clampInt } = common;
 
   // 影子层一次最多画多少处命中：正常一章远小于这个数；病态输入（几百个「的」）也不至于
   // 往 DOM 里塞上万个 span。超过时以当前命中为中心开一个窗口，导航仍然对全部命中有效。
@@ -32,12 +38,6 @@
   function toCount(value) {
     const n = Math.floor(Number(value));
     return Number.isFinite(n) && n >= 0 ? n : null;
-  }
-
-  function clampInt(value, fallback, range) {
-    const n = Math.floor(Number(value));
-    if (!Number.isFinite(n)) return fallback;
-    return Math.min(Math.max(n, range[0]), range[1]);
   }
 
   // 主进程 findMatches 的返回是 [{ index, length }]；这里只信任「非负整数下标 + 至少 1 个字」的项，

@@ -12,15 +12,23 @@
  *
  * 同时被 Node（core/config.js、单测）和渲染层（index.html 里 <script>）使用，
  * 所以写成 UMD：Node 里 require 得到对象，浏览器里挂到 window.CWTemplate。
+ * 日期补零用 core/common.js 的 pad2（v0.9 B-3：不再自留一份）；浏览器里 core/common.js
+ * 必须排在本文件之前，拿不到 window.CWCommon 就直接报错，不退回旧副本。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('./common'));
   } else if (root) {
-    root.CWTemplate = factory();
+    root.CWTemplate = factory(root.CWCommon);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (common) {
   'use strict';
+
+  // core/common.js 必须先加载（index.html 里排在最前面）；缺了直接报错，不要悄悄退回旧副本。
+  if (!common || typeof common.pad2 !== 'function') {
+    throw new Error('CWTemplate：core/common.js 没有先加载');
+  }
+  const { pad2 } = common;
 
   // 模板长度上限：够写「第N章 + 空行 + 分隔线 + 常用开场」，又不至于把整章正文塞进去。
   const MAX_TEMPLATE_LENGTH = 2000;
@@ -43,10 +51,6 @@
   // 目标章是不是「空的」：空串 / 只有空白算空章（新建章节刚建出来就是这种）。
   function isBlankText(text) {
     return typeof text !== 'string' || text.trim() === '';
-  }
-
-  function pad2(value) {
-    return String(value).padStart(2, '0');
   }
 
   // 本地日期（不是 UTC）：和码字日历 / 每日统计的「今天」口径一致。

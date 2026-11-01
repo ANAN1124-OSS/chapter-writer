@@ -15,6 +15,7 @@ const formatLib = require('./format');
 const findLib = require('./find');
 const chaptersLib = require('./chapters');
 const glossaryLib = require('./glossary');
+const { clampInt } = require('./common');
 
 // 报告顺序（同位置时按这个顺序排；结果列表也按规则分组显示）
 const RULE_ORDER = [
@@ -55,12 +56,6 @@ const HAN_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
 const RUN_PUNCT = new Set(['，', '。', '；', '：', '！', '？', '、', '…', '—']);
 const SNIPPET_RADIUS = 18;
 const PARAGRAPH_PREFIX = 24;
-
-function clampInt(value, fallback, range) {
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(n, range[0]), range[1]);
-}
 
 // 旧调用方 / 渲染层传脏值都兜底成默认值，越界自动夹紧
 function sanitizeOptions(raw) {

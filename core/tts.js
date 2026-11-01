@@ -12,6 +12,7 @@
 // 定位约定：start / end 都是「去掉 BOM、CRLF 归一成 \n」之后的字符位置，
 // 与编辑区 textarea 的 value 完全一致，因此可以直接 setSelectionRange(start, end)。
 const chaptersLib = require('./chapters');
+const { clampInt } = require('./common');
 
 const DEFAULT_OPTIONS = Object.freeze({
   maxChunkChars: 160, // 单个 chunk 最多多少字（太长系统语音会吞字 / 卡顿，进度也看不见）
@@ -32,12 +33,6 @@ const SENTENCE_ENDERS = new Set(['。', '！', '？', '!', '?', '；', ';', '…
 const CLOSERS = new Set(['”', '’', '」', '』', '）', ')', '】', ']', '》', '〉', '－', '—']);
 // 硬切长句时优先在这些位置断开（次级标点 + 空白），比直接砍在字中间自然
 const SOFT_BREAKS = new Set(['，', '、', '：', ',', ':', '—']);
-
-function clampInt(value, fallback, range) {
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(n, range[0]), range[1]);
-}
 
 function sanitizeOptions(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};

@@ -17,6 +17,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const errorText = require('./error-text');
+const { pad2 } = require('./common');
 
 const LOG_DIR_NAME = 'logs';
 const FILE_PREFIX = 'chapter-writer';
@@ -42,10 +43,6 @@ const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const CJK_RE = new RegExp(`[\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]{${CJK_RUN},}`, 'g');
 const LOG_NAME_RE = /^chapter-writer-(\d{4}-\d{2}-\d{2})(?:\.(\d{1,3}))?\.log$/;
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
 
 function toDate(value, fallback = new Date()) {
   if (value instanceof Date && Number.isFinite(value.getTime())) return value;

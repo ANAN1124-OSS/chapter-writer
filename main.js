@@ -388,10 +388,6 @@ function sendSearchProgress(info) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ---------- 自动更新轻量版（提案 7.1） ----------
 // 只在作者点「检查更新」时访问一次 GitHub Release API，用 Electron 内置 net.fetch；
 // 不下载、不安装、不写配置、不写书库。网络失败 / 超时由 core/update 转成一句提示，绝不抛错。

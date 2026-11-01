@@ -15,6 +15,7 @@ const path = require('node:path');
 const findLib = require('./find');
 const txtLib = require('./txt');
 const errorText = require('./error-text');
+const { clampInt } = require('./common');
 
 // 词表文件上限：再大就不像「每行一个词」的词表了，读进来只会拖慢整本检查
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -38,12 +39,6 @@ const DEFAULT_OPTIONS = Object.freeze({
 const OPTION_LIMITS = Object.freeze({
   maxIssues: [20, 5000]
 });
-
-function clampInt(value, fallback, range) {
-  const n = Math.floor(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(n, range[0]), range[1]);
-}
 
 function sanitizeOptions(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};

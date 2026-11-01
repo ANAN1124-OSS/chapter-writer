@@ -2,12 +2,9 @@
 // 所有落盘都必须经过这里，保证「要么是旧完整版，要么是新完整版」，不会出现半截文件。
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { sleep } = require('./common');
 
 const RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']);
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function renameWithRetry(from, to, { tries = 3, delay = 80 } = {}) {
   let lastErr = null;

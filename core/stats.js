@@ -8,6 +8,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { writeJsonAtomic, stripBom } = require('./atomic');
+const { pad2 } = require('./common');
 
 const STATS_VERSION = 1;
 const DEFAULT_GOAL = 0;
@@ -24,10 +25,6 @@ const MAX_DAY_SECONDS = 86400;
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 // 码字日历固定周一起始（和国内日历 / 口袋写作习惯一致）。
 const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
 
 // 本机时区的日期键。已经是合法 YYYY-MM-DD 的原样返回（避免被当成 UTC 解析而差一天），
 // 非法 Date / 坏字符串退回「现在」，保证永远返回可读字符串。
@@ -214,7 +211,6 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
   const dailyGoal = normalizeGoal(goal);
   const anchorParts = parseDayKey(anchor);
   const count = daysInMonth(targetYear, targetMonth);
-  const pad = (n) => String(n).padStart(2, '0');
   const days = [];
   let total = 0;
   let totalSeconds = 0;
@@ -224,7 +220,7 @@ function monthView(rawStats, { year, month, now = new Date(), goal = DEFAULT_GOA
   let bestDay = null;
 
   for (let dayOfMonth = 1; dayOfMonth <= count; dayOfMonth += 1) {
-    const day = `${targetYear}-${pad(targetMonth)}-${pad(dayOfMonth)}`;
+    const day = `${targetYear}-${pad2(targetMonth)}-${pad2(dayOfMonth)}`;
     const entry = stats.days[day];
     const chars = totalOfEntry(entry);
     const seconds = secondsOfEntry(entry);
