@@ -70,6 +70,7 @@ const securityPolicy = require('./core/security-policy');
 const ipcPaths = require('./core/ipc-paths');
 const configGate = require('./core/config-gate');
 const errorText = require('./core/error-text');
+const ipcLimits = require('./core/ipc-limits');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -482,10 +483,10 @@ function handle(channel, fn) {
 // 自己的再校验，文案更具体：「只能删除书架目录下的书」）。
 const assertBookPath = ipcPaths.assertBookPath;
 
-// 只读文本类 IPC 的前置校验：渲染层传上来的正文必须是字符串（不读盘、只算文本）
-function assertText(text) {
-  if (typeof text !== 'string') throw new Error('正文必须是文本');
-}
+// 文本类 IPC 的前置校验（v0.9 C-5）：正文必须是字符串，且不超过 core/ipc-limits.js 的
+// MAX_TEXT_CHARS（500 万字）。排版 / 查找 / 替换 / 校对 / 朗读都是 O(n) 甚至 O(n × 词表) 的计算，
+// 在入口先挡住超大输入，免得渲染层一次手误 / 注入就把主进程拖到假死；超限回 TEXT_TOO_LARGE。
+const assertText = ipcLimits.assertText;
 
 // mutation：写书的操作（save / delete / rename / format / replace / write）。
 // 有值时统一做跨窗口拦截：别的窗口正开着这本书 → 拒绝并提示先关 / 先切过去。
@@ -1028,9 +1029,11 @@ function registerIpc() {
   });
 
   // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
+  // v0.9 C-5：查找词 / 替换词也走上限（1 万字），替换结果按「原文 + 命中 × 增长」估算，
+  // 超过 2000 万字先拒绝，不生成那个字符串（一处换一万字 × 五千处 = 5 千万字起步）。
   handle('text:find', async (text, query, options) => {
     assertText(text);
-    const matches = findLib.findMatches(text, query, options);
+    const matches = findLib.findMatches(text, ipcLimits.assertQuery(query), options);
     return {
       count: matches.length,
       matches: matches.slice(0, 12).map((match) => ({
@@ -1046,27 +1049,35 @@ function registerIpc() {
   // 到上限还多找出一处时明确回 truncated（界面据此提示「命中太多」）。只算文本，不读盘、不写盘。
   handle('text:find-all', async (text, query, options) => {
     assertText(text);
-    const result = findLib.findMatchesAll(text, query, options);
+    const result = findLib.findMatchesAll(text, ipcLimits.assertQuery(query), options);
     return { count: result.matches.length, truncated: result.truncated, matches: result.matches };
   });
 
   handle('text:replace', async (text, query, replacement, options) => {
     assertText(text);
-    return findLib.replaceAllLiteral(text, query, replacement, options);
+    const wanted = ipcLimits.assertQuery(query);
+    const insert = ipcLimits.assertReplacement(replacement);
+    const findOptions = { caseSensitive: Boolean(options && options.caseSensitive) };
+    // 替换词比查找词长时才可能放大；这时先数一遍命中（最多 5000 处）再估结果长度。
+    // 替换词不长于查找词时结果只会变短 / 不变，不用多扫一遍。
+    if (insert.length > wanted.length) {
+      const found = findLib.findMatches(text, wanted, findOptions);
+      ipcLimits.assertReplaceOutput(text.length, found.length, wanted.length, insert.length);
+    }
+    return findLib.replaceAllLiteral(text, wanted, insert, findOptions);
   });
 
   // Ctrl+G 跳章：纯匹配（章号 / 章名关键词），不读盘、不写盘。规则在 core/jump.js，单测覆盖。
+  // v0.9 C-5：章节列表由 core/ipc-limits.js 清洗——只留前 20000 条、每条只留 id / name（各限长），
+  // 坏条目变成 null 被 core/jump.js 跳过；非数组仍是 BAD_CHAPTERS（文案不变）。
   handle('jump:match', async (chapters, query, options) => {
-    if (!Array.isArray(chapters)) {
-      throw Object.assign(new Error('章节列表格式不对'), { code: 'BAD_CHAPTERS' });
-    }
-    return jumpLib.findMatches(chapters.slice(0, 20000), query, options);
+    return jumpLib.findMatches(ipcLimits.sanitizeChapterList(chapters), query, options);
   });
 
   // 「只替换这一处」：从编辑区光标位置往后找下一处命中（纯计算，不写盘）
   handle('text:find-next', async (text, query, fromIndex, options) => {
     assertText(text);
-    return findLib.findNextMatch(text, query, fromIndex, options);
+    return findLib.findNextMatch(text, ipcLimits.assertQuery(query), fromIndex, options);
   });
 
   handleBook('chapter:save', async (bookPath, chapterId, text) => {
@@ -1283,9 +1294,15 @@ function registerIpc() {
     storage.moveChapterTo(bookPath, chapterId, volumeId, beforeChapterId), { mutation: 'write' }
   );
 
-  // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash
-  handleBook('book:search', async (bookPath, options) => storage.searchBook(bookPath, options));
-  handleBook('book:replace', async (bookPath, options) => storage.replaceInBook(bookPath, options), {
+  // 全书查找 / 替换：替换写盘前 storage 会把原章节备份到书内 _trash。
+  // v0.9 C-5：options 由 core/ipc-limits.js 清洗——查找词 / 替换词必须是文本且各限 1 万字，
+  // 非对象 options 按 {}（旧行为：没传选项 = 默认口径），坏类型直接回 BAD_QUERY / BAD_REPLACEMENT，
+  // 不让一个超长替换词把整本书的 txt 撑爆（替换最多 5000 处 / 章）。
+  handleBook('book:search', async (bookPath, options) =>
+    storage.searchBook(bookPath, ipcLimits.sanitizeSearchOptions(options))
+  );
+  handleBook('book:replace', async (bookPath, options) =>
+    storage.replaceInBook(bookPath, ipcLimits.sanitizeReplaceOptions(options)), {
     mutation: 'replace'
   });
 
@@ -1320,6 +1337,8 @@ function registerIpc() {
   // 每章最多保留 maxIssues 条明细，整本明细上限 1500 条，但总数 / 各规则条数照实统计。
   handleBook('book:proofread', async (bookPath, options, override) => {
     const meta = await storage.readBookMeta(bookPath);
+    // v0.9 C-5：当前章未保存内容（override）先过边界（坏形状当没有；正文超 500 万字拒绝）
+    const safeOverride = ipcLimits.sanitizeOverride(override);
     const limits = proofreadLib.sanitizeOptions(options);
     // 校对词表只读一次，整本每章共用（没设置 / 读不了 = 只跑内置五条规则，面板会提示）
     const cfg = await getConfig();
@@ -1333,7 +1352,7 @@ function registerIpc() {
     const issues = [];
     let total = 0;
     let truncated = false;
-    const skippedChapters = await walkChapterTexts(bookPath, meta, override, (text, chapter, index) => {
+    const skippedChapters = await walkChapterTexts(bookPath, meta, safeOverride, (text, chapter, index) => {
       const result = proofreadLib.proofreadText(text, limits, customEntries);
       total += result.total;
       for (const rule of proofreadLib.RULE_ORDER) byRule[rule] += result.byRule[rule] || 0;
@@ -1387,13 +1406,15 @@ function registerIpc() {
     const wordList = sensitiveLib.publicWordListInfo(list);
     if (!list.ok) return { ok: false, code: list.code, message: list.message, wordList };
     const meta = await storage.readBookMeta(bookPath);
+    // v0.9 C-5：override 与上面校对同一条边界（坏形状当没有；正文超 500 万字拒绝）
+    const safeOverride = ipcLimits.sanitizeOverride(override);
     const limits = sensitiveLib.sanitizeOptions(options);
     const matches = [];
     const chapters = [];
     const byWordMap = new Map();
     let total = 0;
     let truncated = false;
-    const skippedChapters = await walkChapterTexts(bookPath, meta, override, (text, chapter, index) => {
+    const skippedChapters = await walkChapterTexts(bookPath, meta, safeOverride, (text, chapter, index) => {
       const result = sensitiveLib.scanText(text, list.words, limits);
       total += result.total;
       for (const item of result.byWord) {
@@ -1504,14 +1525,18 @@ function registerIpc() {
   // 导出范围预览（只读）：对话框里实时显示「选中几章 / 多少字 / 默认文件名」。
   // 字数优先用书目里的 chars 缓存求和（审计 F3）；缓存缺失 / 坏值才读盘现算，
   // 编辑区里当前章的未保存内容（override）永远现算。正式导出仍读全文，不受这里影响。
+  // v0.9 C-5：override / range 先过 core/ipc-limits.js——正文超过 500 万字报 TEXT_TOO_LARGE，
+  // 坏形状按旧行为降级（override 当没有、range 当全书 / 越界收紧）。
   handleBook('book:export-plan', async (bookPath, override, range) => {
     const meta = await storage.readBookMeta(bookPath);
-    const plan = exporter.resolveExportRange(meta, range);
-    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    const safeOverride = ipcLimits.sanitizeOverride(override);
+    const safeRange = ipcLimits.sanitizeRange(range);
+    const plan = exporter.resolveExportRange(meta, safeRange);
+    const overrideIndex = exporter.chapterIndexOf(meta, safeOverride);
     let chars = 0;
     for (const index of plan.indexes) {
       if (index === overrideIndex) {
-        chars += chaptersLib.countChars(override.text);
+        chars += chaptersLib.countChars(safeOverride.text);
         continue;
       }
       const chapter = meta.chapters[index];
@@ -1532,9 +1557,9 @@ function registerIpc() {
       to: plan.to,
       volumeId: plan.volumeId,
       empty: plan.empty,
-      fileName: exporter.exportFileName(meta, range),
-      epubFileName: epubLib.epubFileName(meta, range),
-      docxFileName: docxLib.docxFileName(meta, range),
+      fileName: exporter.exportFileName(meta, safeRange),
+      epubFileName: epubLib.epubFileName(meta, safeRange),
+      docxFileName: docxLib.docxFileName(meta, safeRange),
       includedUnsaved: overrideIndex >= 0 && plan.indexes.includes(overrideIndex)
     };
   });
@@ -1550,9 +1575,13 @@ function registerIpc() {
 
   // 导出 TXT / EPUB / DOCX 共用的前置：读书目 → 解析范围（空范围明确报错）→ 拼正文
   // → 准备「上次导出目录 / 文档」作为默认落点。三个入口只负责各自的保存对话框、格式细节与返回字段。
+  // v0.9 C-5：override / range 在这里统一过 core/ipc-limits.js（超长正文拒绝、坏形状降级），
+  // 三个导出与下面的复制 / 校对 / 敏感词预检共用同一套口径，避免某个入口漏掉。
   async function prepareExport(bookPath, override, range) {
     const meta = await storage.readBookMeta(bookPath);
-    const plan = exporter.resolveExportRange(meta, range);
+    const safeOverride = ipcLimits.sanitizeOverride(override);
+    const safeRange = ipcLimits.sanitizeRange(range);
+    const plan = exporter.resolveExportRange(meta, safeRange);
     if (!plan.count) {
       throw new storage.StorageError(
         'EMPTY_EXPORT_RANGE',
@@ -1562,13 +1591,13 @@ function registerIpc() {
     const { texts, chars, includedUnsaved } = await collectExportTexts(
       bookPath,
       meta,
-      override,
+      safeOverride,
       plan.indexes
     );
     const cfg = await getConfig();
     // 默认落到「上一次导出保存到的目录」；没记过、或那个目录已经不存在了，才退回「文档」
     const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), isDirectory);
-    return { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir };
+    return { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir, range: safeRange };
   }
 
   // EPUB / DOCX 导出成功后的返回字段（两个入口完全一致，只是 built 来自不同的纯函数）
@@ -1587,20 +1616,20 @@ function registerIpc() {
   }
 
   handleBook('book:export', async (bookPath, override, range) => {
-    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir, range: safeRange } = await prepareExport(
       bookPath,
       override,
       range
     );
     // 文件名默认带上范围：书名.txt / 书名-卷名.txt / 书名-第X-Y章.txt（可在保存对话框里改）
-    const defaultName = exporter.exportFileName(meta, range);
+    const defaultName = exporter.exportFileName(meta, safeRange);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 TXT',
       defaultPath: path.join(defaultDir, defaultName),
       filters: [{ name: '文本文件', extensions: ['txt'] }]
     });
     if (canceled || !filePath) return { canceled: true };
-    const composed = exporter.composeBook(meta, texts, range);
+    const composed = exporter.composeBook(meta, texts, safeRange);
     // 简繁转换只作用于这份导出副本：字数仍按原稿算，磁盘上的章节 txt / 书目一个字节都不动
     const conversion = s2tLib.normalizeMode(cfg.exportConversion);
     const text = s2tLib.convertText(composed, conversion);
@@ -1623,12 +1652,12 @@ function registerIpc() {
   // 由 EPUB 里的 CSS 控制，不动任何 txt 字节。和 TXT 导出一样：当前章未保存的内容参与拼接、只读、原子写盘。
   // range 不传 = 全书；只把选中的章节读出来打进包里，章号仍按全书顺序。
   handleBook('book:export-epub', async (bookPath, override, range) => {
-    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir, range: safeRange } = await prepareExport(
       bookPath,
       override,
       range
     );
-    const defaultName = epubLib.epubFileName(meta, range);
+    const defaultName = epubLib.epubFileName(meta, safeRange);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 EPUB',
       defaultPath: path.join(defaultDir, defaultName),
@@ -1642,7 +1671,7 @@ function registerIpc() {
     const exportTexts = conversion
       ? texts.map((text) => s2tLib.convertText(text, conversion))
       : texts;
-    const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts, range });
+    const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts, range: safeRange });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
     return archiveExportResult(filePath, built, chars, includedUnsaved, conversion, plan);
@@ -1652,12 +1681,12 @@ function registerIpc() {
   // 和 EPUB 导出同一套规则：范围解析复用 exporter.resolveExportRange，只读选中的章，
   // 章号 / 章名仍按全书顺序；当前章未保存内容参与、只读、原子写盘、简繁转换只作用于副本。
   handleBook('book:export-docx', async (bookPath, override, range) => {
-    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir, range: safeRange } = await prepareExport(
       bookPath,
       override,
       range
     );
-    const defaultName = docxLib.docxFileName(meta, range);
+    const defaultName = docxLib.docxFileName(meta, safeRange);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 DOCX',
       defaultPath: path.join(defaultDir, defaultName),
@@ -1670,7 +1699,7 @@ function registerIpc() {
     const exportTexts = conversion
       ? texts.map((text) => s2tLib.convertText(text, conversion))
       : texts;
-    const built = docxLib.buildDocx({ meta: exportMeta, texts: exportTexts, range });
+    const built = docxLib.buildDocx({ meta: exportMeta, texts: exportTexts, range: safeRange });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
     return archiveExportResult(filePath, built, chars, includedUnsaved, conversion, plan);
@@ -1678,7 +1707,8 @@ function registerIpc() {
 
   handleBook('book:copy', async (bookPath, override) => {
     const meta = await storage.readBookMeta(bookPath);
-    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, override);
+    const safeOverride = ipcLimits.sanitizeOverride(override);
+    const { texts, chars, includedUnsaved } = await collectExportTexts(bookPath, meta, safeOverride);
     const text = exporter.composeBook(meta, texts);
     await activeClipboard.writeText(text);
     return { chapterCount: meta.chapters.length, chars, includedUnsaved };
@@ -1688,13 +1718,14 @@ function registerIpc() {
   // 直接进剪贴板；不写盘。ref = { chapterId?, chapterFile?, text? }：
   // 带了 text 就用它（编辑区里当前章未保存的最新内容，沿用户导出惯例），没带就读磁盘。
   handleBook('chapter:copy-platform', async (bookPath, ref) => {
+    const safeRef = ipcLimits.sanitizeOverride(ref);
     const meta = await storage.readBookMeta(bookPath);
-    const index = exporter.chapterRefIndex(meta, ref);
+    const index = exporter.chapterRefIndex(meta, safeRef);
     if (index < 0) throw new storage.StorageError('CHAPTER_NOT_FOUND', '找不到这一章（可能刚被删除）');
     const chapter = meta.chapters[index];
-    const fromEditor = Boolean(ref && typeof ref.text === 'string');
+    const fromEditor = Boolean(safeRef && typeof safeRef.text === 'string');
     const text = fromEditor
-      ? ref.text
+      ? safeRef.text
       : (await storage.loadChapterText(bookPath, chapter.file)).text;
     const result = exporter.platformChapterText(text);
     const title = chaptersLib.formatTitle(meta, index, chapter.name);
