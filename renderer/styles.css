@@ -683,8 +683,28 @@ body.resizing .editor {
   border-radius: 8px;
   box-shadow: 0 10px 26px rgba(60, 48, 30, .18);
 }
-/* 「排版」菜单条目较长（显示不可见字符 / 超长段落提示），给宽一点避免折行 */
-#format-menu { min-width: 250px; }
+/* 「整理」悬浮选择卡 / 「显示」菜单：条目较长（一键整理本书… / 显示不可见字符…），给宽一点避免折行 */
+#format-menu,
+#display-menu { min-width: 250px; }
+/* 悬浮选择卡：鼠标从按钮移到卡片中间隔了几像素，给卡片加一块透明的「搭桥」区，
+   这样指针一路都落在 wrapper 的后代上，不会先触发 pointerleave（卡片还没等鼠标到就收起）。 */
+#format-menu::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -10px;
+  height: 10px;
+}
+/* 选择卡顶部一句说明：点「整理」= 直接用记住的规则整理本章 */
+.format-card-note {
+  padding: 3px 10px 8px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
 .dropdown-menu button {
   display: block;
   width: 100%;

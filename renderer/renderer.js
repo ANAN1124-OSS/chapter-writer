@@ -2945,9 +2945,7 @@
       state.focus.savedCaretOffset =
         caretTop == null ? null : Math.round((caretTop - state.focus.savedScrollTop) * 100) / 100;
       hideContextMenu();
-      hideFormatMenu();
-      hideExportMenu();
-      hideBookMenu();
+      hideHeaderMenus();
       hideVolumeMenu();
       state.focus.on = true;
       if (view) view.classList.add('focus-mode');
@@ -3377,9 +3375,7 @@
     }
     hideContextMenu();
     hideVolumeMenu();
-    hideFormatMenu();
-    hideExportMenu();
-    hideBookMenu();
+    hideHeaderMenus();
     state.reading.open = true;
     state.reading.startIndex = Math.max(0, Math.min(state.index < 0 ? 0 : state.index, state.chapters.length - 1));
     state.reading.index = state.reading.startIndex;
@@ -5095,8 +5091,8 @@
       api.closeReady(false);
       return;
     }
-    // 关窗前先把排版/设置/导出弹层收掉：否则「保存 / 不保存 / 取消」的询问会被它们压住
-    hideFormatMenu();
+    // 关窗前先把顶栏弹层 / 排版 / 设置 / 导出弹层收掉：否则「保存 / 不保存 / 取消」的询问会被它们压住
+    hideHeaderMenus();
     closeFormatDialog();
     if (!$('export-backdrop').classList.contains('hidden')) closeExportDialog();
     if (!$('jump-backdrop').classList.contains('hidden')) closeJumpDialog();
@@ -5269,8 +5265,7 @@
       toast('先打开一本书再查找', 'warn');
       return;
     }
-    hideFormatMenu();
-    hideExportMenu();
+    hideHeaderMenus();
     if (!$('proofread-backdrop').classList.contains('hidden')) closeProofreadPanel();
     // 编辑器里选中了一段短文本时，直接带进查找框
     const selection = String(window.getSelection ? window.getSelection().toString() : '');
@@ -6016,8 +6011,7 @@
   }
 
   function openFragmentDialog() {
-    hideFormatMenu();
-    hideExportMenu();
+    hideHeaderMenus();
     $('fragment-text').value = '';
     setFragmentSaveState('');
     updateFragmentCounter();
@@ -6079,8 +6073,7 @@
       toast('先打开一本书再插入碎片', 'warn');
       return false;
     }
-    hideFormatMenu();
-    hideExportMenu();
+    hideHeaderMenus();
     // 记下打开面板前的位置：弹层期间点列表/预览不会把光标位置弄丢
     state.insertFragmentRange = {
       start: editorEl.selectionStart || 0,
@@ -6304,8 +6297,7 @@
       toast('先打开一本书再校对', 'warn');
       return false;
     }
-    hideFormatMenu();
-    hideExportMenu();
+    hideHeaderMenus();
     if (!$('find-backdrop').classList.contains('hidden')) closeFindPanel();
     $('proofread-scope').value = state.proofreadScope === 'book' ? 'book' : 'current';
     $('proofread-backdrop').classList.remove('hidden');
@@ -6638,8 +6630,7 @@
       toast('先打开一本书再预检', 'warn');
       return false;
     }
-    hideFormatMenu();
-    hideExportMenu();
+    hideHeaderMenus();
     if (!$('find-backdrop').classList.contains('hidden')) closeFindPanel();
     if (!$('proofread-backdrop').classList.contains('hidden')) closeProofreadPanel();
     $('sensitive-scope').value = state.sensitiveScope === 'book' ? 'book' : 'current';
@@ -7330,15 +7321,9 @@
 
   // ---------- 排版 ----------
   // 「智能排版/一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
-  const DEFAULT_FORMAT_OPTIONS = {
-    indent: '2',
-    blankLines: 'single',
-    trimTrailing: true,
-    normalizePunct: true,
-    removeCjkSpaces: false,
-    curlyQuotes: false,
-    ellipsis: false
-  };
+  // 默认规则 / 规则摘要 / 改动统计的文案在 format-ui.js 里（Node 单测覆盖），这里只负责流程。
+  const formatUi = window.CWFormatUi;
+  const DEFAULT_FORMAT_OPTIONS = formatUi.DEFAULT_OPTIONS;
   // 「撤销上次整理」的内存快照上限（只存内存，关掉应用就没了；50 步足够连续整理几十次）
   const MAX_FORMAT_UNDO = 50;
 
@@ -7402,22 +7387,81 @@
       : 'single';
   }
 
-  function toggleFormatMenu() {
-    const menu = $('format-menu');
-    const willShow = menu.classList.contains('hidden');
-    hideExportMenu();
-    if (willShow) {
-      const steps = formatUndoSteps();
-      $('format-undo-item').disabled = steps === 0;
-      $('format-undo-item').textContent =
-        steps > 0 ? `撤销上次整理（可撤销 ${steps} 步）` : '撤销上次整理';
-      renderMarksMenu();
+  // ---------- 「整理」按钮的悬浮选择卡 + 「显示」菜单（v0.8.5 R1） ----------
+  // 点「整理」= 直接用上次记住的规则整理本章（见 formatCurrentChapterFromConfig）；
+  // 鼠标悬浮 / 键盘 Tab 聚焦 = 出这张选择卡（排版设置… / 一键整理本书… / 撤销上次整理）。
+  // 卡片只是入口，原来的对话框、整本整理、撤销与光标映射都没变。
+  let formatCardTimer = null;
+
+  function formatCardOpen() {
+    return !$('format-menu').classList.contains('hidden');
+  }
+
+  function displayMenuOpen() {
+    return !$('display-menu').classList.contains('hidden');
+  }
+
+  // 卡片里「撤销上次整理」那一行的可用状态与文案（几秒钟前刚整理过也能马上反映出来）
+  function refreshFormatCard() {
+    const item = $('format-undo-item');
+    if (!item) return;
+    const steps = formatUndoSteps();
+    item.disabled = steps === 0;
+    item.textContent = formatUi.undoLabel(steps);
+  }
+
+  function cancelFormatCardTimer() {
+    if (formatCardTimer) {
+      clearTimeout(formatCardTimer);
+      formatCardTimer = null;
     }
-    menu.classList.toggle('hidden');
+  }
+
+  function showFormatCard() {
+    cancelFormatCardTimer();
+    hideExportMenu();
+    hideDisplayMenu();
+    refreshFormatCard();
+    $('format-menu').classList.remove('hidden');
   }
 
   function hideFormatMenu() {
+    cancelFormatCardTimer();
     $('format-menu').classList.add('hidden');
+  }
+
+  // 鼠标离开按钮 / 卡片、焦点移走时「短延迟」再收起：留出从按钮挪到卡片、或点卡片按钮的时间
+  function scheduleHideFormatCard(delay = 240) {
+    cancelFormatCardTimer();
+    formatCardTimer = setTimeout(() => {
+      formatCardTimer = null;
+      $('format-menu').classList.add('hidden');
+    }, delay);
+  }
+
+  function showDisplayMenu() {
+    hideFormatMenu();
+    hideExportMenu();
+    renderMarksMenu();
+    $('display-menu').classList.remove('hidden');
+  }
+
+  function hideDisplayMenu() {
+    const menu = $('display-menu');
+    if (menu) menu.classList.add('hidden');
+  }
+
+  function toggleDisplayMenu() {
+    if (displayMenuOpen()) hideDisplayMenu();
+    else showDisplayMenu();
+  }
+
+  // 写作页顶栏的几个弹层一起收起（切视图 / 进专注模式 / 关窗 / 按 Esc / 窗口缩放时用）
+  function hideHeaderMenus() {
+    hideFormatMenu();
+    hideDisplayMenu();
+    hideExportMenu();
+    hideBookMenu();
   }
 
   let formatPreviewToken = 0;
@@ -7440,19 +7484,8 @@
       $('btn-format-apply').disabled = true;
       return;
     }
-    const s = res.stats;
-    const parts = [
-      `共 ${s.paragraphs} 段`,
-      `缩进调整 ${s.indentFixed} 段`,
-      `行尾空白 ${s.trailingTrimmed} 处`,
-      `空行整理 ${s.blankCollapsed} 处`,
-      `标点转全角 ${s.punctFixed} 处`
-    ];
-    if (s.cjkSpacesRemoved) parts.push(`中文间空格 ${s.cjkSpacesRemoved} 处`);
-    if (s.quotesFixed) parts.push(`直引号转弯引号 ${s.quotesFixed} 处`);
-    if (s.ellipsisFixed) parts.push(`省略号转中文 ${s.ellipsisFixed} 处`);
     $('fmt-summary').textContent = res.changed
-      ? parts.join(' · ')
+      ? formatUi.statsText(res.stats)
       : '本章已经是整理后的格式，没有可改的地方。';
     $('btn-format-apply').disabled = !res.changed;
     const preview = res.text.length > 700 ? `${res.text.slice(0, 700)}\n…` : res.text;
@@ -7473,6 +7506,7 @@
 
   function openFormatDialog() {
     hideFormatMenu();
+    hideDisplayMenu();
     if (!state.bookPath || state.index < 0) {
       toast('先打开一本书的章节再排版', 'warn');
       return;
@@ -7581,6 +7615,58 @@
     return true;
   }
 
+  // 点「整理」= 直接用上次记住的规则（config.formatOptions）整理当前章。
+  // 不弹窗、只改编辑区、仍是未保存（Ctrl+S 才写盘），Ctrl+Z 或选择卡里的「撤销上次整理」可退回；
+  // 无改动时只提示一句，不往撤销栈里塞东西。
+  let formatChapterRunning = false;
+
+  async function formatCurrentChapterFromConfig() {
+    if (!state.bookPath || state.index < 0) {
+      toast('先打开一本书的章节再整理', 'warn');
+      return { ok: false, reason: 'no-book' };
+    }
+    if (formatChapterRunning) return { ok: false, reason: 'busy' };
+    const before = editorEl.value;
+    const beforeCaret = editorEl.selectionStart || 0;
+    if (!String(before == null ? '' : before).trim()) {
+      toast('本章还没有内容', 'warn');
+      return { ok: false, reason: 'empty' };
+    }
+    const options = formatUi.mergeOptions(state.config && state.config.formatOptions);
+    const bookPath = state.bookPath;
+    const chapterId = state.chapters[state.index] && state.chapters[state.index].id;
+    formatChapterRunning = true;
+    try {
+      const res = await call(api.formatText, before, options);
+      if (!res.changed) {
+        // 没有可改的地方：编辑区一个字不动，撤销栈也不动
+        toast(formatUi.noChangeToast(options));
+        return { ok: true, changed: 0, stats: res.stats };
+      }
+      // 期间换了书 / 换了章 / 正文被改过：这次结果作废（绝不把 A 章的内容写进 B 章的编辑区）
+      const chapter = state.chapters[state.index];
+      if (
+        state.bookPath !== bookPath ||
+        !chapter ||
+        chapter.id !== chapterId ||
+        editorEl.value !== before
+      ) {
+        toast('正文刚改过，这次整理没有套用，请再点一次「整理」', 'warn');
+        return { ok: false, reason: 'stale' };
+      }
+      insertFormattedText(res.text, { text: before, pos: beforeCaret });
+      pushFormatUndo(before, res.text);
+      toast(formatUi.successToast(options, res.stats));
+      return { ok: true, changed: 1, stats: res.stats, steps: formatUndoSteps() };
+    } catch (err) {
+      toast(`整理失败：${err.message}`, 'error');
+      return { ok: false, reason: 'error', message: err.message };
+    } finally {
+      formatChapterRunning = false;
+      refreshFormatCard();
+    }
+  }
+
   async function applyFormatToEditor() {
     if (!state.bookPath || state.index < 0) return;
     const before = editorEl.value;
@@ -7629,26 +7715,9 @@
     formatBookProgressEl = null;
   }
 
-  // 把排版规则讲成人话，放进确认框
+  // 把排版规则讲成人话，放进整本整理的确认框（和选择卡 / toast 用同一份文案）
   function describeFormatOptions(options) {
-    const opts = { ...DEFAULT_FORMAT_OPTIONS, ...(options || {}) };
-    const parts = [];
-    if (opts.indent === '2') parts.push('段首缩进 2 字符');
-    else if (opts.indent === '0') parts.push('段首缩进 0 字符');
-    else parts.push('缩进不处理');
-    const blankMap = {
-      keep: '段间保持原样',
-      single: '段间空一行',
-      singleIndent: '段间空一行（含缩进）',
-      none: '段间不空行'
-    };
-    parts.push(blankMap[opts.blankLines] || blankMap.single);
-    if (opts.trimTrailing) parts.push('删行尾空白');
-    if (opts.normalizePunct) parts.push('中文旁标点转全角');
-    if (opts.curlyQuotes) parts.push('直引号转弯引号');
-    if (opts.ellipsis) parts.push('省略号转中文');
-    if (opts.removeCjkSpaces) parts.push('删中文间空格');
-    return parts.join(' · ');
+    return formatUi.describeRules(options);
   }
 
   // 一键整理本书：复用上次「整理本章」的规则 → 预检查 → 确认 → 整本整理（写前备份）
@@ -7662,6 +7731,7 @@
       return { ok: false, busy: true };
     }
     hideFormatMenu();
+    hideDisplayMenu();
     if (state.dirty) {
       const action = await askUnsaved({
         title: '整理本书前先处理未保存的修改',
@@ -8657,12 +8727,44 @@
     $('btn-jump-cancel').addEventListener('click', closeJumpDialog);
     $('btn-jump-confirm').addEventListener('click', () => confirmJumpFromDialog());
 
-    // 排版：写作页「排版 ▾」
+    // 「整理 ▾」：点击 = 直接用记住的规则整理本章；鼠标悬浮 / Tab 聚焦 = 出选择卡
     $('btn-format').addEventListener('click', (event) => {
       event.stopPropagation();
-      toggleFormatMenu();
+      hideFormatMenu();
+      void formatCurrentChapterFromConfig();
     });
+    // 选择卡：排版设置… / 一键整理本书… / 撤销上次整理（原来的三个流程，一个都没变）
     $('format-menu').addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action]');
+      if (!btn) return;
+      event.stopPropagation();
+      const action = btn.dataset.action;
+      if (action === 'settings') {
+        openFormatDialog(); // 自带 hideFormatMenu()
+        return;
+      }
+      hideFormatMenu();
+      if (action === 'undo') {
+        if (!undoFormat()) toast('没有可撤销的整理', 'warn');
+        else refreshFormatCard();
+      } else if (action === 'apply-book') await runFormatBook();
+    });
+    // 悬浮：进入按钮或卡片就出卡，离开两者（短延迟）收起；键盘 Tab 进按钮 / 卡片也算
+    const formatDropdown = $('format-dropdown');
+    formatDropdown.addEventListener('pointerenter', () => showFormatCard());
+    formatDropdown.addEventListener('pointerleave', () => scheduleHideFormatCard());
+    formatDropdown.addEventListener('focusin', () => showFormatCard());
+    formatDropdown.addEventListener('focusout', (event) => {
+      if (event.relatedTarget && formatDropdown.contains(event.relatedTarget)) return;
+      scheduleHideFormatCard(160);
+    });
+
+    // 「显示 ▾」：点一下展开（只改 CSS 的显示项，正文一个字都不动）
+    $('btn-display').addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleDisplayMenu();
+    });
+    $('display-menu').addEventListener('click', async (event) => {
       // 高亮色块（v0.8-10b）：不关菜单，方便作者连着试几个颜色；点一下 = 按书保存一色
       const swatch = event.target.closest('[data-caret-color]');
       if (swatch) {
@@ -8674,15 +8776,8 @@
       const btn = event.target.closest('button[data-action]');
       if (!btn) return;
       const action = btn.dataset.action;
-      if (action === 'apply') {
-        openFormatDialog();
-        return;
-      }
-      hideFormatMenu();
-      if (action === 'undo') {
-        if (!undoFormat()) toast('没有可撤销的整理', 'warn');
-      } else if (action === 'apply-book') await runFormatBook();
-      else if (action === 'preset-compact') await setDisplayPreset('compact');
+      hideDisplayMenu();
+      if (action === 'preset-compact') await setDisplayPreset('compact');
       else if (action === 'preset-normal') await setDisplayPreset('normal');
       else if (action === 'preset-loose') await setDisplayPreset('loose');
       else if (action === 'toggle-invisibles') toggleMarks('invisibles');
@@ -8839,7 +8934,8 @@
       if (!event.target.closest('#context-menu') && !event.target.closest('.chapter-item')) hideContextMenu();
       if (!event.target.closest('#volume-menu') && !event.target.closest('.volume-item')) hideVolumeMenu();
       if (!event.target.closest('#btn-export') && !event.target.closest('#export-menu')) hideExportMenu();
-      if (!event.target.closest('#btn-format') && !event.target.closest('#format-menu')) hideFormatMenu();
+      if (!event.target.closest('#format-dropdown')) hideFormatMenu();
+      if (!event.target.closest('#display-dropdown')) hideDisplayMenu();
       if (!event.target.closest('#book-menu') && !event.target.closest('.book-card-more')) hideBookMenu();
     });
 
@@ -8918,6 +9014,19 @@
           onFindQueryEnter(event);
           return;
         }
+      }
+      // 「整理」选择卡 / 「显示」菜单：Esc 先收起它们（再按才轮到查找高亮 / 专注模式等的 Esc）；
+      // 焦点在卡片里时把焦点还给按钮，键盘用户不用重新 Tab 一遍。
+      if (event.key === 'Escape' && (formatCardOpen() || displayMenuOpen())) {
+        event.preventDefault();
+        const active = document.activeElement;
+        const inCard = Boolean(active && $('format-menu').contains(active));
+        const inDisplay = Boolean(active && $('display-menu').contains(active));
+        hideFormatMenu();
+        hideDisplayMenu();
+        if (inCard) $('btn-format').focus();
+        else if (inDisplay) $('btn-display').focus();
+        return;
       }
       // 查找高亮：面板关着时 Esc 先清高亮（再按才轮到专注模式 / 朗读等的 Esc）
       if (!findPanelOpen() && state.find.total > 0 && event.key === 'Escape') {
@@ -9029,17 +9138,13 @@
         if (state.view === 'editor' && state.bookPath) createChapterAt(state.chapters.length);
       } else if (event.key === 'Escape') {
         hideContextMenu();
-        hideExportMenu();
-        hideFormatMenu();
-        hideBookMenu();
+        hideHeaderMenus();
       }
     });
 
     window.addEventListener('resize', () => {
       hideContextMenu();
-      hideExportMenu();
-      hideFormatMenu();
-      hideBookMenu();
+      hideHeaderMenus();
       applySidebarWidth(state.sidebarWidth);
       scheduleMarksRender(40);
       if (state.reading.open) scheduleReadingScrollCheck(80);
@@ -9466,8 +9571,27 @@
         updateCaretParagraph();
       },
       // 排版
-      openFormatMenu: () => toggleFormatMenu(),
-      formatMenuOpen: () => !$('format-menu').classList.contains('hidden'),
+      // openFormatMenu / closeFormatMenu 是「悬浮选择卡」：点按钮不再开菜单，而是直接整理本章。
+      openFormatMenu: () => showFormatCard(),
+      closeFormatMenu: () => hideFormatMenu(),
+      formatMenuOpen: () => formatCardOpen(),
+      formatCardOpen: () => formatCardOpen(),
+      formatCardNote: () => $('format-card-note').textContent,
+      formatCardItems: () =>
+        Array.from(document.querySelectorAll('#format-menu button[data-action]')).map((el) => ({
+          action: el.dataset.action,
+          label: el.textContent,
+          disabled: el.disabled === true
+        })),
+      displayMenuOpen: () => displayMenuOpen(),
+      openDisplayMenu: () => showDisplayMenu(),
+      closeDisplayMenu: () => hideDisplayMenu(),
+      displayMenuItems: () =>
+        Array.from(document.querySelectorAll('#display-menu button[data-action]')).map((el) => el.dataset.action),
+      // 点「整理」的等价入口（直接按 config.formatOptions 整理当前章）
+      formatCurrentChapter() {
+        return formatCurrentChapterFromConfig();
+      },
       openFormatDialog: () => openFormatDialog(),
       formatDialogOpen: () => !$('format-backdrop').classList.contains('hidden'),
       formatSummary: () => $('fmt-summary').textContent,

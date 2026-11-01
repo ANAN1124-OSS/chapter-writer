@@ -2196,11 +2196,25 @@ async function runAutomation() {
         );
         await sleep(900);
       } else if (screenshotDialog === 'formatmenu') {
+        // v0.8.5 R1：「整理」不再点开菜单，改成悬浮出「选择卡」——截图走真实的 pointerenter
         await automationWin.webContents.executeJavaScript(
-          `window.__cwTest.openFormatMenu();`,
+          `document.getElementById('format-dropdown').dispatchEvent(new PointerEvent('pointerenter'));`,
           true
         );
         await sleep(400);
+      } else if (screenshotDialog === 'displaymenu') {
+        await automationWin.webContents.executeJavaScript(
+          `document.getElementById('btn-display').click();`,
+          true
+        );
+        await sleep(400);
+      } else if (screenshotDialog === 'format-click') {
+        // 点「整理」= 直接用记住的规则整理本章（截图要赶在 toast 消失前）
+        await automationWin.webContents.executeJavaScript(
+          `document.getElementById('btn-format').click();`,
+          true
+        );
+        await sleep(800);
       } else if (screenshotDialog === 'find') {
         await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFindPanel(); window.__cwTest.setFindFields({ query: '风', scope: 'book' }); window.__cwTest.findRun();`,

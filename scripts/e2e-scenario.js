@@ -555,12 +555,14 @@ module.exports = async function runScenario(ctx) {
   await sleep(150);
   check('整理前编辑区是脏样本', (await exec('window.__cwTest.text()')) === messyText);
 
-  await exec("document.getElementById('btn-format').click()");
-  check('写作页「排版 ▾」菜单能打开', (await exec('window.__cwTest.formatMenuOpen()')) === true);
+  // v0.8.5 R1：「整理 ▾」点按钮 = 直接整理本章（不再开菜单）；选择卡靠鼠标悬浮 / Tab 聚焦出现，
+  // 这里走同一个入口（openFormatMenu = 出卡）再点「排版设置…」打开原来的对话框。
+  await exec('window.__cwTest.openFormatMenu()');
+  check('写作页「整理 ▾」的悬浮选择卡能打开', (await exec('window.__cwTest.formatCardOpen()')) === true);
 
-  await exec("document.querySelector('#format-menu button[data-action=\"apply\"]').click()");
+  await exec("document.querySelector('#format-menu button[data-action=\"settings\"]').click()");
   await waitFor('window.__cwTest.formatDialogOpen() === true');
-  check('「一键整理本章」对话框打开', (await exec('window.__cwTest.formatDialogOpen()')) === true);
+  check('「排版设置…」对话框打开（原名「一键整理本章」）', (await exec('window.__cwTest.formatDialogOpen()')) === true);
 
   await waitFor("window.__cwTest.formatSummary().includes('共 2 段')");
   const formatSummary = await exec('window.__cwTest.formatSummary()');
@@ -1128,8 +1130,12 @@ module.exports = async function runScenario(ctx) {
   check('撤销整理：11 步都能连续撤回', (await exec('window.__cwTest.formatUndoSteps()')) === 11);
   await exec('window.__cwTest.openFormatMenu()');
   const undoItemLabel = await exec('window.__cwTest.formatUndoItemText()');
-  check('撤销整理：菜单显示还能撤销几步', undoItemLabel.includes('可撤销 11 步'), undoItemLabel);
-  await exec('window.__cwTest.openFormatMenu()');
+  check('撤销整理：选择卡里显示还能撤销几步', undoItemLabel.includes('可撤销 11 步'), undoItemLabel);
+  check(
+    '撤销整理：悬浮选择卡里有「撤销上次整理」',
+    (await exec('Boolean(document.querySelector(\'#format-menu button[data-action="undo"]\'))')) === true
+  );
+  await exec('window.__cwTest.closeFormatMenu()');
   await exec('window.__cwTest.undoFormat()');
   await exec('window.__cwTest.undoFormat()');
   check('撤销整理：连续撤销两步后还剩 9 步', (await exec('window.__cwTest.formatUndoSteps()')) === 9);
@@ -1391,12 +1397,12 @@ module.exports = async function runScenario(ctx) {
   const fmtOptions = { indent: '2', blankLines: 'single', trimTrailing: true, normalizePunct: true };
   await exec(`window.__cwTest.setFormatOptions(${JSON.stringify(fmtOptions)})`);
 
-  await exec("document.getElementById('btn-format').click()");
+  await exec('window.__cwTest.openFormatMenu()');
   check(
-    '整本排版：排版菜单里有「一键整理本书…」',
+    '整本排版：悬浮选择卡里有「一键整理本书…」',
     (await exec('Boolean(document.querySelector(\'#format-menu button[data-action="apply-book"]\'))')) === true
   );
-  await exec("document.getElementById('btn-format').click()");
+  await exec('window.__cwTest.closeFormatMenu()');
 
   const fmtPreview = await exec(
     `window.api.formatPreviewBook(${JSON.stringify(fmtBookPath)}, ${JSON.stringify(fmtOptions)}).then((r) => (r.ok ? r.data : null))`
@@ -7092,18 +7098,19 @@ module.exports = async function runScenario(ctx) {
     marksTxtBefore.push({ file: chapter.file, size: stat.size, mtimeMs: stat.mtimeMs });
   }
 
-  // 50b. 「排版 ▾」里的两个开关：打开后标记层显示，正文不动
-  await exec('window.__cwTest.openFormatMenu()');
+  // 50b. 「显示 ▾」里的两个开关：打开后标记层显示，正文不动（v0.8.5 R1 从「排版 ▾」拆出来）
+  await exec("document.getElementById('btn-display').click()");
+  await waitFor('window.__cwTest.displayMenuOpen() === true');
   const marksMenuTexts = await exec(
-    "Array.from(document.querySelectorAll('#format-menu button')).map((el) => el.textContent)"
+    "Array.from(document.querySelectorAll('#display-menu button')).map((el) => el.textContent)"
   );
   check(
-    '编辑器小件：「排版 ▾」菜单里有「显示不可见字符」「超长段落提示」两个开关',
+    '编辑器小件：「显示 ▾」菜单里有「显示不可见字符」「超长段落提示」两个开关',
     marksMenuTexts.some((text) => text.includes('显示不可见字符')) &&
       marksMenuTexts.some((text) => text.includes('超长段落提示'))
   );
   await exec(
-    `document.querySelector('#format-menu button[data-action="toggle-invisibles"]').click()`
+    `document.querySelector('#display-menu button[data-action="toggle-invisibles"]').click()`
   );
   await waitFor('window.__cwTest.marksFlags().invisibles === true');
   check(
@@ -7111,21 +7118,21 @@ module.exports = async function runScenario(ctx) {
     (await exec('window.__cwTest.marksOverlayVisible()')) === true &&
       (await exec('window.__cwTest.dirty()')) === false
   );
-  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.getElementById('btn-display').click()");
   await exec(
-    `document.querySelector('#format-menu button[data-action="toggle-long-para"]').click()`
+    `document.querySelector('#display-menu button[data-action="toggle-long-para"]').click()`
   );
   await waitFor('window.__cwTest.marksFlags().longParagraphs === true');
-  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.getElementById('btn-display').click()");
   const marksCheckedMenu = await exec(
-    "Array.from(document.querySelectorAll('#format-menu button[data-on=\"1\"]')).map((el) => el.textContent)"
+    "Array.from(document.querySelectorAll('#display-menu button[data-on=\"1\"]')).map((el) => el.textContent)"
   );
   check(
     '编辑器小件：开着的开关在菜单里显示 ✓',
     marksCheckedMenu.length === 2 && marksCheckedMenu.every((text) => text.startsWith('✓')),
     marksCheckedMenu
   );
-  await exec('window.__cwTest.openFormatMenu()'); // 收起菜单
+  await exec('window.__cwTest.closeDisplayMenu()'); // 收起菜单
 
   // 50c. 不可见字符：全角空格逐个标 ␣，行尾空白只标一处；标记层文字与正文一一对应
   check(
@@ -7352,17 +7359,17 @@ module.exports = async function runScenario(ctx) {
       (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
       (await exec('window.__cwTest.marksOverlayVisible()')) === false
   );
-  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.getElementById('btn-display').click()");
   const caretMenuTexts = await exec(
-    "Array.from(document.querySelectorAll('#format-menu button')).map((el) => el.textContent)"
+    "Array.from(document.querySelectorAll('#display-menu button')).map((el) => el.textContent)"
   );
   check(
-    '当前段落高亮：「排版 ▾」菜单里多了一个默认不打勾的开关',
+    '当前段落高亮：「显示 ▾」菜单里多了一个默认不打勾的开关',
     caretMenuTexts.some((text) => text.includes('当前段落高亮')) &&
       (await exec("document.getElementById('format-caret-para').dataset.on")) === '0'
   );
   await exec(
-    'document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()'
+    'document.querySelector(\'#display-menu button[data-action="toggle-caret-para"]\').click()'
   );
   await waitFor('window.__cwTest.caretSettings().bookDisplay.caretParagraph === true');
   check(
@@ -7520,9 +7527,9 @@ module.exports = async function runScenario(ctx) {
   );
   await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
   await waitFor('window.__cwTest.marksCaretParaCount() === 1');
-  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.getElementById('btn-display').click()");
   await exec(
-    'document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()'
+    'document.querySelector(\'#display-menu button[data-action="toggle-caret-para"]\').click()'
   );
   await waitFor('window.__cwTest.marksFlags().caretParagraph === false');
   check(
@@ -8002,8 +8009,8 @@ module.exports = async function runScenario(ctx) {
   const caretMetaABytes = await fs.readFile(caretMetaA, 'utf8');
   const caretDirABefore = (await fs.readdir(caretBookA)).sort().join('|');
 
-  await exec('window.__cwTest.openFormatMenu()');
-  await exec('document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()');
+  await exec("document.getElementById('btn-display').click()");
+  await exec('document.querySelector(\'#display-menu button[data-action="toggle-caret-para"]\').click()');
   await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraph === true");
   const caretCfgAOn = await readCaretMemConfig();
   check(
@@ -8114,8 +8121,8 @@ module.exports = async function runScenario(ctx) {
   );
 
   // B 书单独关掉 → 覆盖全局的「开」；换书再回来仍是关
-  await exec('window.__cwTest.openFormatMenu()');
-  await exec('document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()');
+  await exec("document.getElementById('btn-display').click()");
+  await exec('document.querySelector(\'#display-menu button[data-action="toggle-caret-para"]\').click()');
   await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraph === false");
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
@@ -8548,6 +8555,307 @@ module.exports = async function runScenario(ctx) {
       )
   );
   await exec('window.__cwTest.closeFindPanel()');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
+  // 50o. 「整理」交互改版（v0.8.5 R1，作者 2026-11-01 11:12 要求）：
+  // 点「整理」= 直接用上次记住的 config.formatOptions 整理当前章（不弹窗、只改编辑区、仍是未保存、
+  // Ctrl+Z / 卡里「撤销上次整理」可退回、toast 带规则摘要与改动统计、无改动时不塞撤销栈）；
+  // 鼠标悬浮 / Tab 聚焦「整理」= 出「选择卡」（排版设置… / 一键整理本书… / 撤销上次整理），
+  // 离开按钮与卡片（短延迟）或 Esc 后收起；原来的显示项搬到新的「显示 ▾」。
+  // 全部只动编辑区 / DOM：不写章节 txt、不改书目、不生成 _trash / 临时文件。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('整理交互测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const r1BookPath = await exec('window.__cwTest.bookPathValue()');
+  const r1MetaPath = path.join(r1BookPath, '书目.json');
+  const r1ConfigPath = path.join(userData, 'config.json');
+  await exec("window.__cwTest.renameChapterAt(0, '第一刀')");
+  const r1Messy = '他说,"你好."   \n\n\n第二段  ';
+  const r1Formatted = '　　他说，"你好。"\n\n　　第二段';
+  await exec(`window.__cwTest.setText(${JSON.stringify(r1Messy)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  const r1Meta = JSON.parse(await fs.readFile(r1MetaPath, 'utf8'));
+  const r1Txt0Path = path.join(r1BookPath, r1Meta.chapters[0].file);
+  const r1Txt0Before = await fs.stat(r1Txt0Path);
+  const r1MetaBeforeBytes = await fs.readFile(r1MetaPath, 'utf8');
+  const r1DirBefore = (await fs.readdir(r1BookPath)).sort().join('|');
+  const r1ConfigKeysBefore = Object.keys(JSON.parse(await fs.readFile(r1ConfigPath, 'utf8'))).sort().join(',');
+  const r1Rules = {
+    indent: '2',
+    blankLines: 'single',
+    trimTrailing: true,
+    normalizePunct: true,
+    removeCjkSpaces: false,
+    curlyQuotes: false,
+    ellipsis: false
+  };
+  await exec(`window.__cwTest.setFormatOptions(${JSON.stringify(r1Rules)})`);
+  check(
+    '整理交互：点之前没有整理撤销步数，选择卡默认是收起的',
+    (await exec('window.__cwTest.formatUndoSteps()')) === 0 &&
+      (await exec('window.__cwTest.formatCardOpen()')) === false
+  );
+
+  // 50o-1. 点「整理」= 直接整理本章：不弹窗、结果只进编辑区、可撤销、toast 带规则与统计
+  const r1DepthBefore = await exec('window.__cwTest.formatUndoDepth()');
+  await exec("document.getElementById('btn-format').click()");
+  await waitFor('window.__cwTest.formatUndoSteps() === 1');
+  const r1DepthAfterClick = await exec('window.__cwTest.formatUndoDepth()');
+  check(
+    '整理交互：直接整理往撤销栈里正好压了一步',
+    r1DepthAfterClick === r1DepthBefore + 1,
+    { r1DepthBefore, r1DepthAfterClick }
+  );
+  const r1AfterClick = await exec('window.__cwTest.text()');
+  check(
+    '整理交互：点「整理」直接用记住的规则整理当前章（不弹任何对话框）',
+    r1AfterClick === r1Formatted &&
+      (await exec('window.__cwTest.formatDialogOpen()')) === false &&
+      (await exec('window.__cwTest.modalOpen()')) === false &&
+      (await exec('window.__cwTest.formatCardOpen()')) === false,
+    r1AfterClick
+  );
+  const r1Toast = await exec("document.getElementById('toast-area').textContent");
+  check(
+    '整理交互：成功提示带规则摘要 + 改动统计 + 保存 / 撤销说明',
+    r1Toast.includes('已整理本章（段首缩进 2 字符 · 段间空一行') &&
+      r1Toast.includes('共 2 段') &&
+      r1Toast.includes('标点转全角 2 处') &&
+      r1Toast.includes('Ctrl+S 保存') &&
+      r1Toast.includes('Ctrl+Z 撤销'),
+    r1Toast
+  );
+  check(
+    '整理交互：结果只在编辑区（仍是未保存），磁盘上的章节 txt 一个字节没动',
+    (await exec('window.__cwTest.dirty()')) === true &&
+      (await exec('window.__cwTest.chapterTextAt(0)')) === r1Messy
+  );
+  const r1Txt0AfterClick = await fs.stat(r1Txt0Path);
+  check(
+    '整理交互：直接整理不写书库（txt 大小 + mtime、书目字节、书内文件列表都不变，无 _trash / 临时文件）',
+    r1Txt0AfterClick.size === r1Txt0Before.size &&
+      r1Txt0AfterClick.mtimeMs === r1Txt0Before.mtimeMs &&
+      (await fs.readFile(r1MetaPath, 'utf8')) === r1MetaBeforeBytes &&
+      (await fs.readdir(r1BookPath)).sort().join('|') === r1DirBefore &&
+      !(await fs.readdir(r1BookPath)).join('|').includes('_trash')
+  );
+
+  // 撤销：Ctrl+Z 也能退回（快捷键先走「撤销上次整理」的快照，没有快照才交给原生撤销）
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }))"
+  );
+  await sleep(200);
+  check(
+    '整理交互：Ctrl+Z 撤销上次整理 → 编辑区回到整理前，快照栈清空',
+    (await exec('window.__cwTest.text()')) === r1Messy &&
+      (await exec('window.__cwTest.formatUndoSteps()')) === 0 &&
+      // 磁盘上本来就是整理前的内容，所以撤销后又变回「已保存」状态（没有脏改动）
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await exec('window.__cwTest.chapterTextAt(0)')) === r1Messy
+  );
+
+  // 再整理一次 → 已经很干净时再点：只提示「没有需要整理的地方」，不往撤销栈里塞东西
+  await exec("document.getElementById('btn-format').click()");
+  await waitFor('window.__cwTest.formatUndoSteps() === 1');
+  await exec("document.getElementById('btn-format').click()");
+  await sleep(300);
+  const r1NoChangeToast = await exec("document.getElementById('toast-area').textContent");
+  check(
+    '整理交互：无改动时提示「没有需要整理的地方」，不动正文、撤销步数不增加',
+    r1NoChangeToast.includes('没有需要整理的地方') &&
+      (await exec('window.__cwTest.text()')) === r1Formatted &&
+      (await exec('window.__cwTest.formatUndoSteps()')) === 1 &&
+      (await exec('window.__cwTest.formatUndoDepth()')) === r1DepthAfterClick,
+    r1NoChangeToast
+  );
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+
+  // 50o-2. 悬浮 / 聚焦出「选择卡」，离开按钮与卡片（短延迟）或 Esc 收起
+  await exec(
+    "document.getElementById('format-dropdown').dispatchEvent(new PointerEvent('pointerenter'))"
+  );
+  await waitFor('window.__cwTest.formatCardOpen() === true');
+  const r1CardItems = await exec('window.__cwTest.formatCardItems()');
+  check(
+    '整理交互：悬浮「整理」出选择卡，卡里正好三项（排版设置… / 一键整理本书… / 撤销上次整理）',
+    r1CardItems.map((item) => item.action).join(',') === 'settings,apply-book,undo' &&
+      r1CardItems[0].label.includes('排版设置') &&
+      r1CardItems[1].label.includes('一键整理本书') &&
+      r1CardItems[2].label.includes('撤销上次整理（可撤销 1 步）') &&
+      r1CardItems[2].disabled === false,
+    r1CardItems
+  );
+  check(
+    '整理交互：选择卡顶上一句说明 + 卡片里都是真按钮（键盘可 Tab / Enter）',
+    (await exec('window.__cwTest.formatCardNote()')).includes('点「整理」') &&
+      (await exec(
+        "Array.from(document.querySelectorAll('#format-menu button[data-action]')).every((el) => el.tagName === 'BUTTON' && el.type === 'button')"
+      )) === true &&
+      (await exec("document.getElementById('btn-format').tagName")) === 'BUTTON' &&
+      (await exec("document.getElementById('btn-format').textContent")).includes('整理')
+  );
+  await exec(
+    "document.getElementById('format-dropdown').dispatchEvent(new PointerEvent('pointerleave'))"
+  );
+  await sleep(120);
+  check(
+    '整理交互：鼠标刚离开时卡片还在（留出从按钮挪到卡片的时间）',
+    (await exec('window.__cwTest.formatCardOpen()')) === true
+  );
+  await waitFor('window.__cwTest.formatCardOpen() === false', 4000);
+  check('整理交互：离开按钮与卡片后（短延迟）自动收起', (await exec('window.__cwTest.formatCardOpen()')) === false);
+
+  // 键盘：Tab 聚焦「整理」按钮也出卡；Esc 收起
+  await exec("document.getElementById('btn-format').focus()");
+  await waitFor('window.__cwTest.formatCardOpen() === true');
+  check(
+    '整理交互：键盘聚焦「整理」按钮也出选择卡',
+    (await exec('window.__cwTest.formatCardOpen()')) === true &&
+      (await exec('document.activeElement.id')) === 'btn-format'
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await sleep(80);
+  check(
+    '整理交互：Esc 收起选择卡（焦点留在按钮上，不丢给正文）',
+    (await exec('window.__cwTest.formatCardOpen()')) === false &&
+      (await exec('window.__cwTest.text()')) === r1Formatted &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 50o-3. 卡里三项分别可用：排版设置… 打开原对话框
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.querySelector('#format-menu button[data-action=\"settings\"]').click()");
+  await waitFor('window.__cwTest.formatDialogOpen() === true');
+  check(
+    '整理交互：卡里「排版设置…」打开原来的智能排版对话框，卡片同时收起',
+    (await exec('window.__cwTest.formatDialogOpen()')) === true &&
+      (await exec('window.__cwTest.formatCardOpen()')) === false &&
+      (await exec('window.__cwTest.dialog()')) === null
+  );
+  await waitFor("window.__cwTest.formatSummary() !== '正在预览…'");
+  check(
+    '整理交互：对话框照样有实时预览（这章已经整理过，提示没有可改的地方）',
+    (await exec('window.__cwTest.formatSummary()')).includes('没有可改的地方')
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor('window.__cwTest.formatDialogOpen() === false');
+  check(
+    '整理交互：关掉对话框后正文不动（对话框本身仍是预览 + 套用到本章）',
+    (await exec('window.__cwTest.text()')) === r1Formatted &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 50o-4. 卡里「一键整理本书…」打开原来的整本确认框；取消后不写盘
+  await exec("window.__cwTest.newChapter('第二刀')");
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  const r1Messy2 = ' 第二段,"脏."  ';
+  await exec(`window.__cwTest.setText(${JSON.stringify(r1Messy2)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  const r1MetaAfterSecond = JSON.parse(await fs.readFile(r1MetaPath, 'utf8'));
+  const r1Txt1Path = path.join(r1BookPath, r1MetaAfterSecond.chapters[1].file);
+  const r1Txt1Before = await fs.stat(r1Txt1Path);
+  const r1Txt0BeforeModal = await fs.stat(r1Txt0Path);
+  const r1MetaBeforeModal = await fs.readFile(r1MetaPath, 'utf8');
+  const r1DirBeforeModal = (await fs.readdir(r1BookPath)).sort().join('|');
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec("document.querySelector('#format-menu button[data-action=\"apply-book\"]').click()");
+  await waitFor('window.__cwTest.modalOpen()');
+  check(
+    '整理交互：卡里「一键整理本书…」打开原来的整本确认框（规则摘要仍是同一套文案）',
+    (await exec('window.__cwTest.dialog()')) === '一键整理本书' &&
+      (await exec('window.__cwTest.modalMessage()')).includes('规则：段首缩进 2 字符 · 段间空一行') &&
+      (await exec('window.__cwTest.formatCardOpen()')) === false
+  );
+  await exec("window.__cwTest.answerModal('cancel')");
+  await waitFor('window.__cwTest.modalOpen() === false');
+  check(
+    '整理交互：整本整理取消后一个字都没写（txt 大小 + mtime、书目、书内文件列表不变）',
+    (await fs.stat(r1Txt1Path)).mtimeMs === r1Txt1Before.mtimeMs &&
+      (await fs.stat(r1Txt0Path)).mtimeMs === r1Txt0BeforeModal.mtimeMs &&
+      (await fs.readFile(r1MetaPath, 'utf8')) === r1MetaBeforeModal &&
+      (await fs.readdir(r1BookPath)).sort().join('|') === r1DirBeforeModal
+  );
+
+  // 50o-5. 卡里「撤销上次整理」：有 N 步时可点、点了退回；没步数时是灰的
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor('window.__cwTest.currentIndex() === 0');
+  check(
+    '整理交互：这一章还有 1 步可撤销（切回来仍然连着）',
+    (await exec('window.__cwTest.formatUndoSteps()')) === 1
+  );
+  await exec('window.__cwTest.openFormatMenu()');
+  const r1UndoItem = (await exec('window.__cwTest.formatCardItems()'))[2];
+  check(
+    '整理交互：卡片里「撤销上次整理（可撤销 1 步）」可点',
+    r1UndoItem.disabled === false && r1UndoItem.label === '撤销上次整理（可撤销 1 步）',
+    r1UndoItem
+  );
+  await exec("document.querySelector('#format-menu button[data-action=\"undo\"]').click()");
+  await sleep(200);
+  check(
+    '整理交互：卡里点「撤销上次整理」→ 回到整理前（仍是编辑区、未保存）',
+    (await exec('window.__cwTest.text()')) === r1Messy &&
+      (await exec('window.__cwTest.dirty()')) === true &&
+      (await exec('window.__cwTest.formatUndoSteps()')) === 0 &&
+      (await exec('window.__cwTest.chapterTextAt(0)')) === r1Formatted
+  );
+  check(
+    '整理交互：卡里撤销全程没有内部错误（toast 里不出现「内部错误」）',
+    !(await exec("document.getElementById('toast-area').textContent")).includes('内部错误')
+  );
+  await exec('window.__cwTest.openFormatMenu()');
+  const r1UndoItemEmpty = (await exec('window.__cwTest.formatCardItems()'))[2];
+  check(
+    '整理交互：没有可撤销的步数时，卡片里那一项是灰的、文案不带数字',
+    r1UndoItemEmpty.disabled === true && r1UndoItemEmpty.label === '撤销上次整理',
+    r1UndoItemEmpty
+  );
+  await exec('window.__cwTest.closeFormatMenu()');
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+
+  // 50o-6. 原来的显示项搬到「显示 ▾」：点一下展开，仍是只改 CSS 的显示（正文不动）
+  const r1TextBeforeDisplay = await exec('window.__cwTest.text()');
+  const r1Txt0BeforeDisplay = await fs.stat(r1Txt0Path);
+  const r1MetaBeforeDisplay = await fs.readFile(r1MetaPath, 'utf8');
+  await exec("document.getElementById('btn-display').click()");
+  await waitFor('window.__cwTest.displayMenuOpen() === true');
+  const r1DisplayActions = await exec('window.__cwTest.displayMenuItems()');
+  check(
+    '整理交互：「显示 ▾」接管原来的显示项（三档预设 / 三个开关 / 正文显示设置）',
+    ['preset-compact', 'preset-normal', 'preset-loose', 'toggle-invisibles', 'toggle-long-para', 'toggle-caret-para', 'display-settings'].every(
+      (action) => r1DisplayActions.includes(action)
+    ),
+    r1DisplayActions
+  );
+  await exec("document.querySelector('#display-menu button[data-action=\"display-settings\"]').click()");
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  check(
+    '整理交互：「正文显示设置…」打开设置并收起显示菜单',
+    (await exec('window.__cwTest.displayMenuOpen()')) === false &&
+      (await exec('window.__cwTest.settingsOpen()')) === true
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor('window.__cwTest.settingsOpen() === false');
+  check(
+    '整理交互：打开 / 关掉显示设置不碰正文，也不写书库',
+    (await exec('window.__cwTest.text()')) === r1TextBeforeDisplay &&
+      (await exec('window.__cwTest.dirty()')) === false &&
+      (await fs.stat(r1Txt0Path)).mtimeMs === r1Txt0BeforeDisplay.mtimeMs &&
+      (await fs.readFile(r1MetaPath, 'utf8')) === r1MetaBeforeDisplay &&
+      (await fs.readdir(r1BookPath)).sort().join('|') === r1DirBeforeModal &&
+      !(await fs.readdir(r1BookPath)).join('|').includes('_trash')
+  );
+  check(
+    '整理交互：全程没有给配置加新字段（只沿用 formatOptions），书库里也没有多出文件',
+    Object.keys(JSON.parse(await fs.readFile(r1ConfigPath, 'utf8'))).sort().join(',') ===
+      r1ConfigKeysBefore
+  );
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
 
