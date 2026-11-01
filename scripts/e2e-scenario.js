@@ -10608,7 +10608,8 @@ module.exports = async function runScenario(ctx) {
   // 56. Electron 安全开关与窗口行为（v0.9 C-1）：
   //     在真实 Electron 里复核窗口 webPreferences（sandbox / contextIsolation / nodeIntegration / webSecurity…）、
   //     渲染层确实拿不到 Node、window.open / 外部导航 / <webview> 都被拦、浏览器权限一律拒绝
-  //     （含「被拒请求的日志字段不含本机路径」）、单实例锁生效（再启动一个进程不多开窗口）。
+  //     （含「被拒请求的日志字段不含本机路径」）、单实例锁生效（再启动一个进程不多开窗口）、
+  //     页面 CSP 真的在拦（内联脚本不执行 + eval 被拒，v0.9 C-10 补）。
   //     期望值只有一处来源：core/security-policy.js（单测断言同一份常量）。
   //     放在多窗口组之前：那一组最后会关掉最后一个窗口让应用退出。
   const securityPolicy = require('../core/security-policy');
@@ -10688,6 +10689,51 @@ module.exports = async function runScenario(ctx) {
     '安全开关：渲染层没有 <webview> 能力（webviewTag 关闭）',
     webviewProbe.loadURL === 'undefined',
     webviewProbe
+  );
+  // CSP（v0.9 C-10 补的运行时复核）：meta 只是声明，这里在真实页面里证明它真的在拦——
+  // 内联 <script> 不执行且收到 script-src 违规事件、eval / new Function 被 script-src 拒绝。
+  const cspProbe = JSON.parse(
+    await exec(
+      `(async () => {
+        const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+        const script = document.createElement('script');
+        script.textContent = 'window.__cwCspInlineRan = true';
+        const violation = await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(null), 3000);
+          document.addEventListener('securitypolicyviolation', function once(event) {
+            clearTimeout(timer);
+            document.removeEventListener('securitypolicyviolation', once);
+            resolve({ directive: event.effectiveDirective || event.violatedDirective || '', sample: event.sample || '' });
+          });
+          document.body.appendChild(script);
+        });
+        script.remove();
+        let evalError = null;
+        try { new Function('return 1')(); } catch (err) { evalError = err && err.name; }
+        return JSON.stringify({ meta: meta ? meta.getAttribute('content') : null, inlineRan: window.__cwCspInlineRan === true, violation, evalError });
+      })()`
+    )
+  );
+  check(
+    '安全开关：页面带着 CSP（default-src / script-src / style-src 只认 self，connect-src 只为字体多 data:）',
+    typeof cspProbe.meta === 'string' &&
+      cspProbe.meta.includes("default-src 'self'") &&
+      cspProbe.meta.includes("script-src 'self'") &&
+      cspProbe.meta.includes("connect-src 'self' data:") &&
+      !/unsafe-|https?:|ws:|\*/i.test(cspProbe.meta),
+    cspProbe.meta
+  );
+  check(
+    '安全开关：CSP 真的拦下内联脚本（没执行，且收到 script-src 违规事件）',
+    cspProbe.inlineRan === false &&
+      Boolean(cspProbe.violation) &&
+      /^script-src/.test(cspProbe.violation.directive),
+    cspProbe
+  );
+  check(
+    '安全开关：CSP 拦下 eval / new Function（script-src 没有 unsafe-eval）',
+    cspProbe.evalError === 'EvalError',
+    cspProbe.evalError
   );
   const secProbe = ctx.securityProbe();
   check(
