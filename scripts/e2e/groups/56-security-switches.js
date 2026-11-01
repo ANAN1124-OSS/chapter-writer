@@ -31,7 +31,8 @@ module.exports = async function group56SecuritySwitches(t) {
   //     渲染层确实拿不到 Node、window.open / 外部导航 / <webview> 都被拦、浏览器权限一律拒绝
   //     （含「被拒请求的日志字段不含本机路径」）、单实例锁生效（再启动一个进程不多开窗口）、
   //     页面 CSP 真的在拦（内联脚本不执行 + eval 被拒，v0.9 C-10 补；object-src / base-uri /
-  //     frame-src 收紧到 none 且动态 <base> 改不了文档基地址，v0.9 C-4 收尾）。
+  //     frame-src 收紧到 none 且动态 <base> 改不了文档基地址，v0.9 C-4 收尾；form-action 也补了
+  //     'none'，页面本来就没有 <form>，零行为变化）。
   //     期望值只有一处来源：core/security-policy.js（单测断言同一份常量）。
   //     放在多窗口组之前：那一组最后会关掉最后一个窗口让应用退出。
   const liveWindowCount = () => windowsInfo().filter((item) => !item.destroyed).length;
@@ -176,6 +177,11 @@ module.exports = async function group56SecuritySwitches(t) {
     '安全开关：base-uri 真的生效（动态插入 <base> 改不了文档基地址）',
     cspProbe.baseRestored === true && cspProbe.baseAfter === cspProbe.baseBefore,
     { before: cspProbe.baseBefore, after: cspProbe.baseAfter, restored: cspProbe.baseRestored }
+  );
+  check(
+    "安全开关：CSP 也带 form-action 'none'（页面没有 <form>，零行为变化的纯兜底）",
+    typeof cspProbe.meta === 'string' && cspProbe.meta.includes("form-action 'none'"),
+    cspProbe.meta
   );
   const secProbe = securityProbe();
   check(

@@ -117,18 +117,22 @@ test('CSP：index.html 的指令集锁死（只许 self，connect-src 只为字�
     // 而 base-uri 根本没有 fallback（不写就完全不限）。页面本来就不用这三样，收紧到 none。
     'object-src': ["'none'"],
     'base-uri': ["'none'"],
-    'frame-src': ["'none'"]
+    'frame-src': ["'none'"],
+    // form-action 也没有 fallback（default-src 不管它）：页面里没有任何 <form>，
+    // 收紧到 'none' 是零行为变化的纯兜底。
+    'form-action': ["'none'"]
   });
   // 任何放宽都必须先改这里再改 meta：unsafe-* / 远程来源 / 通配符一律不许出现。
   assert.doesNotMatch(meta[1], /unsafe-|http:|https:|ws:|wss:|\*/i);
 });
 
-test('CSP：页面不用 base / iframe / object / embed（三条 none 指令不会误伤自己）', () => {
+test('CSP：页面不用 base / iframe / object / embed / form（四条 none 指令不会误伤自己）', () => {
   // 收紧到 'none' 的前提是页面真的不用这些元素；以后谁加了 <iframe> / <base>，这条会先红，
   // 逼他回来重新想 CSP，而不是让新元素在运行时被默默拦掉。
-  for (const tag of ['base', 'iframe', 'object', 'embed']) {
+  const directiveOf = { base: 'base-uri', iframe: 'frame-src', form: 'form-action' };
+  for (const tag of ['base', 'iframe', 'form', 'object', 'embed']) {
     const found = INDEX.match(new RegExp(`<${tag}\\b`, 'gi')) || [];
-    assert.deepEqual(found, [], `index.html 里出现了 <${tag}>，请先复核 CSP 的 ${tag === 'base' ? 'base-uri' : tag === 'iframe' ? 'frame-src' : 'object-src'} 'none'`);
+    assert.deepEqual(found, [], `index.html 里出现了 <${tag}>，请先复核 CSP 的 ${directiveOf[tag] || 'object-src'} 'none'`);
   }
 });
 
