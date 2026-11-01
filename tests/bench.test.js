@@ -346,7 +346,9 @@ test('静态闸门：基准脚本不删任何东西（删除动作不进这个�
 
 test('静态闸门：main.js 把 --bench 接进自动化家族并在自动化里懒加载驱动', () => {
   assert.match(MAIN_SRC, /const isBench = process\.argv\.includes\('--bench'\);/);
-  assert.match(MAIN_SRC, /const automation = isE2E \|\| isBench \|\| Boolean\(screenshotPath\);/);
+  // 自动化家族以后可能继续加模式（v0.9 A-4 加了 --contrast），这里只要求 --bench 在里面，
+  // 整句的准确形状由 tests/contrast.test.js 的整体闸门钉住。
+  assert.match(MAIN_SRC, /const automation = [^;]*isBench[^;]*Boolean\(screenshotPath\);/);
   const body = /async function runAutomation\(\)[\s\S]*?\n\}/.exec(MAIN_SRC);
   assert.ok(body, '找不到 runAutomation()');
   assert.match(body[0], /if \(isBench\) \{/, 'runAutomation 必须按 --bench 分流');

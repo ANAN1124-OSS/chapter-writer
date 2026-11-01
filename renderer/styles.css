@@ -3,17 +3,37 @@
   --paper-soft: #fbf9f4;
   --paper-deep: #efe9dd;
   --ink: #2b2822;
-  --ink-soft: #6f6758;
-  --ink-faint: #9a9080;
+  /* 次要文字色（v0.9 A-4）：章节列表的底色是 --paper-deep（比纸色还深一档），
+   * 原来的 #6f6758 在牛皮纸的 #e5d8bf 上只有 3.97:1、奶油纸 4.40:1——12px 的章节号 / 字数 /
+   * 分卷名都读不清。压到 #5e584a 后牛皮纸 5.09:1、奶油纸 5.65:1、标准纸 5.89:1。 */
+  --ink-soft: #5e584a;
+  /* 比 --ink-soft 再淡一档（书卡「最后修改」/ 快捷键提示 / 占位提示）：原来 #9a9080 在纸色上
+   * 只有 2.87:1、牛皮纸 2.73:1。压到 #6a6657 后标准纸 5.2:1、牛皮纸 4.6:1，过 AA 4.5:1。 */
+  --ink-faint: #6a6657;
   --line: #e2dacb;
   --line-strong: #d3c8b4;
   --accent: #8a5a3b;
   --accent-soft: #b98a63;
   --danger: #a94442;
-  --ok: #4f7a52;
-  --warn: #a9741e;
+  --ok: #3f6642;
+  /* 警示色（v0.9 A-4）：原来 #a9741e 在纸白上 3.84:1、在冲突副本徽标自己的底色上 3.35:1，
+   * 而它被当成**文字色**用在冲突提示 / 校对规则名 / 字数不足提示上（都是 11–12px）。
+   * 压到 #8a5c13 后纸白 5.49:1、徽标底色上 4.60:1。 */
+  --warn: #8a5c13;
   --input-bg: #ffffff;
   --hover-tint: rgba(255, 255, 255, .55);
+  /* 实心按钮 / 品牌标记上的文字色（v0.9 A-4）：浅色主题是白字（在 --accent 上 5.82:1），
+   * 夜间主题改成深色字——夜间 --accent 是浅棕，白字只有 2.97:1。 */
+  --on-accent: #ffffff;
+  /* 焦点环（v0.9 A-4）：原来用 --accent-soft，浅色纸上只有 2.64–2.96:1，低于 WCAG 1.4.11
+   * 要求的界面图形 3:1；改用 --accent 的值（浅色纸 5.5:1）。
+   * ⚠ 不要写成 `var(--accent)`：自定义属性里的 var() 在**声明它的元素**（这里是 :root）上就
+   * 替换成具体值了，夜间主题在 body 上覆盖 --accent 对 --focus-ring 完全无效（审计脚本量出来
+   * 夜间焦点环只有 2.54:1，就是这个坑），所以浅色 / 夜间各写一份具体颜色。 */
+  --focus-ring: #8a5a3b;
+  /* 滚动条滑块（v0.9 A-4）：原来直接用 --line-strong，在纸色上只有 1.34–1.54:1（几乎看不见）；
+   * #85827c 在标准纸 3.51:1、牛皮纸 3.11:1、夜间 4.10:1，过界面图形 3:1。同样不用 var() 混色。 */
+  --scroll-thumb: #85827c;
   --ui-font: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   --editor-font-family: "SimSun", "Songti SC", "Source Han Serif SC", serif;
   --editor-font-size: 18px;
@@ -35,14 +55,18 @@
   --btn-press: rgba(43, 40, 34, .09);
   --btn-primary-hover: #7a4d31;
   --btn-primary-press: #6b422a;
+  /* 危险按钮悬停色（v0.9 A-4）：原来是写死的 #8f3836，夜间主题的 --danger 变成浅红、
+   * 文字也变成深色了，写死的深红悬停会把深色字压到 2.16:1；改成令牌，两套主题各自成立。 */
+  --btn-danger-hover: #8f3836;
   --menu-radius: 10px;
   --menu-shadow: 0 14px 34px rgba(60, 48, 30, .18), 0 2px 6px rgba(60, 48, 30, .07);
   --menu-hover: rgba(138, 90, 59, .10);
   --menu-item-radius: 7px;
   --chapter-hover: rgba(138, 90, 59, .065);
-  --chapter-active-bg: color-mix(in srgb, var(--accent) 7%, var(--paper-soft));
-  --chapter-active-hover: color-mix(in srgb, var(--accent) 11%, var(--paper-soft));
-  --chapter-active-ring: color-mix(in srgb, var(--accent) 22%, transparent);
+  /* 当前章高亮（v0.9 A-4）：混色直接写在 .chapter-item.active 的规则里，不在这里做令牌——
+   * 自定义属性里的 var() 在**声明它的元素**（:root）上就替换好了，其余 5 套主题覆盖
+   * --paper-soft 对这些令牌无效（奶油 / 绿 / 牛皮纸 / 网格纸里「当前章」一直用标准纸的浅白底），
+   * 写进规则才会按元素当前的纸色解析。夜间用更高百分比覆盖，见下面 body.theme-night 段。 */
 }
 
 /* 背景主题：只换纸色/纹理（书架、章节栏、正文一起变），正文墨色默认不动 */
@@ -93,16 +117,25 @@ body.theme-night {
   --paper-deep: #2f3237;
   --ink: #dcd8d0;
   --ink-soft: #a8a49b;
-  --ink-faint: #7e7a72;
+  /* 夜间次要文字（v0.9 A-4）：原来 #7e7a72 在纸色上 3.45:1、在输入框底色上 2.96:1；
+   * 提到 #9a968d 后纸色 5.00:1、纸白 4.66:1、输入框 4.60:1。 */
+  --ink-faint: #9a968d;
   --line: #3a3d42;
   --line-strong: #4a4e54;
-  --accent: #c08a5f;
+  /* 夜间主色（v0.9 A-4）：原来 #c08a5f 被当成「当前章章节号」的文字色时，在当前章那层
+   * （accent 12% + 纸白）上只有 4.33:1；提亮到 #c99a6a 后 4.86:1，当实心按钮底色也照样
+   * 成立（配 --on-accent 深色字 6.4:1）。 */
+  --accent: #c99a6a;
   --accent-soft: #d3a274;
-  --danger: #d06a6a;
+  /* 夜间危险色（v0.9 A-4）：原来 #d06a6a 在纸白（书卡底色）上只有 4.18:1，而损坏书卡的标题
+   * 就是它；提亮到 #dc7c7c 后 5.05:1，同时仍能当实心按钮底色（配 --on-accent 深色字 5.58:1）。 */
+  --danger: #dc7c7c;
   --ok: #7fae83;
   --warn: #d0a04a;
   --input-bg: #2b2e32;
   --hover-tint: rgba(255, 255, 255, .07);
+  /* 夜间实心按钮 / 品牌标记用深色字（白字在浅棕 --accent 上只有 2.97:1） */
+  --on-accent: #201c16;
   --caret-para-tint: rgba(255, 244, 226, .055);
   --caret-para-edge: rgba(220, 178, 128, .38);
   --editor-caret: #e6bb87;
@@ -112,14 +145,22 @@ body.theme-night {
   --find-hit-current-edge: rgba(255, 208, 128, .85);
   /* 夜间界面小件：按钮 / 菜单 / 当前章都用一层淡淡的暖白，避免纯黑死板 */
   --btn-press: rgba(255, 255, 255, .04);
-  --btn-primary-hover: #b07a4f;
-  --btn-primary-press: #9d6b45;
+  --btn-primary-hover: #bb8455;
+  --btn-primary-press: #a8744a;
   --menu-shadow: 0 16px 40px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .35);
   --menu-hover: rgba(255, 255, 255, .08);
   --chapter-hover: rgba(255, 255, 255, .055);
-  --chapter-active-bg: color-mix(in srgb, var(--accent) 12%, var(--paper-soft));
-  --chapter-active-hover: color-mix(in srgb, var(--accent) 17%, var(--paper-soft));
-  --chapter-active-ring: color-mix(in srgb, var(--accent) 34%, transparent);
+  --btn-danger-hover: #c97070;
+  /* 夜间焦点环与滚动条滑块（v0.9 A-4）：浅色主题那两行用的是具体颜色而不是 var(--accent)，
+   * 所以夜间要各写一份（原因见 :root 里的注释）。 */
+  --focus-ring: #c99a6a;
+  --scroll-thumb: #817f7d;
+  /* 夜间当前章高亮：混色写在 .chapter-item.active 的 body.theme-night 覆盖规则里
+   * （夜间纸色深，百分比要比浅色主题高一档；原因见 :root 的 --chapter-hover 注释）。 */
+  /* 夜间原生控件跟随深色（v0.9 A-4）：书架 / 章节栏 / 设置弹层这些没写自定义滚动条的地方，
+   * 默认 Chromium 会给浅灰滚动条，夜间主题里很扎眼；`color-scheme: dark` 让原生滚动条、
+   * select 下拉、取色器一起变深色（输入框自己有 --input-bg，不受影响）。 */
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -172,7 +213,7 @@ html, body {
   justify-content: center;
   border-radius: 7px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 15px;
   transform: translateY(4px);
 }
@@ -258,7 +299,7 @@ html, body {
 }
 .shelf-content-row:first-child { border-top: none; }
 .shelf-content-row:hover { background: var(--paper-deep); }
-.shelf-content-row:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.shelf-content-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .shelf-content-title { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; color: var(--ink-soft); }
 .shelf-content-book { font-weight: 600; color: var(--ink); }
 .shelf-content-chapter { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -270,8 +311,10 @@ html, body {
   white-space: nowrap;
 }
 .shelf-content-snippet mark {
+  /* 正文命中的高亮（v0.9 A-4）：底色是固定的浅琥珀，所以文字必须是固定的深色。
+   * 以前写 `color: inherit`——夜间主题的正文是浅灰，压在浅琥珀上只有 2.08:1，字直接糊了。 */
   background: #ffe9a8;
-  color: inherit;
+  color: #2b2822;
   padding: 0 1px;
   border-radius: 2px;
 }
@@ -414,20 +457,28 @@ html, body {
   color: var(--accent);
 }
 .settings-scope-hint { margin: 2px 0 6px; line-height: 1.6; }
-.book-card.corrupt { border-color: #d9b3a6; background: #fbf3ee; }
+/* 损坏 / 无法解析的书卡（v0.9 A-4）：底色与描边以前是写死的浅色（#fbf3ee / #d9b3a6），
+ * 夜间主题里会变成深色书架中间一张发白的卡片、标题（--danger）只有 3.22:1。
+ * 改成「主题底色 + 一点危险色」，两套主题都成立。 */
+.book-card.corrupt {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line-strong));
+  background: color-mix(in srgb, var(--danger) 7%, var(--paper-soft));
+}
 .book-card.corrupt .book-card-title { color: var(--danger); }
 .book-card.corrupt .btn { align-self: flex-start; margin-top: 4px; }
 
 /* 同步冲突副本：书卡标黄提示（只提示；不自动合并、不删文件） */
-.book-card.has-conflict { border-color: rgba(169, 116, 30, .5); }
+/* 颜色改成从 --warn 调（v0.9 A-4）：原来写死 rgba(169,116,30,…)，夜间主题不会跟着变亮黄，
+ * 而文字色是 --warn（夜间变成亮黄）——底色和文字各走各的。 */
+.book-card.has-conflict { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
 .book-conflict-badge {
   align-self: flex-start;
   max-width: 100%;
   padding: 3px 9px;
   overflow: hidden;
-  border: 1px solid rgba(169, 116, 30, .45);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
   border-radius: 999px;
-  background: rgba(169, 116, 30, .12);
+  background: color-mix(in srgb, var(--warn) 6%, var(--paper-soft));
   color: var(--warn);
   font-family: var(--ui-font);
   font-size: 12px;
@@ -437,7 +488,7 @@ html, body {
   white-space: nowrap;
   cursor: pointer;
 }
-.book-conflict-badge:hover { background: rgba(169, 116, 30, .22); }
+.book-conflict-badge:hover { background: color-mix(in srgb, var(--warn) 22%, var(--paper-soft)); }
 
 .book-card-more {
   position: absolute;
@@ -513,7 +564,7 @@ html, body {
   box-shadow: inset 0 1px 3px rgba(43, 40, 34, .10);
 }
 .btn:focus-visible {
-  outline: 2px solid var(--accent-soft);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .btn:disabled { opacity: .45; cursor: default; }
@@ -521,7 +572,7 @@ html, body {
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .btn.primary:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
 .btn.primary:active:not(:disabled) { background: var(--btn-primary-press); }
@@ -529,8 +580,8 @@ html, body {
 .btn.ghost { border-color: transparent; color: var(--ink-soft); }
 .btn.ghost:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
 .btn.ghost:active:not(:disabled) { background: var(--btn-press); }
-.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn.danger:hover { background: #8f3836; }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: var(--on-accent); }
+.btn.danger:hover { background: var(--btn-danger-hover); }
 .btn.tiny { font-size: 11px; padding: 2px 7px; min-height: 0; }
 
 /* ---------- 编辑器布局 ---------- */
@@ -618,14 +669,24 @@ body.resizing .editor {
 }
 .chapter-item:hover { background: var(--chapter-hover); }
 /* 当前章（v0.8.5 R2）：比悬停更重的一层底色 + 左侧强调线 + 一圈细内描边，一眼能看出写到哪。
- * 颜色全部来自主题变量，亮色 / 夜间各自成立；只改外观，不改当前章的选中逻辑。 */
+ * 颜色全部来自主题变量，亮色 / 夜间各自成立；只改外观，不改当前章的选中逻辑。
+ * 混色写在这里而不是做成 :root 令牌（v0.9 A-4）：写进规则才会按**当前元素所在主题**的
+ * --accent / --paper-soft 解析，奶油 / 绿 / 牛皮纸 / 网格纸才会有各自纸色的高亮。 */
 .chapter-item.active {
-  background: var(--chapter-active-bg);
+  background: color-mix(in srgb, var(--accent) 7%, var(--paper-soft));
   border-left-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--chapter-active-ring);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
   font-weight: 600;
 }
-.chapter-item.active:hover { background: var(--chapter-active-hover); }
+.chapter-item.active:hover { background: color-mix(in srgb, var(--accent) 11%, var(--paper-soft)); }
+/* 夜间纸色深，同样的百分比几乎看不出来：抬到 12% / 17% / 34%（原 v0.8.5 的夜间口径）。 */
+body.theme-night .chapter-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--paper-soft));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent);
+}
+body.theme-night .chapter-item.active:hover {
+  background: color-mix(in srgb, var(--accent) 17%, var(--paper-soft));
+}
 .chapter-num { flex: 0 0 auto; color: var(--ink-soft); font-size: 12px; }
 .chapter-item.active .chapter-num { color: var(--accent); }
 .chapter-name {
@@ -650,14 +711,21 @@ body.resizing .editor {
 .chapter-item.status-revising .chapter-status-dot { background: #d99a2b; }
 .chapter-item.status-done .chapter-status-dot { background: #3f9e5f; }
 /* 章节画一个当前章小圆点 / 备注 / 字数的彩色提示，只在当前章加一圈与底色同色的描边，让圆点更清楚 */
-.chapter-item.active .chapter-status-dot { box-shadow: 0 0 0 2px var(--chapter-active-bg); }
-.chapter-note-mark { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
+.chapter-item.active .chapter-status-dot {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 7%, var(--paper-soft));
+}
+body.theme-night .chapter-item.active .chapter-status-dot {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, var(--paper-soft));
+}
+.chapter-note-mark { flex: 0 0 auto; font-size: 11px; color: var(--ink-soft); }
 .chapter-item.active .chapter-note-mark { color: var(--ink-soft); }
-/* 章节列表的字数（来自书目缓存，保存后更新）：紧凑的「1.2万」，窄栏也不会把章名挤没 */
+/* 章节列表的字数（来自书目缓存，保存后更新）：紧凑的「1.2万」，窄栏也不会把章名挤没。
+ * 颜色用 --ink-soft（v0.9 A-4）：这一列压在更深的 --paper-deep 上，11px 用 --ink-faint
+ * 在牛皮纸主题只有 3.50:1。 */
 .chapter-chars {
   flex: 0 0 auto;
   font-size: 11px;
-  color: var(--ink-faint);
+  color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }
 .chapter-item.active .chapter-chars { color: var(--ink-soft); }
@@ -817,7 +885,7 @@ body.resizing .editor {
 .dropdown-menu button:active:not(:disabled) { background: var(--btn-press); }
 .dropdown-menu button:focus-visible,
 .context-menu button:focus-visible {
-  outline: 2px solid var(--accent-soft);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -909,9 +977,15 @@ body.resizing .editor {
   text-indent: 0;
 }
 .editor::placeholder { color: var(--ink-faint); }
+/* 输入框占位提示（v0.9 A-4）：以前只给正文编辑区写了 ::placeholder，搜索框 / 查找 / 重命名 /
+ * 书籍信息这些输入框走浏览器默认灰（#757575），夜间主题的深色输入框上只有 2.96:1。
+ * 统一跟 --ink-faint 走（浅色纸 4.97:1、夜间输入框 4.60:1）。 */
+.text-input::placeholder,
+input::placeholder,
+textarea::placeholder { color: var(--ink-faint); opacity: 1; }
 .editor::-webkit-scrollbar { width: 10px; }
 .editor::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
+  background: var(--scroll-thumb);
   border-radius: 6px;
   border: 2px solid var(--paper);
 }
@@ -1175,9 +1249,9 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 /* 超长段落小标签：点一下跳到下一段（只移动光标，不改字） */
 .status-long {
   padding: 1px 8px;
-  border: 1px solid rgba(169, 116, 30, .45);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
   border-radius: 10px;
-  background: rgba(226, 186, 74, .16);
+  background: color-mix(in srgb, var(--warn) 10%, var(--paper-soft));
   color: var(--warn);
   font-family: inherit;
   font-size: 11.5px;
@@ -2088,7 +2162,7 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 }
 .proofread-result:last-child { border-bottom: none; }
 .proofread-result:hover { background: var(--paper-deep); }
-.proofread-result:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.proofread-result:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .proofread-head {
   display: flex;
   align-items: center;
@@ -2222,7 +2296,7 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 .fragment-item:last-child { border-bottom: none; }
 .fragment-item:hover { background: var(--paper-deep); }
 .fragment-item.selected { background: var(--paper-deep); box-shadow: inset 3px 0 0 var(--accent); }
-.fragment-item:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.fragment-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .fragment-item-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fragment-item-meta { margin-top: 2px; font-size: 11.5px; color: var(--ink-soft); }
 .fragment-item-preview {
@@ -2441,7 +2515,7 @@ body.chapter-dragging * { user-select: none; }
 .reading-note {
   padding: 6px 22px;
   color: var(--warn);
-  background: rgba(169, 116, 30, .08);
+  background: color-mix(in srgb, var(--warn) 8%, var(--paper));
   border-bottom: 1px solid var(--line);
 }
 .reading-main {
@@ -2457,7 +2531,7 @@ body.chapter-dragging * { user-select: none; }
   outline: none;
   overscroll-behavior: contain;
 }
-.reading-scroll:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.reading-scroll:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .reading-content {
   max-width: var(--reading-max-width);
   margin: 0 auto;

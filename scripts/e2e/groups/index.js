@@ -13,7 +13,8 @@ const groups = [
   require('./63-chapter-list-perf'),
   require('./64-data-safety'),
   require('./65-marks-lazy-spans'),
-  require('./66-destructive-recovery')
+  require('./66-destructive-recovery'),
+  require('./67-contrast-a11y')
 ];
 
 module.exports = groups;

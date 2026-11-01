@@ -37,12 +37,15 @@ const isE2E = process.argv.includes('--e2e');
 // 前端基准（v0.9 A-1）：和截图 / E2E 同一套自动化模式（临时 userData + 临时书库 + ?test=1
 // 测试钩子），只是驱动换成 scripts/bench-driver.js；正常启动路径完全不受影响。
 const isBench = process.argv.includes('--bench');
+// 对比度审计（v0.9 A-4）：同一套自动化模式（临时 userData + 临时书库 + ?test=1 测试钩子），
+// 驱动换成 scripts/contrast-driver.js；只在开发自检时走，正常启动路径完全不受影响。
+const isContrast = process.argv.includes('--contrast');
 const booksRootOverride = argValue('books-root');
 const screenshotPath = argValue('screenshot');
 const screenshotBook = argValue('book');
 const screenshotChapter = argValue('chapter');
 const screenshotDialog = argValue('dialog');
-const automation = isE2E || isBench || Boolean(screenshotPath);
+const automation = isE2E || isBench || isContrast || Boolean(screenshotPath);
 
 const { createConfigStore } = require('./core/config');
 const { atomicWriteFile } = require('./core/atomic');
@@ -2207,6 +2210,11 @@ async function runAutomation() {
   if (isBench) {
     const benchDriver = require('./scripts/bench-driver.js');
     await benchDriver.run(automationHost());
+    return;
+  }
+  if (isContrast) {
+    const contrastDriver = require('./scripts/contrast-driver.js');
+    await contrastDriver.run(automationHost());
     return;
   }
   const driver = require('./scripts/screenshot-driver.js');

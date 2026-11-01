@@ -290,30 +290,9 @@ function summarize(samples) {
   };
 }
 
-// 终端表格对齐：中文按 2 列宽算，否则中文场景名会把列挤歪
-function displayWidth(text) {
-  let width = 0;
-  for (const ch of String(text == null ? '' : text)) {
-    const code = ch.codePointAt(0);
-    const wide =
-      (code >= 0x1100 && code <= 0x115f) ||
-      (code >= 0x2e80 && code <= 0xa4cf) ||
-      (code >= 0xac00 && code <= 0xd7a3) ||
-      (code >= 0xf900 && code <= 0xfaff) ||
-      (code >= 0xfe30 && code <= 0xfe6f) ||
-      (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6) ||
-      (code >= 0x20000 && code <= 0x3fffd);
-    width += wide ? 2 : 1;
-  }
-  return width;
-}
-
-function padCell(text, width, align = 'left') {
-  const value = String(text == null ? '' : text);
-  const gap = Math.max(0, width - displayWidth(value));
-  return align === 'right' ? ' '.repeat(gap) + value : value + ' '.repeat(gap);
-}
+// 终端表格对齐（v0.9 A-4 起在 scripts/table.js：对比度审计脚本也要打同一套中文表格，
+// 两份补位逻辑迟早会算出不一样的对齐；这里原样 re-export，bench 的既有单测仍按老接口跑）。
+const { displayWidth, padCell } = require('./table');
 
 function fixed(value, digits = 1) {
   return Number.isFinite(value) ? value.toFixed(digits) : '-';
