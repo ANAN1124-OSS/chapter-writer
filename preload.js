@@ -9,6 +9,12 @@ async function invoke(channel, ...args) {
   }
 }
 
+// 主进程 → 渲染层的单向通知：只注册函数类型的回调，忽略事件对象本身（和以前每个频道手写一遍等价）。
+function on(channel, cb) {
+  if (typeof cb !== 'function') return;
+  ipcRenderer.on(channel, (_event, ...args) => cb(...args));
+}
+
 contextBridge.exposeInMainWorld('api', {
   appVersion: () => invoke('app:version'),
   appWarning: () => invoke('app:warning'),
@@ -129,27 +135,15 @@ contextBridge.exposeInMainWorld('api', {
   // 仅自检 / 截图用：注入假网络，生产环境主进程不会注册这个频道
   setUpdateMock: (mock) => invoke('update:test-mock', mock),
 
-  onCloseRequested: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('app:close-requested', () => cb());
-  },
+  onCloseRequested: (cb) => on('app:close-requested', cb),
   // 书架数据变了（别的窗口新建 / 删除 / 保存 / 整理）：停在书架的窗口跟着刷新
-  onShelfChanged: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('shelf:changed', (_event, info) => cb(info));
-  },
-  onImportProgress: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('import:progress', (_event, progress) => cb(progress));
-  },
-  onFormatProgress: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('format:progress', (_event, progress) => cb(progress));
-  },
+  onShelfChanged: (cb) => on('shelf:changed', cb),
+  onImportProgress: (cb) => on('import:progress', cb),
+  onFormatProgress: (cb) => on('format:progress', cb),
   // 主进程内部错误（崩溃 / 未处理的 Promise）：界面只弹一句固定提示，错误细节只在日志里
-  onInternalError: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('app:internal-error', (_event, info) => cb(info));
-  },
+  onInternalError: (cb) => on('app:internal-error', cb),
   // 正文索引的建 / 校验进度（只用于书架搜索提示）
-  onSearchProgress: (cb) => {
-    if (typeof cb === 'function') ipcRenderer.on('search:progress', (_event, info) => cb(info));
-  },
+  onSearchProgress: (cb) => on('search:progress', cb),
   reportDirty: (dirty) => ipcRenderer.send('app:dirty', Boolean(dirty)),
   closeReady: (allowed) => ipcRenderer.send('app:close-ready', Boolean(allowed))
 });

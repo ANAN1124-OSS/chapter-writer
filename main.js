@@ -435,6 +435,11 @@ function assertBookPath(bookPath, booksRoot) {
   return target;
 }
 
+// 只读文本类 IPC 的前置校验：渲染层传上来的正文必须是字符串（不读盘、只算文本）
+function assertText(text) {
+  if (typeof text !== 'string') throw new Error('正文必须是文本');
+}
+
 // mutation：写书的操作（save / delete / rename / format / replace / write）。
 // 有值时统一做跨窗口拦截：别的窗口正开着这本书 → 拒绝并提示先关 / 先切过去。
 function handleBook(channel, fn, { mutation = null } = {}) {
@@ -865,7 +870,7 @@ function registerIpc() {
 
   // 正文排版整理：纯文本变换，只计算不写盘（写盘仍由作者 Ctrl+S 决定）
   handle('text:format', async (text, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     return formatLib.formatText(text, options);
   });
 
@@ -873,7 +878,7 @@ function registerIpc() {
   // 整本版走 book:proofread，逐章只读磁盘。index 是归一 CRLF 后的字符位置，可直接选中。
   // 校对词表（可选，作者自己的错别字 / 禁用词）存在 config 里，主进程只读；渲染层不传路径。
   handle('text:proofread', async (text, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     const cfg = await getConfig();
     const list = await glossaryLib.readGlossaryFile(cfg.proofreadWordsPath);
     const wordList = glossaryLib.publicGlossaryInfo(list);
@@ -887,10 +892,11 @@ function registerIpc() {
     return glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(cfg.proofreadWordsPath));
   });
 
-  // 选校对词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
-  handle('proofread:pick-words', async () => {
+  // 选词表（校对 / 敏感词共用）：只允许通过系统文件对话框选，渲染层不能自己指定路径去读任意文件。
+  // read 负责把选中的文件解析成「公开信息」（只含数量 / 提示，绝不含词表正文）。
+  async function pickWordListFile({ title, read }) {
     const { canceled, filePaths } = await showOpenDialog({
-      title: '选择校对词表（每行一个词，可写「错词 → 建议」）',
+      title,
       buttonLabel: '使用这个词表',
       properties: ['openFile'],
       filters: [
@@ -899,8 +905,15 @@ function registerIpc() {
       ]
     });
     if (canceled || !filePaths || !filePaths.length) return { canceled: true };
-    const picked = glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(filePaths[0]));
-    return { canceled: false, ...picked };
+    return { canceled: false, ...(await read(filePaths[0])) };
+  }
+
+  // 选校对词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
+  handle('proofread:pick-words', async () => {
+    return pickWordListFile({
+      title: '选择校对词表（每行一个词，可写「错词 → 建议」）',
+      read: async (filePath) => glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(filePath))
+    });
   });
 
   // 敏感词预检（提案 5.2）：词表完全由作者管理，应用不内置任何词表。
@@ -911,24 +924,16 @@ function registerIpc() {
     return sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(cfg.sensitiveWordsPath));
   });
 
-  // 选词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
+  // 选敏感词表：只允许通过系统对话框选（渲染层不能自己指定路径去读任意文件）
   handle('sensitive:pick-words', async () => {
-    const { canceled, filePaths } = await showOpenDialog({
+    return pickWordListFile({
       title: '选择敏感词表（每行一个词）',
-      buttonLabel: '使用这个词表',
-      properties: ['openFile'],
-      filters: [
-        { name: '文本文件', extensions: ['txt'] },
-        { name: '所有文件', extensions: ['*'] }
-      ]
+      read: async (filePath) => sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(filePath))
     });
-    if (canceled || !filePaths || !filePaths.length) return { canceled: true };
-    const picked = sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(filePaths[0]));
-    return { canceled: false, ...picked };
   });
 
   handle('text:sensitive-check', async (text, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     const cfg = await getConfig();
     const list = await sensitiveLib.readWordListFile(cfg.sensitiveWordsPath);
     const wordList = sensitiveLib.publicWordListInfo(list);
@@ -940,13 +945,13 @@ function registerIpc() {
   // 朗读（提案 5.3）：只把正文切成「一段一段」，发声由渲染层交给系统语音（speechSynthesis）。
   // 主进程不读盘、不写盘；chunks 的 start/end 与编辑区 value 一致，供点击 / 跟随高亮定位。
   handle('text:tts-chunks', async (text, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     return ttsLib.buildChunks(text, options);
   });
 
   // 当前章的查找 / 替换（只算文本，不写盘；全书版本走 book:search / book:replace）
   handle('text:find', async (text, query, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     const matches = findLib.findMatches(text, query, options);
     return {
       count: matches.length,
@@ -962,13 +967,13 @@ function registerIpc() {
   // 和 text:find 的区别：不截断成 12 条、不带上下文，只回下标和长度；命中上限仍是 5000 处，
   // 到上限还多找出一处时明确回 truncated（界面据此提示「命中太多」）。只算文本，不读盘、不写盘。
   handle('text:find-all', async (text, query, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     const result = findLib.findMatchesAll(text, query, options);
     return { count: result.matches.length, truncated: result.truncated, matches: result.matches };
   });
 
   handle('text:replace', async (text, query, replacement, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     return findLib.replaceAllLiteral(text, query, replacement, options);
   });
 
@@ -982,7 +987,7 @@ function registerIpc() {
 
   // 「只替换这一处」：从编辑区光标位置往后找下一处命中（纯计算，不写盘）
   handle('text:find-next', async (text, query, fromIndex, options) => {
-    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    assertText(text);
     return findLib.findNextMatch(text, query, fromIndex, options);
   });
 
@@ -1141,12 +1146,37 @@ function registerIpc() {
     mutation: 'replace'
   });
 
+  // 整本检查（校对 / 敏感词）共用：逐章读正文；当前章用 override 的最新内容；
+  // 缺文件的章节跳过并计数（不让整本检查失败）。只读，不写盘。
+  async function walkChapterTexts(bookPath, meta, override, onChapter) {
+    const overrideIndex = exporter.chapterIndexOf(meta, override);
+    let skippedChapters = 0;
+    for (let index = 0; index < meta.chapters.length; index += 1) {
+      const chapter = meta.chapters[index];
+      let text;
+      if (index === overrideIndex) {
+        text = override.text;
+      } else {
+        try {
+          text = (await storage.loadChapterText(bookPath, chapter.file)).text;
+        } catch (err) {
+          if (err.code === 'CHAPTER_MISSING') {
+            skippedChapters += 1;
+            continue;
+          }
+          throw err;
+        }
+      }
+      onChapter(text, chapter, index);
+    }
+    return skippedChapters;
+  }
+
   // 校对整本（提案 5.1）：逐章只读正文，按 core/proofread.js 的规则列出可疑位置；
   // 全程不写盘。当前章未保存的内容用 override 传进来（和导出同一个惯例：只参与这一次检查）。
   // 每章最多保留 maxIssues 条明细，整本明细上限 1500 条，但总数 / 各规则条数照实统计。
   handleBook('book:proofread', async (bookPath, options, override) => {
     const meta = await storage.readBookMeta(bookPath);
-    const overrideIndex = exporter.chapterIndexOf(meta, override);
     const limits = proofreadLib.sanitizeOptions(options);
     // 校对词表只读一次，整本每章共用（没设置 / 读不了 = 只跑内置五条规则，面板会提示）
     const cfg = await getConfig();
@@ -1160,23 +1190,7 @@ function registerIpc() {
     const issues = [];
     let total = 0;
     let truncated = false;
-    let skippedChapters = 0;
-    for (let index = 0; index < meta.chapters.length; index += 1) {
-      const chapter = meta.chapters[index];
-      let text;
-      if (index === overrideIndex) {
-        text = override.text;
-      } else {
-        try {
-          text = (await storage.loadChapterText(bookPath, chapter.file)).text;
-        } catch (err) {
-          if (err.code === 'CHAPTER_MISSING') {
-            skippedChapters += 1; // 缺文件的章节跳过，不让整本校对失败
-            continue;
-          }
-          throw err;
-        }
-      }
+    const skippedChapters = await walkChapterTexts(bookPath, meta, override, (text, chapter, index) => {
       const result = proofreadLib.proofreadText(text, limits, customEntries);
       total += result.total;
       for (const rule of proofreadLib.RULE_ORDER) byRule[rule] += result.byRule[rule] || 0;
@@ -1203,7 +1217,7 @@ function registerIpc() {
           chapterName: chapter.name
         });
       }
-    }
+    });
     return {
       scope: 'book',
       total,
@@ -1230,30 +1244,13 @@ function registerIpc() {
     const wordList = sensitiveLib.publicWordListInfo(list);
     if (!list.ok) return { ok: false, code: list.code, message: list.message, wordList };
     const meta = await storage.readBookMeta(bookPath);
-    const overrideIndex = exporter.chapterIndexOf(meta, override);
     const limits = sensitiveLib.sanitizeOptions(options);
     const matches = [];
     const chapters = [];
     const byWordMap = new Map();
     let total = 0;
     let truncated = false;
-    let skippedChapters = 0;
-    for (let index = 0; index < meta.chapters.length; index += 1) {
-      const chapter = meta.chapters[index];
-      let text;
-      if (index === overrideIndex) {
-        text = override.text;
-      } else {
-        try {
-          text = (await storage.loadChapterText(bookPath, chapter.file)).text;
-        } catch (err) {
-          if (err.code === 'CHAPTER_MISSING') {
-            skippedChapters += 1; // 缺文件的章节跳过，不让整本预检失败
-            continue;
-          }
-          throw err;
-        }
-      }
+    const skippedChapters = await walkChapterTexts(bookPath, meta, override, (text, chapter, index) => {
       const result = sensitiveLib.scanText(text, list.words, limits);
       total += result.total;
       for (const item of result.byWord) {
@@ -1281,7 +1278,7 @@ function registerIpc() {
           chapterName: chapter.name
         });
       }
-    }
+    });
     const byWord = Array.from(byWordMap, ([word, count]) => ({ word, count }))
       .sort((a, b) => b.count - a.count || (a.word < b.word ? -1 : a.word > b.word ? 1 : 0))
       .slice(0, sensitiveLib.BY_WORD_LIMIT);
@@ -1390,7 +1387,18 @@ function registerIpc() {
     };
   });
 
-  handleBook('book:export', async (bookPath, override, range) => {
+  // 目录是否存在（导出默认目录兜底用）：读不到就当不存在
+  function isDirectory(dir) {
+    try {
+      return fsSync.statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  // 导出 TXT / EPUB / DOCX 共用的前置：读书目 → 解析范围（空范围明确报错）→ 拼正文
+  // → 准备「上次导出目录 / 文档」作为默认落点。三个入口只负责各自的保存对话框、格式细节与返回字段。
+  async function prepareExport(bookPath, override, range) {
     const meta = await storage.readBookMeta(bookPath);
     const plan = exporter.resolveExportRange(meta, range);
     if (!plan.count) {
@@ -1407,13 +1415,31 @@ function registerIpc() {
     );
     const cfg = await getConfig();
     // 默认落到「上一次导出保存到的目录」；没记过、或那个目录已经不存在了，才退回「文档」
-    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
-      try {
-        return fsSync.statSync(dir).isDirectory();
-      } catch {
-        return false;
-      }
-    });
+    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), isDirectory);
+    return { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir };
+  }
+
+  // EPUB / DOCX 导出成功后的返回字段（两个入口完全一致，只是 built 来自不同的纯函数）
+  function archiveExportResult(filePath, built, chars, includedUnsaved, conversion, plan) {
+    return {
+      canceled: false,
+      filePath,
+      chapterCount: built.chapterCount,
+      volumeCount: built.volumeCount,
+      chars,
+      includedUnsaved,
+      bytes: built.bytes,
+      conversion,
+      rangeLabel: plan.label
+    };
+  }
+
+  handleBook('book:export', async (bookPath, override, range) => {
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
+      bookPath,
+      override,
+      range
+    );
     // 文件名默认带上范围：书名.txt / 书名-卷名.txt / 书名-第X-Y章.txt（可在保存对话框里改）
     const defaultName = exporter.exportFileName(meta, range);
     const { canceled, filePath } = await showSaveDialog({
@@ -1445,29 +1471,11 @@ function registerIpc() {
   // 由 EPUB 里的 CSS 控制，不动任何 txt 字节。和 TXT 导出一样：当前章未保存的内容参与拼接、只读、原子写盘。
   // range 不传 = 全书；只把选中的章节读出来打进包里，章号仍按全书顺序。
   handleBook('book:export-epub', async (bookPath, override, range) => {
-    const meta = await storage.readBookMeta(bookPath);
-    const plan = exporter.resolveExportRange(meta, range);
-    if (!plan.count) {
-      throw new storage.StorageError(
-        'EMPTY_EXPORT_RANGE',
-        plan.mode === 'all' ? '这本书里还没有章节' : '所选范围里没有章节'
-      );
-    }
-    const { texts, chars, includedUnsaved } = await collectExportTexts(
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
       bookPath,
-      meta,
       override,
-      plan.indexes
+      range
     );
-    const cfg = await getConfig();
-    // 目录记忆和 TXT 导出共用：上次导到哪，这次默认还开在哪
-    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
-      try {
-        return fsSync.statSync(dir).isDirectory();
-      } catch {
-        return false;
-      }
-    });
     const defaultName = epubLib.epubFileName(meta, range);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 EPUB',
@@ -1485,46 +1493,18 @@ function registerIpc() {
     const built = epubLib.buildEpub({ meta: exportMeta, texts: exportTexts, range });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
-    return {
-      canceled: false,
-      filePath,
-      chapterCount: built.chapterCount,
-      volumeCount: built.volumeCount,
-      chars,
-      includedUnsaved,
-      bytes: built.bytes,
-      conversion,
-      rangeLabel: plan.label
-    };
+    return archiveExportResult(filePath, built, chars, includedUnsaved, conversion, plan);
   });
 
   // 导出 DOCX（v0.8 P0 N9）：整本或按卷 / 按章节范围 → 一份 Word 能直接打开的书稿。
   // 和 EPUB 导出同一套规则：范围解析复用 exporter.resolveExportRange，只读选中的章，
   // 章号 / 章名仍按全书顺序；当前章未保存内容参与、只读、原子写盘、简繁转换只作用于副本。
   handleBook('book:export-docx', async (bookPath, override, range) => {
-    const meta = await storage.readBookMeta(bookPath);
-    const plan = exporter.resolveExportRange(meta, range);
-    if (!plan.count) {
-      throw new storage.StorageError(
-        'EMPTY_EXPORT_RANGE',
-        plan.mode === 'all' ? '这本书里还没有章节' : '所选范围里没有章节'
-      );
-    }
-    const { texts, chars, includedUnsaved } = await collectExportTexts(
+    const { meta, plan, texts, chars, includedUnsaved, cfg, defaultDir } = await prepareExport(
       bookPath,
-      meta,
       override,
-      plan.indexes
+      range
     );
-    const cfg = await getConfig();
-    // 目录记忆和 TXT / EPUB 导出共用：上次导到哪，这次默认还开在哪
-    const defaultDir = exporter.resolveExportDir(cfg.lastExportDir, app.getPath('documents'), (dir) => {
-      try {
-        return fsSync.statSync(dir).isDirectory();
-      } catch {
-        return false;
-      }
-    });
     const defaultName = docxLib.docxFileName(meta, range);
     const { canceled, filePath } = await showSaveDialog({
       title: '导出 DOCX',
@@ -1541,17 +1521,7 @@ function registerIpc() {
     const built = docxLib.buildDocx({ meta: exportMeta, texts: exportTexts, range });
     await atomicWriteFile(filePath, built.buffer);
     await rememberExportDir(path.dirname(filePath));
-    return {
-      canceled: false,
-      filePath,
-      chapterCount: built.chapterCount,
-      volumeCount: built.volumeCount,
-      chars,
-      includedUnsaved,
-      bytes: built.bytes,
-      conversion,
-      rangeLabel: plan.label
-    };
+    return archiveExportResult(filePath, built, chars, includedUnsaved, conversion, plan);
   });
 
   handleBook('book:copy', async (bookPath, override) => {
@@ -1967,6 +1937,54 @@ async function createE2EClipboard() {
   };
 }
 
+// 开发截图（--dialog=…）共用的注入脚本片段：只在临时 userData / 演示书库里跑，用来把界面摆到
+// 「能截图」的状态；和真实功能无关，不写盘、不写配置。抽出来避免同一段脚本复制三遍。
+const SCREENSHOT_PICK_CHAR_JS = `
+        const text = window.__cwTest.text();
+        const counts = new Map();
+        for (const ch of text) {
+          if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
+        }
+        let best = '';
+        let bestCount = 0;
+        for (const [ch, n] of counts) {
+          if (n > bestCount) { best = ch; bestCount = n; }
+        }`;
+
+// 「把光标放进第一段超过 20 字的正文」——当前段落高亮 / 查找类截图共用；extra 是额外执行的脚本。
+function screenshotCaretLongLineScript(extra = '') {
+  return `(() => {
+        const text = window.__cwTest.text();
+        const lines = text.split('\\n');
+        let offset = 0;
+        let line = 0;
+        let target = 0;
+        for (let i = 0; i < lines.length; i += 1) {
+          if (lines[i].trim().length > 20) {
+            line = i;
+            target = offset + Math.min(lines[i].length - 1, 20);
+            break;
+          }
+          offset += lines[i].length + 1;
+        }
+        window.__cwTest.setCaret(target);
+        const height = parseFloat(getComputedStyle(document.getElementById('editor')).lineHeight) || 32;
+        window.__cwTest.setEditorScroll(Math.max(0, (line - 2) * height));
+        ${extra}
+      })()`;
+}
+
+// 导出 EPUB / DOCX 截图共用：在范围对话框里选「按卷导出」并挑第一个卷
+const SCREENSHOT_PICK_VOLUME_JS = `(() => {
+        const radio = document.querySelector('input[name="export-scope"][value="volume"]');
+        if (radio) radio.click();
+        const select = document.getElementById('export-volume');
+        if (select && select.options.length > 1) {
+          select.selectedIndex = 1;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      })()`;
+
 async function runAutomation() {
   try {
     await waitForRenderer('Boolean(window.__cwTest && window.__cwTest.ready)', 15000);
@@ -2133,18 +2151,7 @@ async function runAutomation() {
           true
         );
         await sleep(700);
-        await automationWin.webContents.executeJavaScript(
-          `(() => {
-            const radio = document.querySelector('input[name="export-scope"][value="volume"]');
-            if (radio) radio.click();
-            const select = document.getElementById('export-volume');
-            if (select && select.options.length > 1) {
-              select.selectedIndex = 1;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          })()`,
-          true
-        );
+        await automationWin.webContents.executeJavaScript(SCREENSHOT_PICK_VOLUME_JS, true);
         await sleep(900);
       } else if (screenshotDialog === 'export-docx') {
         // 开发截图用：打开「导出 DOCX」范围对话框并选中「按卷导出」（只读，不导出、不写盘）
@@ -2153,18 +2160,7 @@ async function runAutomation() {
           true
         );
         await sleep(700);
-        await automationWin.webContents.executeJavaScript(
-          `(() => {
-            const radio = document.querySelector('input[name="export-scope"][value="volume"]');
-            if (radio) radio.click();
-            const select = document.getElementById('export-volume');
-            if (select && select.options.length > 1) {
-              select.selectedIndex = 1;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          })()`,
-          true
-        );
+        await automationWin.webContents.executeJavaScript(SCREENSHOT_PICK_VOLUME_JS, true);
         await sleep(900);
       } else if (screenshotDialog === 'fragment') {
         // 开发截图用：书架「＋ 碎片」弹层 + 示例内容（只是界面演示，不会写盘）
@@ -2224,17 +2220,7 @@ async function runAutomation() {
       } else if (screenshotDialog === 'find-nav') {
         // 开发截图用：查找面板里的「当前章定位」一行（上一处 / 下一处 + 第 X / N 处）
         await automationWin.webContents.executeJavaScript(
-          `(() => {
-             const text = window.__cwTest.text();
-             const counts = new Map();
-             for (const ch of text) {
-               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
-             }
-             let best = '';
-             let bestCount = 0;
-             for (const [ch, n] of counts) {
-               if (n > bestCount) { best = ch; bestCount = n; }
-             }
+          `(() => {${SCREENSHOT_PICK_CHAR_JS}
              window.__cwTest.openFindPanel();
              window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
              window.__cwTest.findRun();
@@ -2246,17 +2232,7 @@ async function runAutomation() {
         // 开发截图用：查找增强（v0.8-11，提案 N11）——当前章全部命中高亮 + 状态栏「查找 1/N」。
         // 先挑本章出现最多的一个汉字当查找词，查完把面板关掉，让正文里的高亮露出来（只读，不写盘）
         await automationWin.webContents.executeJavaScript(
-          `(() => {
-             const text = window.__cwTest.text();
-             const counts = new Map();
-             for (const ch of text) {
-               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
-             }
-             let best = '';
-             let bestCount = 0;
-             for (const [ch, n] of counts) {
-               if (n > bestCount) { best = ch; bestCount = n; }
-             }
+          `(() => {${SCREENSHOT_PICK_CHAR_JS}
              window.__cwTest.openFindPanel();
              window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
              window.__cwTest.findRun();
@@ -2269,17 +2245,7 @@ async function runAutomation() {
         // 开发截图用：查找书签（v0.8-11b，提案 N11b）——当前章查一次并存成书签，
         // 面板里的「书签」区列出这一条，正文命中同时高亮（只写临时 userData 的 config，不碰书库）
         await automationWin.webContents.executeJavaScript(
-          `(async () => {
-             const text = window.__cwTest.text();
-             const counts = new Map();
-             for (const ch of text) {
-               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
-             }
-             let best = '';
-             let bestCount = 0;
-             for (const [ch, n] of counts) {
-               if (n > bestCount) { best = ch; bestCount = n; }
-             }
+          `(async () => {${SCREENSHOT_PICK_CHAR_JS}
              window.__cwTest.openFindPanel();
              window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
              await window.__cwTest.findRun();
@@ -2343,27 +2309,7 @@ async function runAutomation() {
           true
         );
         await sleep(400);
-        await automationWin.webContents.executeJavaScript(
-          `(() => {
-             const text = window.__cwTest.text();
-             const lines = text.split('\\n');
-             let offset = 0;
-             let line = 0;
-             let target = 0;
-             for (let i = 0; i < lines.length; i += 1) {
-               if (lines[i].trim().length > 20) {
-                 line = i;
-                 target = offset + Math.min(lines[i].length - 1, 20);
-                 break;
-               }
-               offset += lines[i].length + 1;
-             }
-             window.__cwTest.setCaret(target);
-             const height = parseFloat(getComputedStyle(document.getElementById('editor')).lineHeight) || 32;
-             window.__cwTest.setEditorScroll(Math.max(0, (line - 2) * height));
-           })()`,
-          true
-        );
+        await automationWin.webContents.executeJavaScript(screenshotCaretLongLineScript(), true);
         await sleep(500);
       } else if (screenshotDialog === 'marks-caret-color') {
         // 开发截图用：当前段落高亮按书开 + 自定义颜色（蓝色）+ 打开「排版 ▾」露出色板。
@@ -2374,25 +2320,7 @@ async function runAutomation() {
         );
         await sleep(600);
         await automationWin.webContents.executeJavaScript(
-          `(() => {
-             const text = window.__cwTest.text();
-             const lines = text.split('\\n');
-             let offset = 0;
-             let line = 0;
-             let target = 0;
-             for (let i = 0; i < lines.length; i += 1) {
-               if (lines[i].trim().length > 20) {
-                 line = i;
-                 target = offset + Math.min(lines[i].length - 1, 20);
-                 break;
-               }
-               offset += lines[i].length + 1;
-             }
-             window.__cwTest.setCaret(target);
-             const height = parseFloat(getComputedStyle(document.getElementById('editor')).lineHeight) || 32;
-             window.__cwTest.setEditorScroll(Math.max(0, (line - 2) * height));
-             window.__cwTest.openFormatMenu();
-           })()`,
+          screenshotCaretLongLineScript('window.__cwTest.openFormatMenu();'),
           true
         );
         await sleep(600);

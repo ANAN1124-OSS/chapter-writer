@@ -992,16 +992,10 @@ async function restoreReplaceBackup(bookPath, backupName) {
     restored += 1;
   }
 
-  // 正文被覆盖了，字数缓存要重算；书目改动走 writeBookMeta（写前留 .bak）
+  // 正文被覆盖了，字数缓存要重算（复用历史还原的 refreshChapterChars）；
+  // 书目改动走 writeBookMeta（写前留 .bak）
   if (restored) {
-    for (const chapter of meta.chapters) {
-      try {
-        const text = await fs.readFile(assertInside(bookPath, chapter.file), 'utf8');
-        chapter.chars = chaptersLib.countChars(stripBom(text));
-      } catch (err) {
-        if (err.code !== 'ENOENT') throw err;
-      }
-    }
+    await refreshChapterChars(bookPath, meta, meta.chapters.map((chapter) => chapter.file));
     await writeBookMeta(bookPath, meta);
   }
 
@@ -1144,7 +1138,8 @@ async function restoreDeletedChapter(bookPath, group, entry) {
   };
 }
 
-async function restoreHistoryFile(bookPath, groupId, fileName) {
+// 还原历史备份前的共同检查：读当前书目 → 找到备份组 → 挡住「书目备份」和只能查看的备份。
+async function loadRestorableHistoryGroup(bookPath, groupId) {
   const meta = await readBookMeta(bookPath);
   const chapterFiles = meta.chapters.map((chapter) => chapter.file);
   const group = await findHistoryGroup(bookPath, groupId, chapterFiles);
@@ -1155,12 +1150,18 @@ async function restoreHistoryFile(bookPath, groupId, fileName) {
     if (group.source !== 'delete') {
       throw new StorageError('HISTORY_NOT_RESTORABLE', '这种备份只供查看，不能还原');
     }
+  } else if (!group.restorableCount) {
+    throw new StorageError('HISTORY_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
+  }
+  return { meta, group };
+}
+
+async function restoreHistoryFile(bookPath, groupId, fileName) {
+  const { meta, group } = await loadRestorableHistoryGroup(bookPath, groupId);
+  if (group.kind === 'file') {
     const entry =
       group.files.find((file) => file.name === fileName || file.trashName === fileName) || group.files[0];
     return restoreDeletedChapter(bookPath, group, entry);
-  }
-  if (!group.restorableCount) {
-    throw new StorageError('HISTORY_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
   }
   const entry = group.files.find((file) => file.name === fileName);
   if (!entry) throw new StorageError('HISTORY_FILE_MISSING', '这个备份文件已经不存在了');
@@ -1188,21 +1189,8 @@ async function restoreHistoryFile(bookPath, groupId, fileName) {
 }
 
 async function restoreHistoryGroup(bookPath, groupId) {
-  const meta = await readBookMeta(bookPath);
-  const chapterFiles = meta.chapters.map((chapter) => chapter.file);
-  const group = await findHistoryGroup(bookPath, groupId, chapterFiles);
-  if (group.source === 'bookmeta') {
-    throw new StorageError('HISTORY_NOT_RESTORABLE', '书目备份只供查看，不能直接覆盖现在的书目');
-  }
-  if (group.kind === 'file') {
-    if (group.source !== 'delete') {
-      throw new StorageError('HISTORY_NOT_RESTORABLE', '这种备份只供查看，不能还原');
-    }
-    return restoreDeletedChapter(bookPath, group, group.files[0]);
-  }
-  if (!group.restorableCount) {
-    throw new StorageError('HISTORY_NO_TARGET', '备份里的章节都不在书里了，没有可还原的内容');
-  }
+  const { meta, group } = await loadRestorableHistoryGroup(bookPath, groupId);
+  if (group.kind === 'file') return restoreDeletedChapter(bookPath, group, group.files[0]);
   const trashDir = path.join(bookPath, TRASH_DIR);
   const restoreDir = await uniqueTrashDir(trashDir, RESTORE_BACKUP_PREFIX);
   let restored = 0;

@@ -789,7 +789,10 @@ body.resizing .editor {
   line-height: 1.45;
   color: var(--ink-soft);
 }
-.dropdown-menu button {
+/* 下拉菜单 / 悬浮选择卡 / 右键菜单的条目共用一套基础外观（v0.8.5 R3 去重）：
+ * 三处弹层只各自补「行高 / 过渡 / 禁用态 / 激活态」，不再复制同一串基础声明。 */
+.dropdown-menu button,
+.context-menu button {
   display: block;
   width: 100%;
   min-height: 32px;
@@ -797,17 +800,21 @@ body.resizing .editor {
   text-align: left;
   font-family: var(--ui-font);
   font-size: 13px;
-  line-height: 1.35;
   color: var(--ink);
   background: none;
   border: none;
   border-radius: var(--menu-item-radius);
   cursor: pointer;
+}
+.dropdown-menu button {
+  line-height: 1.35;
   transition: background .1s ease, color .1s ease;
 }
-.dropdown-menu button:hover:not(:disabled) { background: var(--menu-hover); }
+.dropdown-menu button:hover:not(:disabled),
+.context-menu button:hover { background: var(--menu-hover); }
 .dropdown-menu button:active:not(:disabled) { background: var(--btn-press); }
-.dropdown-menu button:focus-visible {
+.dropdown-menu button:focus-visible,
+.context-menu button:focus-visible {
   outline: 2px solid var(--accent-soft);
   outline-offset: -2px;
 }
@@ -1461,7 +1468,8 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 .text-input:focus { border-color: var(--accent-soft); }
 
 /* ---------- 排版 ---------- */
-.dropdown-sep {
+.dropdown-sep,
+.context-menu-sep {
   height: 1px;
   margin: 6px 4px;
   background: var(--line);
@@ -2305,26 +2313,8 @@ body.chapter-dragging * { user-select: none; }
   box-shadow: var(--menu-shadow);
 }
 .context-menu button {
-  display: block;
-  width: 100%;
-  min-height: 32px;
-  padding: 7px 10px;
-  text-align: left;
-  font-family: var(--ui-font);
-  font-size: 13px;
-  color: var(--ink);
-  background: none;
-  border: none;
-  border-radius: var(--menu-item-radius);
-  cursor: pointer;
   transition: background .1s ease;
 }
-.context-menu button:hover { background: var(--menu-hover); }
-.context-menu button:focus-visible {
-  outline: 2px solid var(--accent-soft);
-  outline-offset: -2px;
-}
-.context-menu-sep { height: 1px; margin: 6px 4px; background: var(--line); }
 .danger-text { color: var(--danger) !important; }
 
 /* ---------- 朗读（悬浮小条：只读正文、不改字、不写盘） ---------- */

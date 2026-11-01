@@ -4614,6 +4614,21 @@ module.exports = async function runScenario(ctx) {
   } finally {
     restoreSaveDialog();
   }
+  await waitFor(
+    "Array.from(document.querySelectorAll('#toast-area .toast')).some((el) => el.textContent.includes('已导出 EPUB：'))"
+  );
+  const epubToast = await exec(`(() => {
+    const el = Array.from(document.querySelectorAll('#toast-area .toast')).find((item) => item.textContent.includes('已导出 EPUB：'));
+    return el ? el.textContent : '';
+  })()`);
+  check(
+    'EPUB 导出：成功提示带范围 / 章 / 卷 / 字数（共用的提示拼装没变）',
+    epubToast.includes('已导出 EPUB：') &&
+      epubToast.includes('3 章') &&
+      epubToast.includes('1 卷') &&
+      /\d+ 字/.test(epubToast),
+    epubToast
+  );
   check(
     'EPUB 导出：保存对话框默认文件名 = 书名.epub，类型带 epub',
     Boolean(lastSaveOptions) &&
@@ -9106,8 +9121,148 @@ module.exports = async function runScenario(ctx) {
     }
   );
 
+  // 50q. 代码精简（v0.8.5 R3）回归：菜单定位 / 菜单条目样式这些被合并的公共 helper，
+  // 行为仍和以前一样（只读：不写书库、不改配置、不动正文）。
+  const r3Menu = await exec(`(() => {
+    const styleOf = (el) => {
+      const cs = getComputedStyle(el);
+      return {
+        minHeight: cs.minHeight, paddingTop: cs.paddingTop, paddingLeft: cs.paddingLeft,
+        radius: cs.borderTopLeftRadius, font: cs.fontSize, family: cs.fontFamily,
+        color: cs.color, bg: cs.backgroundColor, border: cs.borderTopWidth, align: cs.textAlign
+      };
+    };
+    document.getElementById('btn-display').click();
+    const displayMenu = document.getElementById('display-menu');
+    const displayRect = displayMenu.getBoundingClientRect();
+    const displayStyle = styleOf(displayMenu.querySelector('button'));
+    const chapter = document.querySelectorAll('#chapter-list .chapter-item')[0];
+    chapter.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 120 }));
+    const contextMenu = document.getElementById('context-menu');
+    const contextRect = contextMenu.getBoundingClientRect();
+    const contextStyle = styleOf(contextMenu.querySelector('button'));
+    const sep = (el) => { const cs = getComputedStyle(el); return [cs.height, cs.marginTop, cs.marginLeft, cs.backgroundColor].join('|'); };
+    return {
+      displayOpen: !displayMenu.classList.contains('hidden'),
+      displayInside: displayRect.left >= 0 && displayRect.right <= window.innerWidth && displayRect.top >= 0 && displayRect.bottom <= window.innerHeight,
+      contextLeft: contextRect.left,
+      contextTop: contextRect.top,
+      displayStyle,
+      contextStyle,
+      dropdownSep: sep(document.querySelector('.dropdown-sep')),
+      contextSep: sep(document.querySelector('.context-menu-sep'))
+    };
+  })()`);
+  check(
+    '代码精简：下拉菜单仍在窗口内、右键菜单仍出现在鼠标处（合并后的定位 helper 行为不变）',
+    r3Menu.displayOpen &&
+      r3Menu.displayInside &&
+      Math.abs(r3Menu.contextLeft - 100) < 1.5 &&
+      Math.abs(r3Menu.contextTop - 120) < 1.5,
+    { displayOpen: r3Menu.displayOpen, displayInside: r3Menu.displayInside, left: r3Menu.contextLeft, top: r3Menu.contextTop }
+  );
+  const r3StyleKeys = ['minHeight', 'paddingTop', 'paddingLeft', 'radius', 'font', 'family', 'color', 'bg', 'border', 'align'];
+  check(
+    '代码精简：菜单条目并成同一套基础样式后，下拉菜单与右键菜单的计算样式仍一致',
+    r3StyleKeys.every((key) => r3Menu.displayStyle[key] === r3Menu.contextStyle[key]),
+    { display: r3Menu.displayStyle, context: r3Menu.contextStyle }
+  );
+  check(
+    '代码精简：两条分隔线合并后仍是 1px 高、同样的外边距与颜色',
+    r3Menu.dropdownSep === r3Menu.contextSep && r3Menu.dropdownSep.startsWith('1px'),
+    { dropdownSep: r3Menu.dropdownSep, contextSep: r3Menu.contextSep }
+  );
+
+  // 右键点在窗口右下角（离边 2px）：整张菜单收进可视区，不越界
+  const r3EdgeMenu = await exec(`(() => {
+    const chapter = document.querySelectorAll('#chapter-list .chapter-item')[0];
+    chapter.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: window.innerWidth - 2, clientY: window.innerHeight - 2 }));
+    const menu = document.getElementById('context-menu');
+    const r = menu.getBoundingClientRect();
+    return { hidden: menu.classList.contains('hidden'), left: r.left, top: r.top, right: r.right, bottom: r.bottom, w: window.innerWidth, h: window.innerHeight };
+  })()`);
+  check(
+    '代码精简：右键菜单在窗口右下角自动收进可视区（不越界、条目都点得到）',
+    r3EdgeMenu.hidden === false &&
+      r3EdgeMenu.left >= 0 &&
+      r3EdgeMenu.top >= 0 &&
+      r3EdgeMenu.right <= r3EdgeMenu.w &&
+      r3EdgeMenu.bottom <= r3EdgeMenu.h,
+    r3EdgeMenu
+  );
+  const r3MenuHidden = await exec(`(() => {
+    document.getElementById('editor').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return document.getElementById('context-menu').classList.contains('hidden');
+  })()`);
+  check('代码精简：点正文别处照常收起右键菜单（合并后的 hideMenu 行为不变）', r3MenuHidden === true);
+  await exec("document.getElementById('btn-display').click()");
+  await waitFor('window.__cwTest.displayMenuOpen() === true');
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor('window.__cwTest.displayMenuOpen() === false');
+  check('代码精简：「显示 ▾」菜单照常 Esc 收起', (await exec('window.__cwTest.displayMenuOpen()')) === false);
+
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
+
+  // 50r. 代码精简（v0.8.5 R3）回归第 2 组：书卡右键菜单同样收进窗口；
+  // 整本校对（共用逐章读取 helper）遇到「章节 txt 被外部挪走」仍然跳过那一章跑完、且绝不重建影子文件。
+  const r3BookMenu = await exec(`(() => {
+    const card = document.querySelector('.book-card[data-path]');
+    card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: window.innerWidth - 2, clientY: window.innerHeight - 2 }));
+    const menu = document.getElementById('book-menu');
+    const r = menu.getBoundingClientRect();
+    return { open: !menu.classList.contains('hidden'), left: r.left, top: r.top, right: r.right, bottom: r.bottom, w: window.innerWidth, h: window.innerHeight, items: menu.querySelectorAll('button').length };
+  })()`);
+  check(
+    '代码精简：书卡右键菜单在右下角也收进可视区，菜单项一个不少',
+    r3BookMenu.open &&
+      r3BookMenu.left >= 0 &&
+      r3BookMenu.top >= 0 &&
+      r3BookMenu.right <= r3BookMenu.w &&
+      r3BookMenu.bottom <= r3BookMenu.h &&
+      r3BookMenu.items >= 3,
+    r3BookMenu
+  );
+  await exec("document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }))");
+
+  await exec("window.__cwTest.newBook('精简回归测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const r3BookPath = await exec('window.__cwTest.bookPathValue()');
+  await exec("window.__cwTest.renameChapterAt(0, '第一章')");
+  await exec("window.__cwTest.setText('第一章：他走了,没有回头。')");
+  await exec('window.__cwTest.save()');
+  await exec("window.__cwTest.newChapter('第二章')");
+  await exec("window.__cwTest.setText('第二章：风停了,雨也停了。')");
+  await exec('window.__cwTest.save()');
+  const r3MetaPath = path.join(r3BookPath, '书目.json');
+  const r3Meta = JSON.parse(await fs.readFile(r3MetaPath, 'utf8'));
+  check('代码精简回归：准备了一本 2 章的书', r3Meta.chapters.length === 2, r3Meta.chapters.length);
+  const r3MissingFile = r3Meta.chapters[0].file;
+  const r3MovedPath = path.join(path.dirname(booksRoot), 'r3-moved-chapter.txt');
+  await fs.rename(path.join(r3BookPath, r3MissingFile), r3MovedPath);
+  await exec('window.__cwTest.openProofreadPanel()');
+  await waitFor("window.__cwTest.proofreadSummary().includes('本章')");
+  await exec("window.__cwTest.setProofreadScope('book')");
+  const r3BookProof = await exec('window.__cwTest.proofreadRun()');
+  const r3ProofPayload = await exec('window.__cwTest.proofreadPayload()');
+  check(
+    '代码精简回归：整本校对遇到缺文件的章仍跑完（跳过 1 章、其余章照常统计）',
+    r3BookProof.ok === true &&
+      r3ProofPayload &&
+      r3ProofPayload.skippedChapters === 1 &&
+      r3ProofPayload.chapterCount === 2 &&
+      r3ProofPayload.total > 0,
+    { run: r3BookProof, skipped: r3ProofPayload && r3ProofPayload.skippedChapters, total: r3ProofPayload && r3ProofPayload.total }
+  );
+  check(
+    '代码精简回归：整本校对没有重建被外部挪走的章节文件（绝不生成影子 txt）',
+    (await fileExists(path.join(r3BookPath, r3MissingFile))) === false
+  );
+  await fs.rename(r3MovedPath, path.join(r3BookPath, r3MissingFile));
+  await exec('window.__cwTest.closeProofreadPanel()');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.deleteBookByFolder('精简回归测试书', { skipConfirm: true })");
 
   // 51. 专注模式（提案 3.5）：隐藏左栏与顶栏、F11 / 按钮进出、Esc 退出、打字机模式。
   // 全部只改显示（DOM class + textarea.scrollTop）：不改正文、不写盘、不写配置、不碰书目。

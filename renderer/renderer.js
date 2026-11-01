@@ -4596,6 +4596,17 @@
     return `（${parts.join(' · ')}）`;
   }
 
+  // EPUB / DOCX 导出成功提示的公共部分：和 TXT 同一套措辞，只多一个「几卷」（有卷才写）。
+  function archiveSummaryParts(data) {
+    const parts = [];
+    if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
+    parts.push(`${data.chapterCount} 章`);
+    if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
+    parts.push(`${Number(data.chars) || 0} 字`);
+    if (data.includedUnsaved) parts.push('含当前章未保存内容');
+    return parts;
+  }
+
   // ---------- 导出范围对话框 ----------
   // 默认「全书」和以前完全一样；也可以只导某一卷 / 第 X–Y 章。
   // 章数、字数、默认文件名都由主进程算（book:export-plan 只读），避免界面和导出两套规则。
@@ -4867,13 +4878,9 @@
     try {
       const data = await call(api.exportEpub, state.bookPath, currentChapterOverride(), range);
       if (data.canceled) return;
-      const parts = [];
-      if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
-      parts.push(`${data.chapterCount} 章`);
-      if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
-      parts.push(`${Number(data.chars) || 0} 字`);
-      if (data.includedUnsaved) parts.push('含当前章未保存内容');
-      toast(`已导出 EPUB：${data.filePath}（${parts.join(' · ')}）${conversionTag(data.conversion)}`);
+      toast(
+        `已导出 EPUB：${data.filePath}（${archiveSummaryParts(data).join(' · ')}）${conversionTag(data.conversion)}`
+      );
     } catch (err) {
       toast(`导出 EPUB 失败：${err.message}`, 'error');
     }
@@ -4886,13 +4893,9 @@
     try {
       const data = await call(api.exportDocx, state.bookPath, currentChapterOverride(), range);
       if (data.canceled) return;
-      const parts = [];
-      if (data.rangeLabel && data.rangeLabel !== '全书') parts.push(data.rangeLabel);
-      parts.push(`${data.chapterCount} 章`);
-      if (data.volumeCount) parts.push(`${data.volumeCount} 卷`);
-      parts.push(`${Number(data.chars) || 0} 字`);
-      if (data.includedUnsaved) parts.push('含当前章未保存内容');
-      toast(`已导出 DOCX：${data.filePath}（${parts.join(' · ')}）${conversionTag(data.conversion)}`);
+      toast(
+        `已导出 DOCX：${data.filePath}（${archiveSummaryParts(data).join(' · ')}）${conversionTag(data.conversion)}`
+      );
     } catch (err) {
       toast(`导出 DOCX 失败：${err.message}`, 'error');
     }
@@ -5169,6 +5172,23 @@
   });
 
   // ---------- 右键菜单 / 导出菜单 ----------
+  // 把绝对定位的菜单摆在鼠标 / 指定坐标处：贴右边或下边时往窗口里收 8px（右键 / 卷 / 书卡菜单共用）。
+  function placeMenuAt(menu, x, y) {
+    menu.classList.remove('hidden');
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    const rect = menu.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - 8;
+    const maxY = window.innerHeight - rect.height - 8;
+    if (x > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
+    if (y > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+  }
+
+  function hideMenu(id) {
+    const menu = $(id);
+    if (menu) menu.classList.add('hidden');
+  }
+
   function showContextMenu(event, index) {
     state.contextIndex = index;
     const menu = $('context-menu');
@@ -5180,18 +5200,11 @@
       if (!label) return;
       btn.textContent = `${status === currentStatus ? '✓ ' : ''}标记为${label}`;
     });
-    menu.classList.remove('hidden');
-    menu.style.left = `${event.clientX}px`;
-    menu.style.top = `${event.clientY}px`;
-    const rect = menu.getBoundingClientRect();
-    const maxX = window.innerWidth - rect.width - 8;
-    const maxY = window.innerHeight - rect.height - 8;
-    if (event.clientX > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
-    if (event.clientY > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+    placeMenuAt(menu, event.clientX, event.clientY);
   }
 
   function hideContextMenu() {
-    $('context-menu').classList.add('hidden');
+    hideMenu('context-menu');
   }
 
   function showVolumeMenu(event, volumeId) {
@@ -5215,18 +5228,11 @@
     }
     const newChapterBtn = menu.querySelector('button[data-action="new-chapter"]');
     if (newChapterBtn) newChapterBtn.textContent = volumeId ? '在此卷末尾新建章节' : '在「未分卷」末尾新建章节';
-    menu.classList.remove('hidden');
-    menu.style.left = `${event.clientX}px`;
-    menu.style.top = `${event.clientY}px`;
-    const rect = menu.getBoundingClientRect();
-    const maxX = window.innerWidth - rect.width - 8;
-    const maxY = window.innerHeight - rect.height - 8;
-    if (event.clientX > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
-    if (event.clientY > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+    placeMenuAt(menu, event.clientX, event.clientY);
   }
 
   function hideVolumeMenu() {
-    $('volume-menu').classList.add('hidden');
+    hideMenu('volume-menu');
     state.contextVolumeId = null;
   }
 
@@ -5236,18 +5242,11 @@
     // 书目损坏的书读不出元数据，先修复；不让「书籍信息…」点进去报错
     const infoBtn = menu.querySelector('button[data-action="info"]');
     if (infoBtn) infoBtn.classList.toggle('hidden', Boolean(book && book.status === 'corrupt'));
-    menu.classList.remove('hidden');
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-    const rect = menu.getBoundingClientRect();
-    const maxX = window.innerWidth - rect.width - 8;
-    const maxY = window.innerHeight - rect.height - 8;
-    if (x > maxX) menu.style.left = `${Math.max(8, maxX)}px`;
-    if (y > maxY) menu.style.top = `${Math.max(8, maxY)}px`;
+    placeMenuAt(menu, x, y);
   }
 
   function hideBookMenu() {
-    $('book-menu').classList.add('hidden');
+    hideMenu('book-menu');
     state.contextBook = null;
   }
 
@@ -5256,7 +5255,7 @@
   }
 
   function hideExportMenu() {
-    $('export-menu').classList.add('hidden');
+    hideMenu('export-menu');
   }
 
   // ---------- 查找替换（全书 / 当前章） ----------
@@ -7321,9 +7320,9 @@
 
   // ---------- 排版 ----------
   // 「智能排版/一键整理」只改当前章正文，结果先落在编辑区（未保存），按 Ctrl+S 才写盘，可撤销。
-  // 默认规则 / 规则摘要 / 改动统计的文案在 format-ui.js 里（Node 单测覆盖），这里只负责流程。
+  // 默认规则 / 规则摘要 / 改动统计的文案在 format-ui.js 里（Node 单测覆盖），这里只负责流程；
+  // 规则合并也统一用 formatUi.mergeOptions，避免渲染层再抄一份默认值。
   const formatUi = window.CWFormatUi;
-  const DEFAULT_FORMAT_OPTIONS = formatUi.DEFAULT_OPTIONS;
   // 「撤销上次整理」的内存快照上限（只存内存，关掉应用就没了；50 步足够连续整理几十次）
   const MAX_FORMAT_UNDO = 50;
 
@@ -7373,7 +7372,7 @@
   }
 
   function writeFormatOptions(options) {
-    const opts = { ...DEFAULT_FORMAT_OPTIONS, ...(options && typeof options === 'object' ? options : {}) };
+    const opts = formatUi.mergeOptions(options);
     // 兼容旧配置里的布尔缩进
     const indent = opts.indent === true ? '2' : opts.indent === false ? 'none' : String(opts.indent);
     $('fmt-indent').value = ['none', '0', '2'].includes(indent) ? indent : '2';
@@ -7427,7 +7426,7 @@
 
   function hideFormatMenu() {
     cancelFormatCardTimer();
-    $('format-menu').classList.add('hidden');
+    hideMenu('format-menu');
   }
 
   // 鼠标离开按钮 / 卡片、焦点移走时「短延迟」再收起：留出从按钮挪到卡片、或点卡片按钮的时间
@@ -7447,8 +7446,7 @@
   }
 
   function hideDisplayMenu() {
-    const menu = $('display-menu');
-    if (menu) menu.classList.add('hidden');
+    hideMenu('display-menu');
   }
 
   function toggleDisplayMenu() {
@@ -7715,11 +7713,6 @@
     formatBookProgressEl = null;
   }
 
-  // 把排版规则讲成人话，放进整本整理的确认框（和选择卡 / toast 用同一份文案）
-  function describeFormatOptions(options) {
-    return formatUi.describeRules(options);
-  }
-
   // 一键整理本书：复用上次「整理本章」的规则 → 预检查 → 确认 → 整本整理（写前备份）
   async function runFormatBook() {
     if (!state.bookPath || !state.meta) {
@@ -7748,7 +7741,7 @@
       }
     }
 
-    const options = { ...DEFAULT_FORMAT_OPTIONS, ...((state.config && state.config.formatOptions) || {}) };
+    const options = formatUi.mergeOptions(state.config && state.config.formatOptions);
     let preview;
     try {
       preview = await call(api.formatPreviewBook, state.bookPath, options);
@@ -7772,7 +7765,7 @@
     const confirmed = await openModal({
       title: '一键整理本书',
       message:
-        `规则：${describeFormatOptions(options)}\n\n` +
+        `规则：${formatUi.describeRules(options)}\n\n` +
         `会整理 ${preview.chapterCount} 章，其中 ${preview.chaptersChanged} 章有改动：\n${listText}${moreText}\n\n` +
         '写盘前会把要改动的原章节备份到书内 _trash/整理备份-时间戳/，可以人工找回。\n' +
         '整本整理会直接写盘（和「保存」一样是显式动作）；整理完当前章会从磁盘重新载入。',
@@ -9776,6 +9769,7 @@
                 : null,
               chapterCount: state.proofread.chapterCount,
               chapterHitCount: state.proofread.chapterHitCount,
+              skippedChapters: state.proofread.skippedChapters,
               issues: state.proofread.issues.map((issue) => ({
                 rule: issue.rule,
                 index: issue.index,

@@ -102,8 +102,8 @@
                 <button id="btn-format" class="btn ghost" type="button" title="点击：直接用上次记住的规则整理本章（只改编辑区、仍是未保存，Ctrl+S 保存 / Ctrl+Z 撤销）。鼠标悬浮或 Tab 聚焦：打开选择卡（排版设置… / 一键整理本书… / 撤销上次整理）">整理 ▾</button>
                 <div class="dropdown-menu format-card hidden" id="format-menu" aria-label="整理选项">
                   <div class="format-card-note" id="format-card-note">点「整理」= 直接用记住的规则整理本章</div>
-                  <button type="button" data-action="settings" id="format-settings-item" title="打开「智能排版 · 仅当前章」对话框：调规则 + 预览 + 套用到本章">排版设置…</button>
-                  <button type="button" data-action="apply-book" id="format-book-item" title="用同一套规则把整本书逐章整理（先预检查 + 确认，写盘前整本备份到 _trash）">一键整理本书…</button>
+                  <button type="button" data-action="settings" title="打开「智能排版 · 仅当前章」对话框：调规则 + 预览 + 套用到本章">排版设置…</button>
+                  <button type="button" data-action="apply-book" title="用同一套规则把整本书逐章整理（先预检查 + 确认，写盘前整本备份到 _trash）">一键整理本书…</button>
                   <button type="button" data-action="undo" id="format-undo-item" title="把最近一次整理退回编辑区（仍在编辑区、未写盘）">撤销上次整理</button>
                 </div>
               </div>
@@ -175,7 +175,7 @@
           <span id="status-selection" class="status-selection hidden"></span>
           <span class="spacer"></span>
           <button id="btn-write-timer" class="status-timer hidden" type="button" title="写作计时（默认关）：点一下开始，再点暂停；只记时长、不记内容">
-            <span id="write-timer-icon" aria-hidden="true">⏱</span>
+            <span aria-hidden="true">⏱</span>
             <span id="write-timer-text">写作计时</span>
           </button>
           <span id="status-stats" class="status-stats hidden">
@@ -433,7 +433,7 @@
             <span>按卷导出</span>
             <select id="export-volume" class="text-input"></select>
           </label>
-          <label class="export-scope-row" id="export-range-row">
+          <label class="export-scope-row">
             <input type="radio" name="export-scope" value="range" />
             <span>第</span>
             <input id="export-from" class="text-input export-range-input" type="number" min="1" inputmode="numeric" />
