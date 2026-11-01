@@ -107,6 +107,11 @@ contextBridge.exposeInMainWorld('api', {
   getBookDisplay: (bookId) => invoke('book:get-display', bookId),
   setBookDisplay: (bookId, patch) => invoke('book:set-display', bookId, patch),
   resetBookDisplay: (bookId) => invoke('book:reset-display', bookId),
+  // 查找书签（v0.8-11b，提案 N11b）：只存查询词与大小写到 userData/config.json。
+  // 主进程按「书 + 章」原子增删，渲染层拿不到 fs，也不会整份覆盖别人的书签。
+  listFindBookmarks: () => invoke('find:bookmark-list'),
+  saveFindBookmark: (entry) => invoke('find:bookmark-save', entry),
+  removeFindBookmark: (bookId, chapterId) => invoke('find:bookmark-remove', bookId, chapterId),
   pickFont: () => invoke('font:pick'),
   readFont: (fontPath) => invoke('font:read', fontPath),
   pickFolder: () => invoke('shell:pick-folder'),

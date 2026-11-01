@@ -10,6 +10,7 @@ const statsLib = require('./stats');
 const templateLib = require('./template');
 const s2tLib = require('./s2t');
 const caretColorLib = require('./caret-color');
+const bookmarksLib = require('./bookmarks');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -83,7 +84,11 @@ const DEFAULTS = Object.freeze({
   proofreadWordsPath: '',
   // 导出时的简繁转换（v0.8 P0 N7）：'' = 不转换（默认）/ 's2t' = 简→繁 / 't2s' = 繁→简。
   // 只作用于导出的副本（TXT / EPUB），原稿与书库一个字节都不改；旧配置没有这个键 = 不转换。
-  exportConversion: ''
+  exportConversion: '',
+  // 查找书签（v0.8-11b，提案 N11b）：按「书 + 章」记住查询词与大小写选项。只存查询条件
+  // 与几个显示字段（书名 / 章名 / 章号 / 书路径），**不存正文、不存命中位置**；打开这一章时
+  // 按当前正文重新扫描并高亮。旧配置没有这个键 = 没有书签，行为和以前完全一样。
+  findBookmarks: []
 });
 
 function clampInt(value, min, max, fallback) {
@@ -236,6 +241,9 @@ function sanitize(raw) {
   // 导出简繁转换：只认 '', 's2t', 't2s'；旧配置没有这个键 / 手改坏了都按「不转换」，
   // 不会因为一个脏值让导出变成另一种字形。
   cfg.exportConversion = s2tLib.normalizeMode(cfg.exportConversion);
+  // 查找书签（v0.8-11b）：只认数组；坏条目 / 重复的「书 + 章」丢掉，最多 200 条。
+  // 旧配置没有 findBookmarks = 没有书签，其它字段照常。
+  cfg.findBookmarks = bookmarksLib.sanitizeBookmarks(cfg.findBookmarks);
 
   const b = cfg.windowBounds;
   if (b && typeof b === 'object' && Number.isFinite(Number(b.width)) && Number.isFinite(Number(b.height))) {
@@ -266,7 +274,7 @@ function createConfigStore(userDataDir) {
   }
 
   function defaults() {
-    return { ...DEFAULTS, windowBounds: { ...DEFAULTS.windowBounds }, bookDisplay: {} };
+    return { ...DEFAULTS, windowBounds: { ...DEFAULTS.windowBounds }, bookDisplay: {}, findBookmarks: [] };
   }
 
   async function load() {
@@ -357,6 +365,40 @@ function createConfigStore(userDataDir) {
     });
   }
 
+  // ---------- 查找书签（v0.8-11b，提案 N11b）----------
+  // 按「书 + 章」原子增 / 删；不在渲染层整份覆盖数组，两个窗口各存各的书签也不会互相吞掉。
+  // 只写 userData/config.json，绝不碰书库 / 书目 / 章节文件。
+  async function listFindBookmarks() {
+    const cfg = await get();
+    return (cfg.findBookmarks || []).map((item) => ({ ...item }));
+  }
+
+  function upsertFindBookmark(entry) {
+    return enqueue(async () => {
+      const cfg = await get();
+      const clean = bookmarksLib.normalizeBookmark(entry);
+      if (!clean) throw new Error('书签缺少书籍 / 章节 id 或查找词');
+      const list = bookmarksLib.upsertBookmark(cfg.findBookmarks, clean);
+      cache = sanitize({ ...cfg, findBookmarks: list });
+      await writeJsonAtomic(file, cache);
+      const bookmark = bookmarksLib.findBookmark(cache.findBookmarks, clean.bookId, clean.chapterId);
+      return {
+        list: cache.findBookmarks.map((item) => ({ ...item })),
+        bookmark: bookmark ? { ...bookmark } : null
+      };
+    });
+  }
+
+  function removeFindBookmark(bookId, chapterId) {
+    return enqueue(async () => {
+      const cfg = await get();
+      const list = bookmarksLib.removeBookmark(cfg.findBookmarks, bookId, chapterId);
+      cache = sanitize({ ...cfg, findBookmarks: list });
+      await writeJsonAtomic(file, cache);
+      return { list: cache.findBookmarks.map((item) => ({ ...item })) };
+    });
+  }
+
   return {
     file,
     load,
@@ -366,6 +408,9 @@ function createConfigStore(userDataDir) {
     getBookDisplay,
     setBookDisplay,
     resetBookDisplay,
+    listFindBookmarks,
+    upsertFindBookmark,
+    removeFindBookmark,
     defaults: DEFAULTS
   };
 }

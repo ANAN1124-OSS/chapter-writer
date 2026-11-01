@@ -15,6 +15,9 @@
   // 查找增强（v0.8-11，提案 N11）的纯逻辑：上一处 / 下一处、高亮窗口、正文切片段、行号。
   // 在 find-logic.js 里、Node 单测覆盖；这里只负责选中、滚动和影子层显示。
   const findLogic = window.CWFindLogic;
+  // 查找书签（v0.8-11b，提案 N11b）的纯逻辑：按「书 + 章」清洗 / 查找 / 增删书签。
+  // 在 core/bookmarks.js 里、Node 单测覆盖；这里只负责面板列表、存 / 删 / 跳与自动高亮。
+  const bookmarksLib = window.CWBookmarks;
   // 专注模式的纯逻辑（打字机滚动的换算），在 focus-logic.js 里、Node 单测覆盖
   const focusLogic = window.CWFocusLogic;
   // 阅读模式的纯逻辑（字号 / 行距档位、进度、当前章、接近底部、上一章 / 下一章），
@@ -208,8 +211,14 @@
       highlighted: 0, // 当前画进影子层的命中数（给测试 / 提示用）
       windowStart: 0, // 影子层画的是全部命中里的哪一段（0 基）
       windowEnd: 0,
-      truncated: false // 命中太多、只画了一屏窗口
+      truncated: false, // 命中太多、只画了一屏窗口
+      fromBookmark: false // 这个会话是不是打开书签后自动建起来的（状态栏显示「书签 x / N」）
     },
+    // 查找书签（v0.8-11b，提案 N11b）：按「书 + 章」把查询词与大小写存进 config.json。
+    // 只存查询条件（不存正文、不存命中位置）；打开这一章时按当前正文重新扫描高亮。
+    // 列表由主进程 config 清洗后下发，渲染层不直接读写文件。
+    findBookmarks: [],
+    findBookmarkToken: 0, // 丢弃过期的书签列表刷新结果（快速开面板 / 多窗口时）
     proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, wordList, ... }
     proofreadScope: 'current', // 校对范围：current = 当前章；book = 整本
     proofreadBusy: false, // 校对进行中（防重复触发）
@@ -1406,6 +1415,7 @@
     if (target && Number.isFinite(Number(target.matchIndex))) {
       selectEditorRange(Number(target.matchIndex), Number(target.matchLength) || 0);
     }
+    return data;
   }
 
   // 把编辑区选区放到命中位置（正文命中点进来用）：只改光标 / 选区与滚动，不改内容
@@ -2355,6 +2365,7 @@
     state.find.windowStart = 0;
     state.find.windowEnd = 0;
     state.find.truncated = false;
+    state.find.fromBookmark = false;
     updateFindNavUi();
     if (toastHint) toast('已结束查找高亮（正文没改，也没写盘）');
   }
@@ -2380,11 +2391,15 @@
       chip.title = '';
       return;
     }
-    chip.textContent = `查找 ${findLogic.formatCounter(state.find.index, state.find.total)}`;
-    chip.title =
-      `查找「${state.find.query}」：第 ${state.find.index + 1}/${state.find.total} 处` +
-      `${state.find.truncated ? `（命中太多，正文里只高亮当前附近 ${state.find.highlighted} 处）` : ''}\n` +
-      '单击 = 下一处；F3 / Shift+F3 = 下一处 / 上一处；Esc = 清除高亮。只显示，不改正文、不写盘。';
+    const label = state.find.fromBookmark ? '书签' : '查找';
+    chip.textContent = `${label} ${findLogic.formatCounter(state.find.index, state.find.total)}`;
+    chip.title = state.find.fromBookmark
+      ? `书签「${state.find.query}」：第 ${state.find.index + 1}/${state.find.total} 处` +
+        `${state.find.truncated ? `（命中太多，正文里只高亮当前附近 ${state.find.highlighted} 处）` : ''}\n` +
+        '打开这一章时按最新正文自动高亮；F3 / Shift+F3 = 下一处 / 上一处；Esc = 收起高亮。只显示，不改正文、不写盘。'
+      : `查找「${state.find.query}」：第 ${state.find.index + 1}/${state.find.total} 处` +
+        `${state.find.truncated ? `（命中太多，正文里只高亮当前附近 ${state.find.highlighted} 处）` : ''}\n` +
+        '单击 = 下一处；F3 / Shift+F3 = 下一处 / 上一处；Esc = 清除高亮。只显示，不改正文、不写盘。';
   }
 
   function syncFindOverlayScroll() {
@@ -2515,6 +2530,287 @@
       `第 ${step.index + 1}/${step.total} 处 · 第 ${findLogic.lineOfIndex(editorEl.value, match.index)} 行${wrapHint}` +
       `${state.find.truncated ? ' · 命中太多，正文里只高亮当前附近这一屏' : ''}`;
     return { ok: true, index: step.index, total: step.total, wrapped: step.wrapped };
+  }
+
+  // ---------- 查找书签（v0.8-11b，提案 N11b）----------
+  // 书签按「书 + 章」记查询词与大小写选项，只存 config.json（userData）：不存正文、
+  // 不记命中位置、不碰书库 / 书目 / 章节文件。打开这一章时按磁盘上的当前正文重新扫描并
+  // 高亮；正文改动保存后也重扫一次，按新正文重新定位（书签条件本身不变）。
+  function bookmarkPlaceText(bookmark) {
+    return bookmarksLib ? bookmarksLib.bookmarkPlace(bookmark) : '';
+  }
+
+  function currentFindBookmark() {
+    if (!bookmarksLib || !state.bookId || state.index < 0) return null;
+    const chapter = state.chapters[state.index];
+    if (!chapter) return null;
+    return bookmarksLib.findBookmark(state.findBookmarks, state.bookId, chapter.id);
+  }
+
+  function bookmarkIsCurrent(bookmark) {
+    const chapter = state.chapters[state.index];
+    return Boolean(
+      bookmark && chapter && state.bookId && bookmark.bookId === state.bookId && bookmark.chapterId === chapter.id
+    );
+  }
+
+  // 主进程回来的列表统一清洗一遍再进 state；渲染层不直接读写配置 / 文件。
+  function setFindBookmarks(list) {
+    state.findBookmarks = bookmarksLib
+      ? bookmarksLib.sanitizeBookmarks(list)
+      : Array.isArray(list)
+        ? list
+        : [];
+    renderFindBookmarks();
+    return state.findBookmarks;
+  }
+
+  function renderFindBookmarks() {
+    const listEl = $('find-bookmark-list');
+    if (!listEl) return;
+    const countEl = $('find-bookmarks-count');
+    const saveBtn = $('btn-find-bookmark');
+    const current = currentFindBookmark();
+    if (countEl) {
+      const books = bookmarksLib ? bookmarksLib.countBooks(state.findBookmarks) : 0;
+      countEl.textContent = state.findBookmarks.length
+        ? `本机 ${state.findBookmarks.length} 个书签 · ${books} 本书`
+        : '本机还没有书签';
+    }
+    if (saveBtn) {
+      saveBtn.textContent = current ? '更新本章书签' : '存成书签';
+      saveBtn.title = current
+        ? `更新这一章的书签（现在是「${current.query}」；只写 config.json，不碰正文）`
+        : '把当前章的查找词与大小写选项存成书签（只写 config.json，不碰正文）';
+    }
+    listEl.textContent = '';
+    if (!state.findBookmarks.length) {
+      const empty = document.createElement('div');
+      empty.className = 'find-bookmark-empty';
+      empty.textContent = '还没有书签。在当前章查一次，点右边「存成书签」就能保留；打开这一章会自动高亮。';
+      listEl.appendChild(empty);
+      return;
+    }
+    for (const bookmark of state.findBookmarks) {
+      const row = document.createElement('div');
+      row.className = 'find-bookmark';
+      row.dataset.bookId = bookmark.bookId;
+      row.dataset.chapterId = bookmark.chapterId;
+      if (bookmarkIsCurrent(bookmark)) row.classList.add('current');
+
+      const main = document.createElement('button');
+      main.type = 'button';
+      main.className = 'find-bookmark-main';
+      main.title = '跳到这本书的这一章，并按最新正文重新高亮书签里的查找词';
+      const place = document.createElement('span');
+      place.className = 'find-bookmark-place';
+      place.textContent = bookmarkPlaceText(bookmark) + (bookmarkIsCurrent(bookmark) ? '（本章）' : '');
+      const query = document.createElement('span');
+      query.className = 'find-bookmark-query';
+      query.textContent = `「${bookmark.query}」${bookmark.caseSensitive ? ' · 区分大小写' : ''}`;
+      main.append(place, query);
+      main.addEventListener('click', () => {
+        void jumpToFindBookmark(bookmark);
+      });
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn ghost tiny find-bookmark-delete';
+      del.textContent = '删除';
+      del.title = '只删 config.json 里的这条书签，正文 / 书目 / 章节文件一个字节都不动';
+      del.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void deleteFindBookmark(bookmark);
+      });
+      row.append(main, del);
+      listEl.appendChild(row);
+    }
+  }
+
+  // 打开面板时从主进程重新取一次列表（多窗口 / 手改配置后也不会显示旧列表）。
+  async function refreshFindBookmarks() {
+    if (typeof api.listFindBookmarks !== 'function') return state.findBookmarks;
+    const token = state.findBookmarkToken + 1;
+    state.findBookmarkToken = token;
+    try {
+      const list = await call(api.listFindBookmarks);
+      if (token !== state.findBookmarkToken) return state.findBookmarks;
+      if (Array.isArray(list)) state.findBookmarks = bookmarksLib ? bookmarksLib.sanitizeBookmarks(list) : list;
+    } catch {
+      /* 取不到就先用内存里的；不影响查找 / 高亮 */
+    }
+    renderFindBookmarks();
+    return state.findBookmarks;
+  }
+
+  // 「存成书签 / 更新书签」：当前章的查询词 + 大小写选项写进 config.json。
+  async function saveFindBookmark() {
+    const options = readFindOptions();
+    if (!options.query.trim()) {
+      $('find-summary').textContent = '先在查找框里输入内容，再存成书签';
+      return { ok: false, code: 'EMPTY_QUERY' };
+    }
+    if (!state.bookPath || !state.bookId || state.index < 0) {
+      toast('先打开一本书、选好章节再存书签', 'warn');
+      return { ok: false, code: 'NO_BOOK' };
+    }
+    const chapter = state.chapters[state.index];
+    if (!chapter) return { ok: false, code: 'NO_CHAPTER' };
+    const entry = {
+      bookId: state.bookId,
+      bookPath: state.bookPath,
+      bookTitle: state.meta ? state.meta.title : '',
+      chapterId: chapter.id,
+      chapterName: chapter.name || '',
+      chapterIndex: state.index + 1,
+      query: options.query,
+      caseSensitive: Boolean(options.caseSensitive)
+    };
+    try {
+      const data = await call(api.saveFindBookmark, entry);
+      const saved = data && data.bookmark ? data.bookmark : null;
+      setFindBookmarks(data && Array.isArray(data.list) ? data.list : [entry]);
+      $('find-summary').textContent =
+        `已存成书签：${bookmarkPlaceText(saved || entry)}「${entry.query}」` +
+        `${entry.caseSensitive ? '（区分大小写）' : ''}` +
+        '。打开这一章会自动高亮；只写 config.json，正文 / 书目不动。';
+      toast('已存成书签（只写 config.json，正文 / 书目不动）');
+      // 已经查过同一组条件就直接标成书签会话；否则按当前正文扫一遍，让作者马上看到命中位置
+      if (findSessionMatchesOptions({ query: entry.query, caseSensitive: entry.caseSensitive })) {
+        state.find.fromBookmark = true;
+        renderFindStatusChip();
+      } else {
+        await restoreFindBookmarkForCurrentChapter({ force: true });
+      }
+      renderFindBookmarks();
+      renderFindStatusChip();
+      return { ok: true, bookmark: saved, total: state.find.total };
+    } catch (err) {
+      $('find-summary').textContent = `存书签失败：${err.message}`;
+      toast(`存书签失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  async function deleteFindBookmark(bookmark) {
+    if (!bookmark) return { ok: false };
+    try {
+      const data = await call(api.removeFindBookmark, bookmark.bookId, bookmark.chapterId);
+      setFindBookmarks(data && Array.isArray(data.list) ? data.list : []);
+      if (state.find.fromBookmark && bookmarkIsCurrent(bookmark)) {
+        clearFindSession();
+        $('find-summary').textContent = `已删除本章书签「${bookmark.query}」，高亮已收起（正文 / 书目不动）`;
+      } else {
+        $('find-summary').textContent =
+          `已删除书签「${bookmark.query}」（只删 config.json 里的记录，正文 / 书目不动）`;
+      }
+      toast('已删除书签（只删配置里的记录，正文 / 书目不动）');
+      return { ok: true, list: state.findBookmarks };
+    } catch (err) {
+      toast(`删除书签失败：${err.message}`, 'error');
+      return { ok: false, message: err.message };
+    }
+  }
+
+  // 跳到书签所在的「书 + 章」：同一本书直接切章；别的书先确认还在书架里再打开。
+  // 切章 / 开书后由 loadChapterAt 统一按最新正文重扫并高亮，所以这里不自己查。
+  async function jumpToFindBookmark(bookmark) {
+    if (!bookmark) return { ok: false };
+    if (!state.bookPath) {
+      toast('先打开一本书再跳书签', 'warn');
+      return { ok: false, code: 'NO_BOOK' };
+    }
+    closeFindPanel();
+    const sameBook =
+      state.bookPath === bookmark.bookPath || (state.bookId && state.bookId === bookmark.bookId);
+    if (sameBook) {
+      const index = state.chapters.findIndex((chapter) => chapter.id === bookmark.chapterId);
+      if (index < 0) {
+        toast('这一章已经不存在了（书签还留着，可在查找面板里删除）', 'warn');
+        return { ok: false, code: 'NO_CHAPTER' };
+      }
+      if (index !== state.index) {
+        const switched = await switchChapter(index);
+        if (!switched || switched.ok === false) return { ok: false, canceled: true };
+      }
+      const restored = await restoreFindBookmarkForCurrentChapter({ force: true, toastHint: true });
+      return { ok: Boolean(restored && restored.ok), index, count: restored ? restored.count : 0 };
+    }
+    const known = (state.books || []).find((book) => book.path === bookmark.bookPath);
+    if (!known) {
+      toast('这本书已经不在书架里了（书签还留着，可在查找面板里删除）', 'warn');
+      return { ok: false, code: 'BOOK_GONE' };
+    }
+    const opened = await openBookByPath(bookmark.bookPath, { chapterId: bookmark.chapterId });
+    if (!opened) return { ok: false };
+    const index = state.chapters.findIndex((chapter) => chapter.id === bookmark.chapterId);
+    if (index < 0) {
+      toast('这一章已经不存在了（书签还留着，可在查找面板里删除）', 'warn');
+      return { ok: false, code: 'NO_CHAPTER' };
+    }
+    return { ok: true, index };
+  }
+
+  // 打开这一章 / 保存后：有书签就按编辑区里的最新正文重扫一遍并高亮。
+  // 只读正文、只移动高亮层与选区，不改正文、不写盘；正文改到没有命中时书签仍保留。
+  async function restoreFindBookmarkForCurrentChapter({ force = false, toastHint = false } = {}) {
+    if (!bookmarksLib || state.view !== 'editor' || !state.bookPath || !state.bookId || state.index < 0) {
+      return null;
+    }
+    const chapter = state.chapters[state.index];
+    if (!chapter) return null;
+    const bookmark = bookmarksLib.findBookmark(state.findBookmarks, state.bookId, chapter.id);
+    if (!bookmark) {
+      state.find.fromBookmark = false;
+      return null;
+    }
+    if (
+      !force &&
+      state.find.total &&
+      findSessionMatchesOptions({ query: bookmark.query, caseSensitive: bookmark.caseSensitive })
+    ) {
+      return { ok: true, already: true, count: state.find.total, bookmark };
+    }
+    const snapshot = editorEl.value;
+    let res;
+    try {
+      res = await call(api.findAll, snapshot, bookmark.query, {
+        caseSensitive: bookmark.caseSensitive
+      });
+    } catch (err) {
+      return { ok: false, message: err.message, bookmark };
+    }
+    // 扫的过程中换了书 / 换了章 / 正文又改了：这次结果作废，别把旧位置画到新正文上
+    if (!state.bookPath || !state.bookId || state.bookId !== bookmark.bookId) return null;
+    const stillChapter = state.chapters[state.index];
+    if (!stillChapter || stillChapter.id !== bookmark.chapterId || editorEl.value !== snapshot) return null;
+    $('find-query').value = bookmark.query;
+    $('find-case').checked = Boolean(bookmark.caseSensitive);
+    renderFindBookmarks();
+    if (!res || !res.count) {
+      if (state.find.fromBookmark) clearFindSession();
+      else state.find.fromBookmark = false;
+      if (findPanelOpen()) {
+        $('find-summary').textContent =
+          `书签「${bookmark.query}」在最新正文里没有命中了（书签还在，改回来或删除即可）`;
+      }
+      if (toastHint) toast(`书签「${bookmark.query}」在最新正文里没有命中了（书签保留）`, 'warn');
+      return { ok: false, code: 'NO_MATCH', bookmark, count: 0 };
+    }
+    state.find.fromBookmark = true;
+    startFindSession(bookmark.query, bookmark.caseSensitive, res.matches, 0);
+    if (findPanelOpen()) {
+      $('find-summary').textContent =
+        `书签「${bookmark.query}」：本章 ${res.count} 处，按最新正文重新定位` +
+        `${res.truncated ? '（命中太多，只高亮当前附近一屏）' : ''}`;
+    }
+    if (toastHint) toast(`已按书签「${bookmark.query}」高亮本章 ${res.count} 处`);
+    return {
+      ok: true,
+      bookmark,
+      count: res.count,
+      truncated: Boolean(res.truncated)
+    };
   }
 
   // ---------- 专注模式（提案 3.5）----------
@@ -3624,8 +3920,13 @@
 
   // ---------- 编辑区事件 ----------
   function onEditorInput() {
-    // 正文改了，查找高亮的位置就对不上了：立刻结束会话（不写盘、不提示，重新查一次即可）
+    // 正文改了，查找高亮的位置就对不上了：立刻结束会话（不写盘、不提示，重新查一次即可）。
+    // 如果这次高亮来自书签，书签本身不动，Ctrl+S 保存后会按新正文重新扫描定位。
+    const wasBookmark = state.find.fromBookmark;
     if (state.find.total) clearFindSession();
+    if (wasBookmark && findPanelOpen()) {
+      $('find-summary').textContent = '正文改过：高亮先收起，按 Ctrl+S 保存后会按新正文重新定位书签';
+    }
     // 朗读读的是「打开那一刻」的正文：改了字就停，别让进度 / 跟随高亮对不上新正文
     if (state.tts.open) {
       closeTtsBar();
@@ -3679,6 +3980,9 @@
       try {
         await api.setLastOpenChapter(state.bookPath, chapter.id);
       } catch { /* 记不住也无所谓 */ }
+      // 这一章有查找书签的话，按刚从磁盘读到的正文自动高亮（打开书签所在章就有；
+      // 书签只存查询条件，命中位置仍按当前正文现算，正文改过也能重新定位）
+      await restoreFindBookmarkForCurrentChapter();
     } catch (err) {
       toast(`读取章节失败：${err.message}`, 'error');
     } finally {
@@ -3724,6 +4028,11 @@
         renderChapterList();
       }
       updateStatus();
+      // 保存后：这一章有查找书签的话，按刚写盘的新正文重新扫描定位。
+      // 只在没有手动查找会话、或高亮本来就来自书签时做，免得覆盖作者正在看的其它查找结果。
+      if (state.find.total === 0 || state.find.fromBookmark) {
+        await restoreFindBookmarkForCurrentChapter();
+      }
       // 「保存整本」语义：保存后顺带校验全书章节文件是否齐全
       try {
         const report = await call(api.verifyBook, state.bookPath);
@@ -4973,6 +5282,9 @@
     $('find-query').select();
     // 打开面板时如果带来的词 / 大小写和上次会话对不上（例如带入了新的选中文字），先把旧高亮收起来
     if (state.find.total && !findSessionMatchesOptions(readFindOptions())) clearFindSession();
+    // 查找书签（v0.8-11b）：先用内存里的列表画出来，再从主进程取一次最新的（多窗口 / 手改配置）
+    renderFindBookmarks();
+    void refreshFindBookmarks();
     // 顺带看一眼这本书有没有「整本替换」的备份（有就显示「还原到替换前」入口）
     refreshReplaceBackups();
     updateFindNavUi();
@@ -5532,6 +5844,7 @@
       try {
         const res = await call(api.findAll, editorEl.value, query, { caseSensitive });
         if (res.count) {
+          state.find.fromBookmark = false;
           startFindSession(query, caseSensitive, res.matches, 0);
           selectFindMatch(0);
           toast(
@@ -5583,6 +5896,7 @@
         $('find-summary').textContent = `本章没有找到「${options.query}」`;
         return;
       }
+      state.find.fromBookmark = false;
       startFindSession(options.query, options.caseSensitive, res.matches, 0);
       selectFindMatch(0);
       $('find-summary').textContent =
@@ -8208,6 +8522,8 @@
     $('btn-find-run').addEventListener('click', runFind);
     $('btn-find-prev').addEventListener('click', () => void stepFind(-1));
     $('btn-find-next').addEventListener('click', () => void stepFind(1));
+    // 查找书签（v0.8-11b）：把当前章的词 + 大小写存进 config；只写配置，不碰正文 / 书目
+    $('btn-find-bookmark').addEventListener('click', () => void saveFindBookmark());
     $('status-find').addEventListener('click', () => {
       if (findSessionActive()) void stepFind(1);
     });
@@ -9208,8 +9524,39 @@
           windowStart: state.find.windowStart,
           windowEnd: state.find.windowEnd,
           highlighted: state.find.highlighted,
-          truncated: state.find.truncated
+          truncated: state.find.truncated,
+          fromBookmark: state.find.fromBookmark
         };
+      },
+      findMatchIndexes: () => state.find.matches.map((match) => match.index),
+      findFromBookmark: () => state.find.fromBookmark,
+      findQueryField: () => $('find-query').value,
+      findCaseField: () => $('find-case').checked,
+      // 查找书签（v0.8-11b，提案 N11b）：面板列表 / 存 / 删 / 跳（正常流程走真实按钮点击）
+      findBookmarks: () => state.findBookmarks.map((item) => ({ ...item })),
+      findBookmarkCount: () => state.findBookmarks.length,
+      findBookmarksCountText: () => $('find-bookmarks-count').textContent,
+      findBookmarkButtonText: () => $('btn-find-bookmark').textContent,
+      findBookmarkRows: () =>
+        Array.from(document.querySelectorAll('#find-bookmark-list .find-bookmark')).map((el) => ({
+          text: el.textContent,
+          current: el.classList.contains('current'),
+          bookId: el.dataset.bookId || '',
+          chapterId: el.dataset.chapterId || ''
+        })),
+      async findBookmarkSave() {
+        return saveFindBookmark();
+      },
+      async findBookmarkDelete(index) {
+        const bookmark = state.findBookmarks[Number(index) || 0];
+        return bookmark ? deleteFindBookmark(bookmark) : { ok: false };
+      },
+      async findBookmarkJump(index) {
+        const bookmark = state.findBookmarks[Number(index) || 0];
+        return bookmark ? jumpToFindBookmark(bookmark) : { ok: false };
+      },
+      async findBookmarkRestore() {
+        return restoreFindBookmarkForCurrentChapter({ force: true });
       },
       async findStep(direction) {
         return stepFind(Number(direction) < 0 ? -1 : 1);
@@ -10185,6 +10532,12 @@
     } catch (err) {
       toast(`读取配置失败：${err.message}`, 'error');
     }
+    // 查找书签（v0.8-11b）：旧配置没有 findBookmarks 也照常启动（= 没有书签）；
+    // 列表只用于面板显示，打开章节时是否自动高亮由「书 + 章」匹配决定。
+    state.findBookmarks = bookmarksLib
+      ? bookmarksLib.sanitizeBookmarks(state.globalConfig && state.globalConfig.findBookmarks)
+      : [];
+    renderFindBookmarks();
     // 版本号以 package.json 为准（发版只改一处，界面跟着变）
     try {
       const appInfo = await call(api.appVersion);

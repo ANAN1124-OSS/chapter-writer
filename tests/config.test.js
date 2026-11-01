@@ -670,3 +670,122 @@ test('导出简繁转换配置：写盘 / 读回，切回不转换后落盘为�
   const cleared = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
   assert.equal(cleared.exportConversion, '');
 });
+
+test('查找书签配置：默认空、旧配置缺字段照常启动、坏值清洗', async () => {
+  const dir = await mkTmp();
+  assert.deepEqual((await createConfigStore(dir).get()).findBookmarks, [], '默认没有书签');
+
+  // 模拟旧配置：完全没有 findBookmarks（v0.8 N11 及以前）
+  await fs.writeFile(
+    path.join(dir, 'config.json'),
+    JSON.stringify({ booksRoot: 'D:\\旧书架', dailyGoal: 800, exportConversion: 's2t' }, null, 2),
+    'utf8'
+  );
+  const cfg = await createConfigStore(dir).get();
+  assert.deepEqual(cfg.findBookmarks, [], '旧配置缺字段 = 没有书签');
+  assert.equal(cfg.dailyGoal, 800, '旧配置其它字段不受影响');
+  assert.equal(cfg.exportConversion, 's2t');
+
+  assert.deepEqual(sanitize({ findBookmarks: 'x' }).findBookmarks, []);
+  assert.deepEqual(sanitize({ findBookmarks: { a: 1 } }).findBookmarks, []);
+  const cleaned = sanitize({
+    findBookmarks: [
+      {
+        bookId: 'b1',
+        chapterId: 'ch_001',
+        bookPath: 'D:\\书库\\书一',
+        bookTitle: '书一',
+        chapterName: '第一章',
+        chapterIndex: 1,
+        query: '阿明',
+        caseSensitive: 'true',
+        createdAt: 1000,
+        updatedAt: 1000,
+        text: '这条字段不该进配置'
+      },
+      { bookId: '', chapterId: 'ch_002', query: '坏' },
+      { bookId: 'b1', chapterId: 'ch_001', query: '重复' },
+      null
+    ]
+  }).findBookmarks;
+  assert.equal(cleaned.length, 1, '坏条目 / 重复的「书 + 章」被丢掉');
+  assert.equal(cleaned[0].query, '阿明');
+  assert.equal(cleaned[0].caseSensitive, false, '大小写只认真正的 true');
+  assert.equal('text' in cleaned[0], false, '正文 / 多余字段不进配置');
+});
+
+test('查找书签配置：主进程按「书 + 章」原子增删，只写 config.json', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+  await store.set({ editorFont: 'kai', dailyGoal: 1200 });
+
+  const first = await store.upsertFindBookmark({
+    bookId: 'b_book1',
+    chapterId: 'ch_001',
+    bookPath: 'D:\\书库\\测试书',
+    bookTitle: '测试书',
+    chapterName: '雨夜',
+    chapterIndex: 1,
+    query: '阿明',
+    caseSensitive: false,
+    createdAt: 111
+  });
+  assert.equal(first.list.length, 1);
+  assert.equal(first.bookmark.query, '阿明');
+  assert.equal(first.bookmark.createdAt, 111);
+
+  const raw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(raw.findBookmarks.length, 1);
+  assert.equal(raw.editorFont, 'kai', '其它配置字段不受影响');
+  assert.equal(raw.dailyGoal, 1200);
+  assert.deepEqual((await createConfigStore(dir).get()).findBookmarks.length, 1, '重启后书签还在');
+
+  // 同一「书 + 章」再存 = 更新那一条（保留第一次收藏时间），不新增
+  const updated = await store.upsertFindBookmark({
+    bookId: 'b_book1',
+    chapterId: 'ch_001',
+    bookPath: 'D:\\书库\\测试书',
+    bookTitle: '测试书',
+    chapterName: '雨夜',
+    chapterIndex: 1,
+    query: '雨',
+    caseSensitive: true
+  });
+  assert.equal(updated.list.length, 1);
+  assert.equal(updated.bookmark.query, '雨');
+  assert.equal(updated.bookmark.caseSensitive, true);
+  assert.equal(updated.bookmark.createdAt, 111, '保留第一次收藏时间');
+
+  // 另一章 = 另一条，最近保存的在最前
+  const second = await store.upsertFindBookmark({
+    bookId: 'b_book1',
+    chapterId: 'ch_002',
+    bookTitle: '测试书',
+    chapterName: '归途',
+    chapterIndex: 2,
+    query: '灯',
+    caseSensitive: false
+  });
+  assert.equal(second.list.length, 2);
+  assert.equal(second.list[0].chapterId, 'ch_002');
+  assert.equal(second.list[1].chapterId, 'ch_001');
+
+  // 删除：只按「书 + 章」精确删，不存在的键不动其它条目
+  const removed = await store.removeFindBookmark('b_book1', 'ch_001');
+  assert.equal(removed.list.length, 1);
+  assert.equal(removed.list[0].chapterId, 'ch_002');
+  assert.equal((await store.removeFindBookmark('b_book1', '不存在')).list.length, 1);
+  assert.equal((await store.removeFindBookmark('', '')).list.length, 1);
+
+  // 缺书 / 缺章 / 缺词的条目明确报错，不会写一条空书签
+  await assert.rejects(() => store.upsertFindBookmark({ bookId: '', chapterId: 'ch_003', query: 'x' }));
+  await assert.rejects(() => store.upsertFindBookmark({ bookId: 'b_book1', chapterId: '', query: 'x' }));
+  await assert.rejects(() => store.upsertFindBookmark({ bookId: 'b_book1', chapterId: 'ch_003', query: '  ' }));
+  assert.equal((await store.listFindBookmarks()).length, 1);
+
+  const finalRaw = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(finalRaw.findBookmarks.length, 1);
+  assert.equal(finalRaw.editorFont, 'kai');
+  assert.equal(finalRaw.dailyGoal, 1200);
+  assert.equal('text' in finalRaw.findBookmarks[0], false);
+});

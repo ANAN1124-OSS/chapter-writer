@@ -8211,6 +8211,346 @@ module.exports = async function runScenario(ctx) {
       ['books', 'chapters', 'chapterFiles', 'bookMeta'].every((key) => !(key in caretCfgClean))
   );
 
+  // 50n. 查找书签（v0.8-11b，提案 N11b）：把当前章的查询词与大小写选项按「书 + 章」
+  // 存进 config.json；打开这一章自动高亮；正文改过后按新正文重新扫描定位；面板可列 / 跳 / 删。
+  // 只写 config（userData），绝不写书库 / 书目 / 章节文件，渲染层仍然没有 fs 权限。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('查找书签测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const bmBookPath = await exec('window.__cwTest.bookPathValue()');
+  const bmBookId = await exec('window.__cwTest.bookId()');
+  const bmBookTitle = '查找书签测试书';
+  const bmMetaPath = path.join(bmBookPath, '书目.json');
+  const bmConfigPath = path.join(userData, 'config.json');
+  await exec("window.__cwTest.renameChapterAt(0, '旧雨')");
+  const bmText1 = '　　阿明推开门，阿明看见雨。\n\n　　巷口没有人，阿明把伞收起来。\n\n　　阿明说：雨要停了。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText1)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec("window.__cwTest.newChapter('归途')");
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  const bmText2 = '　　阿明在归途上想：阿明该回家了。\n\n　　Rain rain 都停了。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText2)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor('window.__cwTest.currentIndex() === 0');
+  const bmMetaSetup = JSON.parse(await fs.readFile(bmMetaPath, 'utf8'));
+  const bmMetaBeforeBytes = await fs.readFile(bmMetaPath, 'utf8');
+  const bmTxt1Path = path.join(bmBookPath, bmMetaSetup.chapters[0].file);
+  const bmTxt2Path = path.join(bmBookPath, bmMetaSetup.chapters[1].file);
+  const bmTxt1Before = await fs.stat(bmTxt1Path);
+  const bmTxt2Before = await fs.stat(bmTxt2Path);
+  const bmDirBefore = (await fs.readdir(bmBookPath)).sort().join('|');
+  const bmConfigBefore = JSON.parse(await fs.readFile(bmConfigPath, 'utf8'));
+  const bmAllowedKeys = [
+    'bookId',
+    'bookPath',
+    'bookTitle',
+    'caseSensitive',
+    'chapterId',
+    'chapterIndex',
+    'chapterName',
+    'createdAt',
+    'query',
+    'updatedAt'
+  ]
+    .sort()
+    .join(',');
+  check(
+    '查找书签：默认没有书签（旧配置缺字段照常打开），不在书库里留任何东西',
+    (await exec('window.__cwTest.findBookmarkCount()')) === 0 &&
+      Array.isArray(bmConfigBefore.findBookmarks) &&
+      bmConfigBefore.findBookmarks.length === 0 &&
+      (await exec('window.__cwTest.view()')) === 'editor' &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === false
+  );
+
+  await exec('window.__cwTest.openFindPanel()');
+  await waitFor('window.__cwTest.findPanelOpen() === true');
+  check(
+    '查找书签：面板里的书签区默认是空状态，按钮是「存成书签」',
+    (await exec('window.__cwTest.findBookmarkRows()')).length === 0 &&
+      (await exec('window.__cwTest.findBookmarksCountText()')).includes('本机还没有书签') &&
+      (await exec('window.__cwTest.findBookmarkButtonText()')) === '存成书签' &&
+      (await exec("document.getElementById('find-bookmark-list').textContent")).includes('还没有书签')
+  );
+
+  await exec("window.__cwTest.setFindFields({ query: '阿明', scope: 'current', caseSensitive: false })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  await exec("document.getElementById('btn-find-bookmark').click()");
+  await waitFor('window.__cwTest.findBookmarkCount() === 1');
+  const bmCfg1 = JSON.parse(await fs.readFile(bmConfigPath, 'utf8'));
+  const bmEntry1 = bmCfg1.findBookmarks[0];
+  check(
+    '查找书签：存成书签 → 只写 config.findBookmarks（书 + 章 + 查询词 + 大小写），不存正文',
+    bmCfg1.findBookmarks.length === 1 &&
+      bmEntry1.bookId === bmBookId &&
+      bmEntry1.chapterId === bmMetaSetup.chapters[0].id &&
+      bmEntry1.chapterIndex === 1 &&
+      bmEntry1.chapterName === '旧雨' &&
+      bmEntry1.bookTitle === bmBookTitle &&
+      bmEntry1.bookPath === bmBookPath &&
+      bmEntry1.query === '阿明' &&
+      bmEntry1.caseSensitive === false &&
+      Object.keys(bmEntry1).sort().join(',') === bmAllowedKeys,
+    bmEntry1
+  );
+  await waitFor("window.__cwTest.findBookmarkRows().length === 1");
+  const bmRow0 = (await exec('window.__cwTest.findBookmarkRows()'))[0];
+  check(
+    '查找书签：面板列出这一条（书名 · 第1章：旧雨「阿明」、标出本章、按钮变「更新本章书签」）',
+    bmRow0.text.includes('《查找书签测试书》') &&
+      bmRow0.text.includes('第1章：旧雨') &&
+      bmRow0.text.includes('「阿明」') &&
+      bmRow0.current === true &&
+      (await exec('window.__cwTest.findBookmarkButtonText()')) === '更新本章书签' &&
+      (await exec('window.__cwTest.findBookmarksCountText()')).includes('本机 1 个书签 · 1 本书')
+  );
+  check(
+    '查找书签：存完立刻按当前正文高亮，状态栏小标签变成「书签 1 / 4」',
+    (await exec('window.__cwTest.findSession()')).fromBookmark === true &&
+      (await exec('window.__cwTest.findChipText()')) === '书签 1 / 4' &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 4
+  );
+  const bmTxt1AfterSave = await fs.stat(bmTxt1Path);
+  check(
+    '查找书签：存书签只写 config，章节 txt（大小 + mtime）、书目字节、书内文件列表都不变',
+    bmTxt1AfterSave.size === bmTxt1Before.size &&
+      bmTxt1AfterSave.mtimeMs === bmTxt1Before.mtimeMs &&
+      (await fs.readFile(bmMetaPath, 'utf8')) === bmMetaBeforeBytes &&
+      (await fs.readdir(bmBookPath)).sort().join('|') === bmDirBefore
+  );
+
+  // 第二章再存一条：查询词 + 区分大小写选项都按「书 + 章」持久化
+  await exec('window.__cwTest.closeFindPanel()');
+  await waitFor('window.__cwTest.findPanelOpen() === false');
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: 'rain', scope: 'current', caseSensitive: true })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 1");
+  await exec("document.getElementById('btn-find-bookmark').click()");
+  await waitFor('window.__cwTest.findBookmarkCount() === 2');
+  const bmCfg2 = JSON.parse(await fs.readFile(bmConfigPath, 'utf8'));
+  check(
+    '查找书签：第二章存「rain + 区分大小写」→ 两条书签按最近保存在前，大小写选项原样保留',
+    bmCfg2.findBookmarks.length === 2 &&
+      bmCfg2.findBookmarks[0].chapterId === bmMetaSetup.chapters[1].id &&
+      bmCfg2.findBookmarks[0].query === 'rain' &&
+      bmCfg2.findBookmarks[0].caseSensitive === true &&
+      bmCfg2.findBookmarks[1].chapterId === bmMetaSetup.chapters[0].id
+  );
+  await waitFor("window.__cwTest.findBookmarkRows().length === 2");
+  const bmRows2 = await exec('window.__cwTest.findBookmarkRows()');
+  check(
+    '查找书签：列表显示两条（第2章：归途「rain」区分大小写，只有本章那条高亮）',
+    bmRows2[0].text.includes('第2章：归途') &&
+      bmRows2[0].text.includes('「rain」') &&
+      bmRows2[0].text.includes('区分大小写') &&
+      bmRows2[0].current === true &&
+      bmRows2[1].current === false &&
+      (await exec('window.__cwTest.findChipText()')) === '书签 1 / 1'
+  );
+
+  // 点书签跳回第一章：关面板、切章、自动高亮 4 处
+  await exec("document.querySelectorAll('#find-bookmark-list .find-bookmark-main')[1].click()");
+  await waitFor('window.__cwTest.currentIndex() === 0');
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  check(
+    '查找书签：点书签跳到那一章 → 关面板、切章、自动高亮 4 处，查找框带回书签的条件',
+    (await exec('window.__cwTest.findPanelOpen()')) === false &&
+      (await exec('window.__cwTest.findSession()')).total === 4 &&
+      (await exec('window.__cwTest.findSession()')).fromBookmark === true &&
+      (await exec('window.__cwTest.findChipText()')) === '书签 1 / 4' &&
+      (await exec('window.__cwTest.findQueryField()')) === '阿明' &&
+      (await exec('window.__cwTest.findCaseField()')) === false
+  );
+
+  // 正常打开书（不经过书签面板）也自动高亮：打开的书签所在章
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(bmBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  check(
+    '查找书签：重新打开这本书 → 回到书签所在章并自动高亮（不用再查一次）',
+    (await exec('window.__cwTest.findSession()')).fromBookmark === true &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 4 &&
+      (await exec('window.__cwTest.findChipText()')) === '书签 1 / 4' &&
+      (await exec('window.__cwTest.text()')) === bmText1
+  );
+
+  // 正文改动后按新正文重扫定位：前面加一段（不含查找词）→ 保存后 4 处整体后移
+  const bmPrefix = '　　开头新加的一段，没有那个词。\n\n';
+  const bmText1Shifted = bmPrefix + bmText1;
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText1Shifted)})`);
+  await waitFor("window.__cwTest.dirty() === true");
+  check(
+    '查找书签：正文一改旧高亮先收起，书签本身不动（等保存后按新正文重扫）',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      (await exec('window.__cwTest.findBookmarkCount()')) === 2
+  );
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  const bmIndexesShifted = await exec('window.__cwTest.findMatchIndexes()');
+  check(
+    '查找书签：保存后按新正文重新扫描定位（4 处整体后移，不是拿旧位置亮）',
+    bmIndexesShifted.length === 4 &&
+      bmIndexesShifted[0] === bmText1Shifted.indexOf('阿明') &&
+      bmIndexesShifted[3] === bmText1Shifted.lastIndexOf('阿明') &&
+      (await exec('window.__cwTest.findSession()')).fromBookmark === true
+  );
+
+  // 再改一次：末尾多一处命中 → 保存后 5 处
+  const bmText1More = `${bmText1Shifted}\n\n　　阿明又回来了。`;
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText1More)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 5");
+  const bmIndexesMore = await exec('window.__cwTest.findMatchIndexes()');
+  check(
+    '查找书签：再改正文（多一处命中）→ 按新正文重扫成 5 处，最后一处在新位置',
+    bmIndexesMore.length === 5 &&
+      bmIndexesMore[4] === bmText1More.lastIndexOf('阿明') &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 5
+  );
+
+  // 改到没有命中：高亮收起，但书签保留；重新打开这一章仍按最新正文扫描
+  const bmText1NoHit = bmText1More.replace(/阿明/g, '小明');
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText1NoHit)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找书签：正文改到没有命中 → 高亮收起，书签仍保留（不因没命中被删）',
+    (await exec('window.__cwTest.findBookmarkCount()')) === 2 &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      JSON.parse(await fs.readFile(bmConfigPath, 'utf8')).findBookmarks.length === 2
+  );
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  await waitFor('window.__cwTest.findHighlightCount() === 1');
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor('window.__cwTest.currentIndex() === 0');
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找书签：重新打开这一章仍按最新正文扫描（没有命中就不亮），查找框带回书签条件',
+    (await exec('window.__cwTest.findHighlightCount()')) === 0 &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      (await exec('window.__cwTest.findQueryField()')) === '阿明' &&
+      (await exec('window.__cwTest.text()')) === bmText1NoHit
+  );
+
+  // 改回原样：再按原位置高亮 4 处
+  await exec(`window.__cwTest.setText(${JSON.stringify(bmText1)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  const bmIndexesFinal = await exec('window.__cwTest.findMatchIndexes()');
+  check(
+    '查找书签：把正文改回原样并保存后，按原位置重新高亮 4 处',
+    bmIndexesFinal.length === 4 &&
+      bmIndexesFinal[0] === bmText1.indexOf('阿明') &&
+      bmIndexesFinal[3] === bmText1.lastIndexOf('阿明') &&
+      (await exec('window.__cwTest.text()')) === bmText1
+  );
+
+  // 跨书跳转 + 删除：这一段的书库 / 书目 / 章节文件应该完全不动
+  const bmTxt1BeforeOps = await fs.stat(bmTxt1Path);
+  const bmTxt2BeforeOps = await fs.stat(bmTxt2Path);
+  const bmMetaChaptersBeforeOps = JSON.stringify(
+    JSON.parse(await fs.readFile(bmMetaPath, 'utf8')).chapters
+  );
+  const bmDirBeforeOps = (await fs.readdir(bmBookPath)).sort().join('|');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('查找书签 B')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const bmBookBPath = await exec('window.__cwTest.bookPathValue()');
+  await exec('window.__cwTest.openFindPanel()');
+  await waitFor("window.__cwTest.findBookmarkRows().length === 2");
+  check(
+    '查找书签：在另一本书里打开查找面板也能看到「本机」全部书签（带书名 / 章名）',
+    (await exec('window.__cwTest.findBookmarksCountText()')).includes('本机 2 个书签 · 1 本书') &&
+      (await exec('window.__cwTest.findBookmarkRows()'))[0].text.includes('《查找书签测试书》')
+  );
+  await exec("document.querySelectorAll('#find-bookmark-list .find-bookmark-main')[0].click()");
+  await waitFor(`window.__cwTest.bookPathValue() === ${JSON.stringify(bmBookPath)}`);
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  await waitFor('window.__cwTest.findHighlightCount() === 1');
+  check(
+    '查找书签：点别的书的书签 → 打开那本书的那一章，按书签条件（区分大小写）自动高亮',
+    (await exec('window.__cwTest.view()')) === 'editor' &&
+      (await exec('window.__cwTest.findSession()')).total === 1 &&
+      (await exec('window.__cwTest.findSession()')).fromBookmark === true &&
+      (await exec('window.__cwTest.findChipText()')) === '书签 1 / 1' &&
+      (await exec('window.__cwTest.findQueryField()')) === 'rain' &&
+      (await exec('window.__cwTest.findCaseField()')) === true,
+    { bookB: bmBookBPath }
+  );
+
+  await exec('window.__cwTest.openFindPanel()');
+  await waitFor("window.__cwTest.findBookmarkRows().length === 2");
+  await exec("document.querySelectorAll('#find-bookmark-list .find-bookmark-delete')[0].click()");
+  await waitFor('window.__cwTest.findBookmarkCount() === 1');
+  await waitFor('window.__cwTest.findSession() === null');
+  const bmCfgAfterDelete1 = JSON.parse(await fs.readFile(bmConfigPath, 'utf8'));
+  check(
+    '查找书签：删除当前章的条目 → 只删 config 里这一条，高亮收起，另一条还在',
+    bmCfgAfterDelete1.findBookmarks.length === 1 &&
+      bmCfgAfterDelete1.findBookmarks[0].chapterId === bmMetaSetup.chapters[0].id &&
+      (await exec('window.__cwTest.findSession()')) === null &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      (await exec('window.__cwTest.findBookmarkRows()')).length === 1
+  );
+  await exec("document.querySelectorAll('#find-bookmark-list .find-bookmark-delete')[0].click()");
+  await waitFor('window.__cwTest.findBookmarkCount() === 0');
+  const bmCfgClean = JSON.parse(await fs.readFile(bmConfigPath, 'utf8'));
+  check(
+    '查找书签：删除最后一条 → config.findBookmarks 为空，面板回到空状态，正文 / 书目不动',
+    Array.isArray(bmCfgClean.findBookmarks) &&
+      bmCfgClean.findBookmarks.length === 0 &&
+      (await exec('window.__cwTest.findBookmarkButtonText()')) === '存成书签' &&
+      (await exec("document.getElementById('find-bookmark-list').textContent")).includes('还没有书签')
+  );
+  const bmTxt1AfterOps = await fs.stat(bmTxt1Path);
+  const bmTxt2AfterOps = await fs.stat(bmTxt2Path);
+  const bmMetaChaptersAfterOps = JSON.stringify(
+    JSON.parse(await fs.readFile(bmMetaPath, 'utf8')).chapters
+  );
+  const bmDirAfterOps = (await fs.readdir(bmBookPath)).sort().join('|');
+  check(
+    '查找书签：书签的存 / 跳 / 删全程不写书库（txt 大小+mtime、书目 chapters、书内文件列表都不变，无 _trash / 临时文件）',
+    bmTxt1AfterOps.size === bmTxt1BeforeOps.size &&
+      bmTxt1AfterOps.mtimeMs === bmTxt1BeforeOps.mtimeMs &&
+      bmTxt2AfterOps.size === bmTxt2BeforeOps.size &&
+      bmTxt2AfterOps.mtimeMs === bmTxt2BeforeOps.mtimeMs &&
+      bmMetaChaptersAfterOps === bmMetaChaptersBeforeOps &&
+      bmDirAfterOps === bmDirBeforeOps &&
+      !bmDirAfterOps.includes('_trash') &&
+      !bmDirAfterOps.includes('.tmp-'),
+    { dir: bmDirAfterOps }
+  );
+  check(
+    '查找书签：配置里只有查询条件（没有书库 / 章节内容字段），收尾书签为空数组',
+    Array.isArray(bmCfgClean.findBookmarks) &&
+      bmCfgClean.findBookmarks.length === 0 &&
+      ['books', 'chapters', 'chapterFiles', 'bookMeta', 'chapterTexts'].every(
+        (key) => !(key in bmCfgClean)
+      )
+  );
+  await exec('window.__cwTest.closeFindPanel()');
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
   // 51. 专注模式（提案 3.5）：隐藏左栏与顶栏、F11 / 按钮进出、Esc 退出、打字机模式。
   // 全部只改显示（DOM class + textarea.scrollTop）：不改正文、不写盘、不写配置、不碰书目。
   await exec('window.__cwTest.backToShelf()');

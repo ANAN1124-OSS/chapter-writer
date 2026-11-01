@@ -285,6 +285,20 @@
         <span class="find-nav-count" id="find-nav-count">—</span>
         <span class="muted small find-nav-hint">Enter / F3 下一处 · Shift+Enter / Shift+F3 上一处；关掉面板后也能按</span>
       </div>
+      <!-- 查找书签（v0.8-11b，提案 N11b）：只把查询词与大小写选项存进 config.json，
+           打开这一章自动高亮；不存正文、不写书库 / 书目 / 章节文件 -->
+      <div class="find-bookmarks">
+        <div class="find-bookmarks-head">
+          <span class="find-nav-label">书签</span>
+          <span class="find-bookmarks-count muted small" id="find-bookmarks-count">本机还没有书签</span>
+          <button id="btn-find-bookmark" class="btn ghost tiny" type="button" title="把当前章的查找词与大小写选项存成书签（只写 config.json，不碰正文）">存成书签</button>
+        </div>
+        <div class="find-bookmark-list" id="find-bookmark-list"></div>
+        <p class="muted small find-bookmarks-hint">
+          书签按「书 + 章」记查询词与大小写，存在 <code>config.json</code>：打开这一章会自动高亮，
+          正文改过就按新正文重新扫描定位。<strong>不存正文</strong>，也不写书库 / 书目 / 章节文件。
+        </p>
+      </div>
       <div class="find-summary muted small" id="find-summary"></div>
       <div class="find-results" id="find-results"></div>
       <div class="find-backup hidden" id="find-backup-row">
@@ -926,6 +940,7 @@
   <script src="../core/template.js"></script>
   <script src="../core/s2t.js"></script>
   <script src="../core/caret-color.js"></script>
+  <script src="../core/bookmarks.js"></script>
   <script src="editor-logic.js"></script>
   <script src="find-logic.js"></script>
   <script src="focus-logic.js"></script>

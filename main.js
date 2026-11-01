@@ -776,6 +776,30 @@ function registerIpc() {
     return true;
   });
 
+  // 查找书签（v0.8-11b，提案 N11b）：按「书 + 章」把查询词与大小写选项存在 userData/config.json。
+  // 主进程做原子增 / 删（不整份覆盖数组），只写配置，绝不碰书库 / 书目 / 章节文件；
+  // 渲染层仍然没有 fs 权限。
+  handle('find:bookmark-list', async () => {
+    await getConfig();
+    return configStore.listFindBookmarks();
+  });
+
+  handle('find:bookmark-save', async (entry) => {
+    await getConfig();
+    const data = await configStore.upsertFindBookmark(entry || {});
+    config = await configStore.get();
+    if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
+    return data;
+  });
+
+  handle('find:bookmark-remove', async (bookId, chapterId) => {
+    await getConfig();
+    const data = await configStore.removeFindBookmark(bookId, chapterId);
+    config = await configStore.get();
+    if (booksRootOverride) config = { ...config, booksRoot: booksRootOverride };
+    return data;
+  });
+
   handle('books:list', async () => {
     const cfg = await getConfig();
     return storage.listBooks(cfg.booksRoot);
@@ -2223,6 +2247,29 @@ async function runAutomation() {
              window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
              window.__cwTest.findRun();
              window.__cwTest.closeFindPanel();
+           })()`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'find-bookmark') {
+        // 开发截图用：查找书签（v0.8-11b，提案 N11b）——当前章查一次并存成书签，
+        // 面板里的「书签」区列出这一条，正文命中同时高亮（只写临时 userData 的 config，不碰书库）
+        await automationWin.webContents.executeJavaScript(
+          `(async () => {
+             const text = window.__cwTest.text();
+             const counts = new Map();
+             for (const ch of text) {
+               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
+             }
+             let best = '';
+             let bestCount = 0;
+             for (const [ch, n] of counts) {
+               if (n > bestCount) { best = ch; bestCount = n; }
+             }
+             window.__cwTest.openFindPanel();
+             window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
+             await window.__cwTest.findRun();
+             await window.__cwTest.findBookmarkSave();
            })()`,
           true
         );

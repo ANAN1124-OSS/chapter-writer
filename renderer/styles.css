@@ -1790,6 +1790,71 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   font-variant-numeric: tabular-nums;
 }
 .find-nav-hint { font-size: 11.5px; }
+/* 查找书签（v0.8-11b，提案 N11b）：只列查询条件，不存正文；当前这一章的条目单独标出 */
+.find-bookmarks {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+.find-bookmarks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.find-bookmarks-head .btn { flex: 0 0 auto; margin-left: auto; }
+.find-bookmarks-count { font-size: 11.5px; }
+.find-bookmark-list {
+  max-height: 126px;
+  margin-top: 6px;
+  overflow: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.find-bookmark {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.find-bookmark:last-child { border-bottom: none; }
+.find-bookmark.current {
+  background: var(--paper-deep);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.find-bookmark-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 2px;
+  text-align: left;
+  background: none;
+  border: none;
+  font-family: var(--ui-font);
+  color: var(--ink);
+  cursor: pointer;
+}
+.find-bookmark-main:hover .find-bookmark-place { color: var(--accent); }
+.find-bookmark-place {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.find-bookmark-query {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.find-bookmark-delete { flex: 0 0 auto; }
+.find-bookmark-empty { padding: 10px 12px; font-size: 12.5px; color: var(--ink-soft); }
+.find-bookmarks-hint { margin: 4px 0 0; font-size: 11.5px; }
 .find-summary {
   min-height: 18px;
   margin-top: 12px;
