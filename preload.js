@@ -119,7 +119,10 @@ contextBridge.exposeInMainWorld('api', {
   saveFindBookmark: (entry) => invoke('find:bookmark-save', entry),
   removeFindBookmark: (bookId, chapterId) => invoke('find:bookmark-remove', bookId, chapterId),
   pickFont: () => invoke('font:pick'),
-  readFont: (fontPath) => invoke('font:read', fontPath),
+  // 自定义字体（代码审计 F1）：渲染层不再传路径——主进程只读「刚在对话框里选的 / 当前书 / 全局配置」的字体
+  readFont: () => invoke('font:read'),
+  // 仅自检：模拟「在系统字体对话框里选中某个文件」，生产环境主进程不会注册这个频道
+  testPickFont: (fontPath) => invoke('font:test-pick', fontPath),
   pickFolder: () => invoke('shell:pick-folder'),
   openBookFolder: (bookPath) => invoke('shell:open-book-folder', bookPath),
   // 诊断日志（提案 7.4）：只读目录清单 + 让主进程打开日志文件夹；渲染层仍然没有 fs 权限

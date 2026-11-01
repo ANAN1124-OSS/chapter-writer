@@ -918,23 +918,71 @@ module.exports = async function runScenario(ctx) {
   );
 
   // 26. 口袋写作同款显示项：字体文件（.ttf）、夜间、纸张纹理、左右边距
+  // 代码审计 F1：font:read 不再接受渲染层传来的路径——只读「刚在对话框里选的 / 当前书 / 全局配置」里的字体。
   const testFontPath = 'C:\\Windows\\Fonts\\consola.ttf';
-  const fontRead = await exec(`window.api.readFont(${JSON.stringify(testFontPath)})`);
+  const otherFontPath = 'C:\\Windows\\Fonts\\arial.ttf';
+  const noFontPath = await exec('window.api.readFont()');
   check(
-    '字体文件读取成功（主进程读成 base64 给渲染层）',
-    Boolean(fontRead && fontRead.ok && fontRead.data.size > 1000 && fontRead.data.base64.length > 1000),
-    fontRead && { ok: fontRead.ok, size: fontRead.data && fontRead.data.size }
+    '字体读取：还没有任何可用路径时读不到（主进程不再按渲染层给的路径读）',
+    Boolean(noFontPath && noFontPath.ok === false && noFontPath.code === 'BAD_FONT'),
+    noFontPath && { ok: noFontPath.ok, code: noFontPath.code }
   );
-  const badFontRead = await exec('window.api.readFont("C:\\\\Windows\\\\win.ini")');
+  const arbitraryNoPath = await exec(`window.api.readFont(${JSON.stringify(testFontPath)})`);
   check(
-    '非字体文件被拒绝',
+    '字体读取：直接传一个真实字体路径也读不到（渲染层说了不算）',
+    Boolean(arbitraryNoPath && arbitraryNoPath.ok === false && arbitraryNoPath.code === 'BAD_FONT'),
+    arbitraryNoPath && { ok: arbitraryNoPath.ok, code: arbitraryNoPath.code }
+  );
+  const pickSimulated = await exec(`window.api.testPickFont(${JSON.stringify(testFontPath)})`);
+  check(
+    '字体读取：模拟「在系统对话框里选中字体文件」（自检专用频道，生产不注册）',
+    Boolean(pickSimulated && pickSimulated.ok && pickSimulated.data.name === 'consola.ttf'),
+    pickSimulated && { ok: pickSimulated.ok, name: pickSimulated.data && pickSimulated.data.name }
+  );
+  const fontRead = await exec(`window.api.readFont(${JSON.stringify(otherFontPath)})`);
+  check(
+    '字体读取：选中后能读成 base64，且渲染层传的路径被忽略（读的是刚选的那个）',
+    Boolean(
+      fontRead &&
+        fontRead.ok &&
+        fontRead.data.name === 'consola.ttf' &&
+        fontRead.data.size > 1000 &&
+        fontRead.data.base64.length > 1000 &&
+        fontRead.data.source === 'picked'
+    ),
+    fontRead && {
+      ok: fontRead.ok,
+      name: fontRead.data && fontRead.data.name,
+      source: fontRead.data && fontRead.data.source
+    }
+  );
+  const pickUsedOnce = await exec('window.api.readFont()');
+  check(
+    '字体读取：这次选中只用一次——用完回到「当前书 / 全局配置」，不会拿它顶替别的书',
+    Boolean(pickUsedOnce && pickUsedOnce.ok === false && pickUsedOnce.code === 'BAD_FONT'),
+    pickUsedOnce && { ok: pickUsedOnce.ok, code: pickUsedOnce.code }
+  );
+  // 非字体文件：写进这本书的显示设置，主进程解析出来之后仍按扩展名拒绝
+  const fontBookId = await exec('window.__cwTest.bookId()');
+  await exec(
+    `window.api.setBookDisplay(${JSON.stringify(fontBookId)}, { editorFont: 'custom', editorCustomFontPath: 'C:\\\\Windows\\\\win.ini' })`
+  );
+  const badFontRead = await exec('window.api.readFont()');
+  check(
+    '非字体文件被拒绝（配置里写了 .ini 也读不到）',
     Boolean(badFontRead && badFontRead.ok === false && badFontRead.code === 'BAD_FONT'),
     badFontRead && { ok: badFontRead.ok, code: badFontRead.code }
   );
+  await exec(`window.api.testPickFont(${JSON.stringify(testFontPath)})`);
   const customLoaded = await exec(`window.__cwTest.loadCustomFont(${JSON.stringify(testFontPath)})`);
   await sleep(300);
   const customState = await exec('window.__cwTest.customFontLoaded()');
   check('自定义字体能加载进页面（FontFace）', customLoaded === true && customState.ok === true, customState);
+  check(
+    '字体解码走浏览器原生 data: URL（fetch → arrayBuffer，失败才回退 atob）',
+    (await exec('window.__cwTest.fontDecodeMode()')) === 'fetch',
+    await exec('window.__cwTest.fontDecodeMode()')
+  );
   const customApplied = await exec(
     `window.__cwTest.setCustomFont(${JSON.stringify(testFontPath)}, 'consola.ttf')`
   );
@@ -943,6 +991,21 @@ module.exports = async function runScenario(ctx) {
     '页面字体已切到自定义字体',
     (await exec('window.__cwTest.displayStyle()')).fontFamily.includes('cw-custom-font'),
     (await exec('window.__cwTest.displayStyle()')).fontFamily
+  );
+  const bookFontRead = await exec(`window.api.readFont(${JSON.stringify(otherFontPath)})`);
+  check(
+    '字体读取：保存后按「这本书的显示设置」解析，传任意路径仍只拿得到这本书的字体',
+    Boolean(
+      bookFontRead &&
+        bookFontRead.ok &&
+        bookFontRead.data.name === 'consola.ttf' &&
+        bookFontRead.data.source === 'book'
+    ),
+    bookFontRead && {
+      ok: bookFontRead.ok,
+      name: bookFontRead.data && bookFontRead.data.name,
+      source: bookFontRead.data && bookFontRead.data.source
+    }
   );
 
   const themeBookId = await exec('window.__cwTest.bookId()');

@@ -39,6 +39,9 @@
   // 保存热路径（代码审计 F2）：保存提示文案 + 后台全书校验的结论，save-logic.js 里、
   // Node 单测覆盖；这里只负责「先出提示、后台再校验」的时序。
   const saveLogic = window.CWSaveLogic;
+  // 自定义字体的 base64 解码（代码审计 F11）：font-logic.js 里、Node 单测覆盖；
+  // 优先浏览器原生 data: URL 解码，失败才回退 atob 循环。
+  const fontLogic = window.CWFontLogic;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -464,18 +467,20 @@
   // 显示排版（字体/字号/行间距/字间距/边距/宽度/背景）只改 CSS 变量，绝不改正文
   const CUSTOM_FONT_FAMILY = '"cw-custom-font"';
   const loadedCustomFont = { path: '', name: '', ok: false };
+  let lastFontDecodeMode = 'none'; // 自检用：最近一次字体解码走的是 fetch（原生）还是 atob（回退）
 
   // 自定义字体：主进程读文件 → 这里用 FontFace 注册（渲染层仍然没有文件系统权限）
+  // 代码审计 F1：不再把路径传给主进程——它只读「刚选的 / 当前书 / 全局配置」里的字体文件。
+  // 代码审计 F11：解码走 renderer/font-logic.js（优先 fetch data: URL → arrayBuffer，失败回退 atob）。
   async function loadCustomFont(fontPath, { silent = false } = {}) {
     const wanted = String(fontPath || '');
     if (!wanted) return false;
     if (loadedCustomFont.path === wanted && loadedCustomFont.ok) return true;
     try {
-      const res = await call(api.readFont, wanted);
-      const binary = atob(res.base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-      const face = new FontFace('cw-custom-font', bytes.buffer);
+      const res = await call(api.readFont);
+      const decoded = await fontLogic.decodeFontBase64(res.base64);
+      lastFontDecodeMode = decoded.mode;
+      const face = new FontFace('cw-custom-font', decoded.bytes.buffer);
       await face.load();
       document.fonts.add(face);
       loadedCustomFont.path = wanted;
@@ -10557,6 +10562,8 @@
       },
       loadCustomFont: (fontPath) => loadCustomFont(fontPath, { silent: true }),
       customFontLoaded: () => ({ ...loadedCustomFont }),
+      // 最近一次字体解码走的是原生 fetch（data: URL）还是 atob 回退——F11 的自检断言用
+      fontDecodeMode: () => lastFontDecodeMode,
       // 测试用：等价于「设置里选好字体文件 + 保存设置」的落库路径
       async setCustomFont(fontPath, name) {
         const ok = await loadCustomFont(fontPath, { silent: true });

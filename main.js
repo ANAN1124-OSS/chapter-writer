@@ -51,6 +51,7 @@ const logsLib = require('./core/logs');
 const searchIndexLib = require('./core/search-index');
 const updateLib = require('./core/update');
 const openBooksLib = require('./core/open-books');
+const fontPolicy = require('./core/font-policy');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -1076,33 +1077,97 @@ function registerIpc() {
   });
 
   // 自定义正文字体：只允许字体文件，读成 base64 交给渲染层的 FontFace 加载（渲染层仍无 fs）
-  const FONT_EXTS = new Set(['.ttf', '.otf', '.ttc']);
-  const FONT_MAX_BYTES = 24 * 1024 * 1024;
+  // 代码审计 F1：font:pick 选中的路径只记在内存里（按窗口分开），font:read 只认「这次选的 /
+  // 当前书的 bookDisplay / 全局配置」这三种主进程自己知道的路径，渲染层传进来的路径一律不看。
+  const pickedFontPaths = new Map(); // windowId -> 本次在对话框里选中的字体路径
+
+  function rememberPickedFont(windowId, fontPath) {
+    const id = String(windowId == null ? '' : windowId);
+    if (!id) return;
+    const picked = typeof fontPath === 'string' ? fontPath.trim() : '';
+    if (!picked) {
+      pickedFontPaths.delete(id);
+      return;
+    }
+    pickedFontPaths.set(id, picked);
+  }
+
+  // 读一次就清掉：选字体后的那一趟「预览」读到文件即用完；之后按书目 / 全局配置解析，
+  // 免得同一个窗口里换书时把上一本书刚选的字体带过去。
+  function takePickedFont(windowId) {
+    const id = String(windowId == null ? '' : windowId);
+    if (!id) return '';
+    const picked = pickedFontPaths.get(id) || '';
+    pickedFontPaths.delete(id);
+    return picked;
+  }
 
   handle('font:pick', async () => {
+    const session = flowSession();
     const { canceled, filePaths } = await showOpenDialog({
       title: '选择正文字体文件',
       buttonLabel: '使用这个字体',
       properties: ['openFile'],
       filters: [{ name: '字体文件', extensions: ['ttf', 'otf', 'ttc'] }]
     });
-    if (canceled || !filePaths || !filePaths.length) return { canceled: true };
-    return { canceled: false, path: filePaths[0], name: path.basename(filePaths[0]) };
+    if (canceled || !filePaths || !filePaths.length) {
+      if (session) rememberPickedFont(session.id, '');
+      return { canceled: true };
+    }
+    const picked = filePaths[0];
+    if (session) rememberPickedFont(session.id, picked);
+    return { canceled: false, path: picked, name: path.basename(picked) };
   });
 
-  handle('font:read', async (fontPath) => {
-    const resolved = path.resolve(String(fontPath == null ? '' : fontPath));
-    if (!FONT_EXTS.has(path.extname(resolved).toLowerCase())) {
+  handle('font:read', async () => {
+    const session = flowSession();
+    const picked = takePickedFont(session && session.id);
+    const cfg = await getConfig();
+    let bookEntry = null;
+    const openBookPath = session ? storage.openBookRegistry.getBook(session.id) : null;
+    if (openBookPath) {
+      try {
+        const meta = await storage.readBookMeta(openBookPath);
+        const bookId = meta && meta.id ? String(meta.id) : '';
+        if (bookId) bookEntry = (cfg.bookDisplay && cfg.bookDisplay[bookId]) || null;
+      } catch {
+        // 书目读不到就按全局设置来：字体加载失败最多退回内置字体，不影响打开书 / 写作
+        bookEntry = null;
+      }
+    }
+    const source = fontPolicy.resolveFontSource({ picked, book: bookEntry, global: cfg });
+    if (!source.path) {
+      throw new storage.StorageError('BAD_FONT', '还没有可用的自定义字体，请先在设置里选择字体文件');
+    }
+    const resolved = path.resolve(source.path);
+    if (!fontPolicy.isFontFile(resolved)) {
       throw new storage.StorageError('BAD_FONT', '只支持 .ttf / .otf / .ttc 字体文件');
     }
     const stat = await fs.stat(resolved);
     if (!stat.isFile()) throw new storage.StorageError('BAD_FONT', '选中的不是一个字体文件');
-    if (stat.size > FONT_MAX_BYTES) {
+    if (!fontPolicy.isFontSizeAllowed(stat.size)) {
       throw new storage.StorageError('FONT_TOO_BIG', '字体文件太大（超过 24MB），请换一个小一点的');
     }
     const buffer = await fs.readFile(resolved);
-    return { name: path.basename(resolved), size: stat.size, base64: buffer.toString('base64') };
+    return {
+      name: path.basename(resolved),
+      size: stat.size,
+      base64: buffer.toString('base64'),
+      source: source.source
+    };
   });
+
+  if (automation) {
+    // 仅自检：模拟「在系统字体对话框里选中某个文件」（E2E 没法真的点原生对话框）。
+    // 和 update:test-mock 一样只在 automation 下注册，生产环境这个频道不存在。
+    handle('font:test-pick', async (fontPath) => {
+      const session = flowSession();
+      const picked = typeof fontPath === 'string' ? fontPath.trim() : '';
+      if (!session || !picked) return false;
+      rememberPickedFont(session.id, picked);
+      return { path: path.resolve(picked), name: path.basename(picked) };
+    });
+  }
 
   handleBook('chapter:create', async (bookPath, insertIndex, name, volumeId) =>
     storage.createChapter(bookPath, insertIndex, name, volumeId), { mutation: 'write' }
