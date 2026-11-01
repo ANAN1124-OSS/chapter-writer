@@ -1055,7 +1055,9 @@ async function cleanupSnapshots(bookPath, { keepDays = snapshotLib.DEFAULT_KEEP_
 // 保存前留一份当天快照。返回 { taken, reason, dir, file, bytes, cleanup }：
 // - TAKEN：这一次真的复制了；ALREADY_TODAY：今天已经有这一章的快照，不重复复制；
 // - MISSING：章节文件还不存在（不建空快照）；DISABLED 由调用方（main.js）处理。
-// 无论是否复制，都会顺手清理过期快照目录（只有开启该功能时才会被调用）。
+// 复制了（TAKEN）或当天已有一份（ALREADY_TODAY）时，都会顺手清理过期快照目录；
+// 章节文件还不存在（MISSING）时直接返回、不清理（此时没有新快照要维护）。
+// 只有开启该功能（config.snapshotEnabled）时才会被调用。
 async function takeDailySnapshot(bookPath, file, { keepDays, now = new Date() } = {}) {
   const raw = String(file == null ? '' : file).trim();
   if (!raw || path.basename(raw) !== raw || !/\.txt$/i.test(raw)) {

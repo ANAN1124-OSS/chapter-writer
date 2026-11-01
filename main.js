@@ -1,4 +1,4 @@
-// 章节写作器 v0.1 —— Electron 主进程
+// 章节写作器 —— Electron 主进程（版本号见 package.json，界面版本号由 app.getVersion() 回报）
 // 职责：窗口与生命周期、关闭拦截、所有文件读写（渲染层零文件系统权限）。
 const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
@@ -245,7 +245,8 @@ async function saveRecentWindowBounds(session) {
 
 
 // ---------- 崩溃 / 错误日志（提案 7.4） ----------
-// 只记元数据（时间 / 类型 / 错误码 / IPC 频道 / 路径 / 栈 / 版本），绝不传正文；
+// 只记元数据（时间 / 类型 / 级别 / 错误码 / IPC 频道 / message / 栈 / pid / 版本），绝不传正文；
+// 格式里还有 `path` 字段，但当前没有任何调用方填它（v0.9 C-4 审计结论），别把「日志记了路径」当既有行为。
 // 日志写不进去只吞掉，绝不能影响正文保存、界面和退出（实现在 core/logs.js，单测覆盖）。
 let logStore = null;
 
@@ -643,7 +644,7 @@ function setupCloseIpc() {
     session.e2eCloseReady = okToClose;
     e2eLastCloseReady = okToClose;
     if (isE2E) {
-      // 默认只记回执、不真的关窗（既有 646 项依赖窗口继续存在）；
+      // 默认只记回执、不真的关窗（既有 E2E 项都依赖窗口继续存在；不写死项数，加组就会过时）；
       // 多窗口用例显式打开「真实关窗」模式再关。
       e2eCloseReadyByWindow.set(String(session.id), okToClose);
       if (!e2eRealClose || !okToClose) return;
@@ -780,7 +781,7 @@ function registerIpc() {
     };
   });
   // 写作时长（v0.8-2）：渲染层在计时暂停 / 保存 / 每 30 秒上报一次整秒。
-  // 默认关：关着时直接忽略请求、连 stats.json 都不碰，旧用户行为完全不变。
+  // 默认关：关着时只读 stats.json 算一份摘要回给界面（不记时长、不写盘），旧用户行为完全不变。
   // 只记秒数，不接收正文、按键或任何内容；写盘仍走 core/atomic（和字数共用串行队列）。
   handle('stats:duration', async (request) => {
     const cfg = await getConfig();

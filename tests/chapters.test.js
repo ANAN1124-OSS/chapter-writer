@@ -192,3 +192,25 @@ test('换行归一：读入统一 \\n，落盘统一 \\r\\n', () => {
   assert.equal(ch.toDiskNewlines('a\nb'), 'a\r\nb');
   assert.equal(ch.toDiskNewlines('a\r\nb'), 'a\r\nb');
 });
+
+test('渲染层章节状态 / 备注直接用 core 的实现（不再有第二套「看起来一致」的清洗）', () => {
+  const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+  const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+  // v0.9 B-5：以前 renderer.js 里有一份本地实现，注释写着「与 core/chapters.js 保持一致」，
+  // 实际少了「换行收成空格」这一步（手改书目写进带换行的备注时，界面与导出 / 复制口径不同）。
+  // 现在渲染层只剩薄封装、常量也从 core 拿，这里把口径钉住，防止再抄一份。
+  assert.match(rendererSrc, /CHAPTER_STATUS_LABELS\s*=\s*chaptersLib\.CHAPTER_STATUS_LABELS/);
+  assert.match(
+    rendererSrc,
+    /function chapterStatus\(chapter\)\s*{\s*return chaptersLib\.chapterStatus\(chapter\);/
+  );
+  assert.match(rendererSrc, /function chapterNote\(chapter\)\s*{\s*return chaptersLib\.chapterNote\(chapter\);/);
+  assert.ok(!/const CHAPTER_STATUSES\s*=\s*\[/.test(rendererSrc), 'renderer.js 不许再抄一份状态表');
+  assert.ok(!/note\.length\s*>\s*200/.test(rendererSrc), 'renderer.js 不许再抄一份 200 字备注截断');
+  // UMD 加载顺序：core/chapters.js 必须排在 renderer.js 之前（否则 chaptersLib 是 undefined）
+  assert.ok(
+    indexSrc.indexOf('../core/chapters.js') >= 0 &&
+      indexSrc.indexOf('../core/chapters.js') < indexSrc.indexOf('renderer.js'),
+    'index.html 必须先加载 core/chapters.js，再加载 renderer.js'
+  );
+});

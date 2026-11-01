@@ -1,4 +1,4 @@
-/* 章节写作器 v0.1 —— 渲染层
+/* 章节写作器 —— 渲染层（版本号见 package.json，界面底部显示主进程回报的值）
  * 规则：这里的任何东西都不能直接访问文件系统；所有读写都通过 window.api（白名单 IPC）。
  * 保存策略：完全手动。只有按 Ctrl+S / 点保存才写正文；切章、关窗、导出前只提醒，不偷偷写。
  */
@@ -120,20 +120,18 @@
     return { num: '', name: title };
   }
 
-  // 章节状态 / 备注（与 core/chapters.js 的清洗规则保持一致）：只存在 书目.json 里，不动正文。
-  const CHAPTER_STATUSES = ['draft', 'revising', 'done'];
-  const CHAPTER_STATUS_LABELS = { draft: '草稿', revising: '待修', done: '完稿' };
+  // 章节状态 / 备注：清洗规则只有 core/chapters.js 一份，这里只做薄封装（常量也从 core 拿）。
+  // v0.9 B-5：以前这里抄了一份近似实现、注释却写着「与 core 保持一致」，实际少了「换行收成空格」
+  // 这一步——直接手改 书目.json 写进带换行的备注时，界面显示会和导出 / 复制口径不同。
+  // 只存在 书目.json 里，不动正文。
+  const CHAPTER_STATUS_LABELS = chaptersLib.CHAPTER_STATUS_LABELS;
 
   function chapterStatus(chapter) {
-    const raw = chapter && typeof chapter.status === 'string' ? chapter.status.trim().toLowerCase() : '';
-    return CHAPTER_STATUSES.includes(raw) ? raw : 'draft';
+    return chaptersLib.chapterStatus(chapter);
   }
 
   function chapterNote(chapter) {
-    const raw = chapter && chapter.note;
-    if (typeof raw !== 'string') return '';
-    const note = raw.trim();
-    return note.length > 200 ? note.slice(0, 200) : note;
+    return chaptersLib.chapterNote(chapter);
   }
 
   class ApiError extends Error {

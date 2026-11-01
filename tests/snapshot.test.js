@@ -98,9 +98,15 @@ test('每日快照：保存前复制上一版字节，同章当天只留一份',
 
   // 同一章同一天再保存：不重复复制、不覆盖当天第一份
   await storage.saveChapterText(bookPath, file, '第二版\n');
+  // v0.9 B-5：注释说「复制了或当天已有一份都会清理过期快照」，用断言钉住后者
+  const expiredDir = path.join(bookPath, '_trash', '快照-20260101');
+  await fs.mkdir(expiredDir, { recursive: true });
+  await fs.writeFile(path.join(expiredDir, 'old.txt'), '很旧的快照\n', 'utf8');
   const second = await storage.takeDailySnapshot(bookPath, file, { keepDays: 7, now });
   assert.equal(second.taken, false);
   assert.equal(second.reason, 'ALREADY_TODAY');
+  assert.deepEqual(second.cleanup.removed, ['快照-20260101'], '当天已有一份时也要清理过期快照');
+  assert.equal(await storage.exists(expiredDir), false);
   assert.deepEqual(await fs.readFile(snapshotPath), sourceBefore, '当天第一份快照不能被后来的保存覆盖');
   assert.equal((await fs.readdir(path.join(bookPath, '_trash', '快照-20261031'))).length, 1);
 
