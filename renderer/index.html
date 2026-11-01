@@ -102,7 +102,20 @@
                 <div class="dropdown-sep"></div>
                 <button type="button" data-action="toggle-invisibles" id="format-invisibles">显示不可见字符（␣ / 行尾空白）</button>
                 <button type="button" data-action="toggle-long-para" id="format-long-para">超长段落提示（>500 字左侧黄线）</button>
-                <button type="button" data-action="toggle-caret-para" id="format-caret-para" title="光标所在那一段画一层淡色底 + 左侧细线，颜色跟着背景主题走。只显示层，不改正文、不写盘、不写配置。">当前段落高亮（光标所在段）</button>
+                <button type="button" data-action="toggle-caret-para" id="format-caret-para" title="光标所在那一段画一层淡色底 + 左侧细线。开关与颜色都按书记忆（存在 config.json 的 bookDisplay 里，不碰正文 / 书目 / 章节文件）。">当前段落高亮（光标所在段）</button>
+                <div class="caret-color-row" id="format-caret-colors" title="高亮颜色按书记忆；默认跟随当前背景主题">
+                  <span class="caret-color-label">高亮颜色</span>
+                  <div class="caret-swatches">
+                    <button type="button" class="caret-swatch caret-swatch-theme" data-caret-color="" title="跟随背景主题（默认）" aria-label="跟随背景主题"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#c8873c" title="琥珀（暖色，接近默认木质色调）" aria-label="琥珀"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#3f7fbf" title="湖蓝（冷色，夜间也清楚）" aria-label="湖蓝"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#4f8a5b" title="豆绿（护眼绿）" aria-label="豆绿"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#b45f6d" title="胭脂（偏红）" aria-label="胭脂"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#7a63b0" title="藤紫（低饱和紫）" aria-label="藤紫"></button>
+                    <button type="button" class="caret-swatch" data-caret-color="#7d8794" title="石墨（中性灰，最不抢眼）" aria-label="石墨"></button>
+                  </div>
+                  <input id="format-caret-color" class="caret-color-input" type="color" value="#c8873c" title="取色器：自定义高亮颜色（按书记忆）" aria-label="自定义高亮颜色" />
+                </div>
                 <div class="dropdown-sep"></div>
                 <button type="button" data-action="display-settings">正文显示设置…</button>
               </div>
@@ -706,6 +719,27 @@
           <option value="grid">网格纸 · 纹理</option>
         </select>
       </label>
+      <div class="field-group">当前段落高亮</div>
+      <div class="field" id="settings-caret-field">
+        <label class="check-row">
+          <input id="settings-caret-paragraph" type="checkbox" />
+          <span>开启当前段落高亮（光标所在段淡色底 + 左侧细线；默认关。按书设置时只影响这本书，没单独设置过的书用全局默认）</span>
+        </label>
+        <div class="caret-color-row settings-caret-colors" id="settings-caret-colors">
+          <span class="caret-color-label">高亮颜色</span>
+          <div class="caret-swatches">
+            <button type="button" class="caret-swatch caret-swatch-theme" data-settings-caret-color="" title="跟随背景主题（默认）" aria-label="跟随背景主题"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#c8873c" title="琥珀（暖色，接近默认木质色调）" aria-label="琥珀"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#3f7fbf" title="湖蓝（冷色，夜间也清楚）" aria-label="湖蓝"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#4f8a5b" title="豆绿（护眼绿）" aria-label="豆绿"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#b45f6d" title="胭脂（偏红）" aria-label="胭脂"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#7a63b0" title="藤紫（低饱和紫）" aria-label="藤紫"></button>
+            <button type="button" class="caret-swatch" data-settings-caret-color="#7d8794" title="石墨（中性灰，最不抢眼）" aria-label="石墨"></button>
+          </div>
+          <input id="settings-caret-color" class="caret-color-input" type="color" value="#c8873c" title="取色器：自定义高亮颜色" aria-label="自定义高亮颜色" />
+        </div>
+        <div id="settings-caret-hint" class="muted small"></div>
+      </div>
       <div class="field-group" id="settings-stats-group">写作统计</div>
       <label class="field" id="settings-daily-goal-field">
         <span>每日写作目标（0 = 不设目标；只统计按下保存时写下的字数，不包含还没保存的内容）</span>
@@ -891,6 +925,7 @@
   <script src="../core/bookinfo.js"></script>
   <script src="../core/template.js"></script>
   <script src="../core/s2t.js"></script>
+  <script src="../core/caret-color.js"></script>
   <script src="editor-logic.js"></script>
   <script src="find-logic.js"></script>
   <script src="focus-logic.js"></script>

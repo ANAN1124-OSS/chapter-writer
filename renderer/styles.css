@@ -700,6 +700,71 @@ body.resizing .editor {
 }
 .dropdown-menu button:hover { background: var(--paper-deep); }
 
+/* 当前段落高亮颜色（v0.8-10b，提案 N10b）：色板 + 取色器。
+   「排版 ▾」菜单和「设置 → 当前段落高亮」共用同一套样式；色块只是显示层，点了才写 config。 */
+.caret-color-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 4px 10px 6px;
+}
+.caret-color-row .caret-color-label {
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.caret-swatches { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.caret-swatch,
+.dropdown-menu .caret-swatch {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--swatch, var(--paper-deep));
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.caret-swatch:hover,
+.dropdown-menu .caret-swatch:hover { transform: scale(1.08); }
+.caret-swatch[data-active="1"],
+.dropdown-menu .caret-swatch[data-active="1"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+/* 「跟随主题」色块：用 6 套纸色的拼色圆点表示「跟着主题走」 */
+.caret-swatch-theme {
+  background: conic-gradient(
+    #f7f4ee 0 16.6%,
+    #f7efdc 16.6% 33.3%,
+    #e8efe2 33.3% 50%,
+    #f0e6d2 50% 66.6%,
+    #f4f7f6 66.6% 83.3%,
+    #1f2023 83.3% 100%
+  );
+}
+.caret-color-input {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-soft);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.caret-color-input::-webkit-color-swatch-wrapper { padding: 2px; }
+.caret-color-input::-webkit-color-swatch { border: none; border-radius: 4px; }
+.settings-caret-colors {
+  margin-top: 8px;
+  padding: 2px 0 0;
+}
+#settings-caret-hint { margin-top: 6px; }
+
 .editor {
   flex: 1;
   min-height: 0;

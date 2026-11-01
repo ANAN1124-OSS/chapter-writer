@@ -1976,6 +1976,7 @@ async function runAutomation() {
         screenshotDialog === 'settings-sensitive' ||
         screenshotDialog === 'settings-proofread' ||
         screenshotDialog === 'settings-export' ||
+        screenshotDialog === 'settings-caret' ||
         screenshotDialog === 'settings-logs' ||
         screenshotDialog === 'settings-update'
       ) {
@@ -2031,6 +2032,15 @@ async function runAutomation() {
           await sleep(600);
           await automationWin.webContents.executeJavaScript(
             `const el = document.getElementById('settings-export-group'); if (el) el.scrollIntoView({ block: 'start' });`,
+            true
+          );
+        } else if (screenshotDialog === 'settings-caret') {
+          // 开发截图用：滚到「当前段落高亮」分组，勾上开关并选一个色板色（只改界面、不保存）
+          await sleep(600);
+          await automationWin.webContents.executeJavaScript(
+            `window.__cwTest.setCheck('settings-caret-paragraph', true);` +
+              `window.__cwTest.setSettingsCaretColor('#3f7fbf');` +
+              `const el = document.getElementById('settings-caret-field'); if (el) el.scrollIntoView({ block: 'start' });`,
             true
           );
         } else if (screenshotDialog === 'settings-logs') {
@@ -2294,6 +2304,37 @@ async function runAutomation() {
           true
         );
         await sleep(500);
+      } else if (screenshotDialog === 'marks-caret-color') {
+        // 开发截图用：当前段落高亮按书开 + 自定义颜色（蓝色）+ 打开「排版 ▾」露出色板。
+        // 只写临时 userData 的 config.json（截图环境），不碰书库 / 正文。
+        await automationWin.webContents.executeJavaScript(
+          "window.__cwTest.setCaretParagraphPersist(true); window.__cwTest.setCaretColor('#3f7fbf');",
+          true
+        );
+        await sleep(600);
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+             const text = window.__cwTest.text();
+             const lines = text.split('\\n');
+             let offset = 0;
+             let line = 0;
+             let target = 0;
+             for (let i = 0; i < lines.length; i += 1) {
+               if (lines[i].trim().length > 20) {
+                 line = i;
+                 target = offset + Math.min(lines[i].length - 1, 20);
+                 break;
+               }
+               offset += lines[i].length + 1;
+             }
+             window.__cwTest.setCaret(target);
+             const height = parseFloat(getComputedStyle(document.getElementById('editor')).lineHeight) || 32;
+             window.__cwTest.setEditorScroll(Math.max(0, (line - 2) * height));
+             window.__cwTest.openFormatMenu();
+           })()`,
+          true
+        );
+        await sleep(600);
       } else if (screenshotDialog === 'focus') {
         // 开发截图用：专注模式 + 打字机模式（隐藏左栏 / 顶栏，只改显示，不写盘、不写配置）
         await automationWin.webContents.executeJavaScript(

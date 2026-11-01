@@ -7346,8 +7346,9 @@ module.exports = async function runScenario(ctx) {
   const caretDirBefore = (await fs.readdir(caretBookPath)).sort().join('|');
 
   check(
-    '当前段落高亮：默认关，标记层不显示（和不可见字符一样只记在本次会话）',
+    '当前段落高亮：这本书没设置过 → 默认关（全局默认也是关），标记层不显示',
     (await exec('window.__cwTest.marksFlags()')).caretParagraph === false &&
+      (await exec('window.__cwTest.caretSettings()')).configEnabled === false &&
       (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
       (await exec('window.__cwTest.marksOverlayVisible()')) === false
   );
@@ -7363,13 +7364,29 @@ module.exports = async function runScenario(ctx) {
   await exec(
     'document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()'
   );
-  await waitFor('window.__cwTest.marksFlags().caretParagraph === true');
+  await waitFor('window.__cwTest.caretSettings().bookDisplay.caretParagraph === true');
   check(
     '当前段落高亮：打开开关后标记层显示，菜单里打勾',
     (await exec('window.__cwTest.marksOverlayVisible()')) === true &&
       (await exec("document.getElementById('format-caret-para').dataset.on")) === '1' &&
       (await exec("document.getElementById('format-caret-para').textContent")).startsWith('✓') &&
       (await exec('window.__cwTest.dirty()')) === false
+  );
+  // 开关按书记忆（N10b）：切换只写 config.json 的 bookDisplay，不碰正文 / 书目 / 章节文件
+  const caretBookId = await exec('window.__cwTest.bookId()');
+  const caretConfigAfterOn = await fs.readFile(caretConfigPath, 'utf8');
+  const caretConfigAfterOnJson = JSON.parse(caretConfigAfterOn);
+  const caretTxtAfterOn = await fs.stat(caretTxtPath);
+  check(
+    '当前段落高亮：开关按书记忆——写进 config.json 的 bookDisplay[本书]，正文/书目/章节文件都不动',
+    Boolean(caretBookId) &&
+      caretConfigAfterOnJson.bookDisplay &&
+      caretConfigAfterOnJson.bookDisplay[caretBookId] &&
+      caretConfigAfterOnJson.bookDisplay[caretBookId].caretParagraph === true &&
+      (await exec('window.__cwTest.caretSettings()')).bookDisplay.caretParagraph === true &&
+      (await fs.readFile(caretMetaPath, 'utf8')) === caretMetaBefore &&
+      caretTxtAfterOn.size === caretTxtBefore.size &&
+      caretTxtAfterOn.mtimeMs === caretTxtBefore.mtimeMs
   );
 
   // 50j-1. 光标在哪一段，高亮就在哪一段（段首缩进里也算这一段；空行不高亮）
@@ -7476,7 +7493,7 @@ module.exports = async function runScenario(ctx) {
   await waitFor("!window.__cwTest.displayStyle().paperClass.includes('theme-kraft')");
   check(
     '当前段落高亮：切换主题只是预览，取消设置后主题恢复、config.json 一个字节没写',
-    (await fs.readFile(caretConfigPath, 'utf8')) === caretConfigBefore
+    (await fs.readFile(caretConfigPath, 'utf8')) === caretConfigAfterOn
   );
 
   // 50j-4. 没保存的新段落也高亮；超长正文跳过；关掉开关就收起
@@ -7517,27 +7534,46 @@ module.exports = async function runScenario(ctx) {
       (await exec('window.__cwTest.dirty()')) === false
   );
 
-  // 50j-5. 全程只读；配置不新增字段；v0.4.1 旧书照常高亮
+  // 50j-5. 只读 + 开关按书落 config；v0.4.1 旧书照常高亮
+  await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraph === false");
   const caretTxtAfter = await fs.stat(caretTxtPath);
   const caretMetaAfter = await fs.readFile(caretMetaPath, 'utf8');
   const caretConfigAfter = await fs.readFile(caretConfigPath, 'utf8');
   const caretDirAfter = (await fs.readdir(caretBookPath)).sort().join('|');
   check(
-    '当前段落高亮：全程只读（txt 大小+mtime、书目、配置、书内文件都没变，无 _trash / 临时文件）',
+    '当前段落高亮：正文 / 书目 / 章节文件全程只读（txt 大小+mtime、书目、书内文件都没变，无 _trash / 临时文件）',
     caretTxtAfter.size === caretTxtBefore.size &&
       caretTxtAfter.mtimeMs === caretTxtBefore.mtimeMs &&
       caretMetaAfter === caretMetaBefore &&
-      caretConfigAfter === caretConfigBefore &&
       caretDirAfter === caretDirBefore &&
       !caretDirAfter.includes('_trash') &&
       !caretDirAfter.includes('.tmp-')
   );
   const caretConfigJson = JSON.parse(caretConfigAfter);
+  const caretConfigBeforeJson = JSON.parse(caretConfigBefore);
+  const caretBookDisplayAfter = caretConfigJson.bookDisplay && caretConfigJson.bookDisplay[caretBookId];
+  delete caretConfigJson.lastBook;
+  delete caretConfigBeforeJson.lastBook;
+  delete caretConfigJson.bookDisplay;
+  delete caretConfigBeforeJson.bookDisplay;
+  const caretConfigDiff = {};
+  for (const key of new Set([...Object.keys(caretConfigBeforeJson), ...Object.keys(caretConfigJson)])) {
+    if (JSON.stringify(caretConfigBeforeJson[key]) !== JSON.stringify(caretConfigJson[key])) {
+      caretConfigDiff[key] = [caretConfigBeforeJson[key], caretConfigJson[key]];
+    }
+  }
   check(
-    '当前段落高亮：配置没有新增字段（和不可见字符一样，开关只在本次会话有效）',
-    ['caretParagraph', 'marksCaret', 'editorCaret', 'caretLine', 'caretHighlight'].every(
-      (key) => !(key in caretConfigJson)
-    )
+    '当前段落高亮：config.json 只多出 bookDisplay[本书] 的开关（关掉后记 false），没有其它新字段',
+    JSON.stringify(caretConfigJson) === JSON.stringify(caretConfigBeforeJson) &&
+      Boolean(caretBookDisplayAfter) &&
+      caretBookDisplayAfter.caretParagraph === false &&
+      !caretBookDisplayAfter.caretParagraphColor &&
+      caretConfigJson.caretParagraph === false &&
+      caretConfigJson.caretParagraphColor === '' &&
+      ['marksCaret', 'editorCaret', 'caretLine', 'caretHighlight'].every(
+        (key) => !(key in caretConfigJson)
+      ),
+    { diff: caretConfigDiff, bookDisplay: caretBookDisplayAfter }
   );
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
@@ -7941,6 +7977,238 @@ module.exports = async function runScenario(ctx) {
     '查找增强：旧书上 Esc 也能清除高亮，正文 / 书目不动',
     (await exec('window.__cwTest.findOverlayVisible()')) === false &&
       (await exec('window.__cwTest.text()')) === '旧书正文。'
+  );
+
+  // 50m. 当前段落高亮按书记忆 + 自定义颜色（v0.8-10b，提案 N10b）：
+  // 开关 / 颜色都存 config.json 的 bookDisplay（按书），没设置过的书回落全局默认；
+  // 只写 config，不碰正文 / 书目 / 章节文件，旧 config / 旧书照常打开。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const caretMemConfigPath = path.join(userData, 'config.json');
+  const readCaretMemConfig = async () => JSON.parse(await fs.readFile(caretMemConfigPath, 'utf8'));
+
+  await exec("window.__cwTest.newBook('按书高亮 A')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const caretBookA = await exec('window.__cwTest.bookPathValue()');
+  const caretBookIdA = await exec('window.__cwTest.bookId()');
+  const caretMetaA = path.join(caretBookA, '书目.json');
+  const caretMemText = '第一段：雨落在铁皮棚上。\n\n第二段：他把伞收起来。\n\n第三段：灯还亮着。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(caretMemText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  const caretTxtNameA = JSON.parse(await fs.readFile(caretMetaA, 'utf8')).chapters[0].file;
+  const caretTxtA = path.join(caretBookA, caretTxtNameA);
+  const caretTxtAStat = await fs.stat(caretTxtA);
+  const caretMetaABytes = await fs.readFile(caretMetaA, 'utf8');
+  const caretDirABefore = (await fs.readdir(caretBookA)).sort().join('|');
+
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec('document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()');
+  await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraph === true");
+  const caretCfgAOn = await readCaretMemConfig();
+  check(
+    '按书高亮：A 书打开开关 → 只写 config.bookDisplay[A] 的 caretParagraph=true，颜色默认跟随主题',
+    Boolean(caretBookIdA) &&
+      caretCfgAOn.bookDisplay[caretBookIdA].caretParagraph === true &&
+      !('caretParagraphColor' in caretCfgAOn.bookDisplay[caretBookIdA]) &&
+      (await exec('window.__cwTest.caretSettings()')).color === '' &&
+      (await exec('window.__cwTest.caretMenuColor()')).active === '' &&
+      (await exec('window.__cwTest.view()')) === 'editor'
+  );
+  await exec(`window.__cwTest.setCaret(${caretMemText.indexOf('第一段') + 3})`);
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  const caretThemeInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretThemeColor = await exec('window.__cwTest.caretColorInfo()');
+  const caretThemeRgb = (caretThemeColor.tint.match(/\d+/g) || []).slice(0, 3).join(', ');
+  check(
+    '按书高亮：没选自定义颜色时沿用当前背景主题配好的颜色（不写内联色、不落自定义色）',
+    caretThemeColor.value === '' &&
+      caretThemeColor.inlineTint === '' &&
+      caretThemeColor.inlineEdge === '' &&
+      caretThemeRgb.length > 0 &&
+      Boolean(caretThemeInfo) &&
+      caretThemeInfo.background.startsWith(`rgba(${caretThemeRgb},`) &&
+      caretThemeInfo.background !== 'rgba(0, 0, 0, 0)',
+    { color: caretThemeColor, info: caretThemeInfo, bodyClass: await exec('window.__cwTest.displayStyle().paperClass') }
+  );
+
+  // 色板：点湖蓝 → 立刻换色并按书保存
+  await exec('document.querySelector(\'#format-caret-colors [data-caret-color="#3f7fbf"]\').click()');
+  await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraphColor === '#3f7fbf'");
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  const caretCfgABlue = await readCaretMemConfig();
+  const caretBlueInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretBlueColor = await exec('window.__cwTest.caretColorInfo()');
+  check(
+    '按书高亮：色板选「湖蓝」→ 高亮底色 / 左边线换成蓝色，颜色按书存进 config',
+    caretCfgABlue.bookDisplay[caretBookIdA].caretParagraphColor === '#3f7fbf' &&
+      caretBlueColor.value === '#3f7fbf' &&
+      caretBlueColor.tint === 'rgba(63, 127, 191, 0.16)' &&
+      caretBlueColor.edge === 'rgba(63, 127, 191, 0.82)' &&
+      Boolean(caretBlueInfo) &&
+      caretBlueInfo.background === 'rgba(63, 127, 191, 0.16)' &&
+      caretBlueInfo.boxShadow.includes('rgba(63, 127, 191') &&
+      (await exec('window.__cwTest.caretMenuColor()')).active === '#3f7fbf' &&
+      (await exec('window.__cwTest.caretMenuColor()')).picker === '#3f7fbf'
+  );
+  const caretTxtAAfterToggle = await fs.stat(caretTxtA);
+  check(
+    '按书高亮：开关 / 颜色只写 config，正文 txt 与书目一个字节没动、书内没有 _trash / 临时文件',
+    caretTxtAAfterToggle.size === caretTxtAStat.size &&
+      caretTxtAAfterToggle.mtimeMs === caretTxtAStat.mtimeMs &&
+      (await fs.readFile(caretMetaA, 'utf8')) === caretMetaABytes &&
+      (await fs.readdir(caretBookA)).sort().join('|') === caretDirABefore &&
+      !caretDirABefore.includes('_trash')
+  );
+
+  // 全局默认：回到书架 → 设置（全局）→ 打开 + 藤紫 → 保存
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  const caretGlobalState = await exec('window.__cwTest.settingsCaretState()');
+  check(
+    '按书高亮：书架「设置」是全局默认（当前段落高亮分组照常显示，默认关 + 跟随主题）',
+    (await exec('window.__cwTest.settingsScope()')) === 'global' &&
+      caretGlobalState.visible === true &&
+      caretGlobalState.checked === false &&
+      caretGlobalState.draft === '' &&
+      caretGlobalState.active === '' &&
+      caretGlobalState.hint.includes('全局默认')
+  );
+  const caretConfigBeforeGlobalSave = await fs.readFile(caretMemConfigPath, 'utf8');
+  await exec("window.__cwTest.setCheck('settings-caret-paragraph', true)");
+  await exec('document.querySelector(\'#settings-caret-colors [data-settings-caret-color="#7a63b0"]\').click()');
+  const caretGlobalDraft = await exec('window.__cwTest.settingsCaretState()');
+  check(
+    '按书高亮：设置里勾选 + 选色只改界面草稿，不点保存不写 config',
+    caretGlobalDraft.checked === true &&
+      caretGlobalDraft.draft === '#7a63b0' &&
+      caretGlobalDraft.active === '#7a63b0' &&
+      (await fs.readFile(caretMemConfigPath, 'utf8')) === caretConfigBeforeGlobalSave
+  );
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor("window.__cwTest.settingsOpen() === false");
+  await waitFor("window.__cwTest.globalConfig().caretParagraph === true");
+  const caretCfgGlobal = await readCaretMemConfig();
+  check(
+    '按书高亮：全局默认保存后落到 config 顶层（开 + 藤紫），A 书自己的湖蓝覆盖不受影响',
+    caretCfgGlobal.caretParagraph === true &&
+      caretCfgGlobal.caretParagraphColor === '#7a63b0' &&
+      caretCfgGlobal.bookDisplay[caretBookIdA].caretParagraphColor === '#3f7fbf' &&
+      (await exec('window.__cwTest.globalConfig()')).caretParagraphColor === '#7a63b0'
+  );
+
+  // B 书：没有单独设置 → 继承全局（开 + 藤紫）
+  await exec("window.__cwTest.newBook('按书高亮 B')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const caretBookB = await exec('window.__cwTest.bookPathValue()');
+  const caretBookIdB = await exec('window.__cwTest.bookId()');
+  const caretCfgBInherit = await readCaretMemConfig();
+  check(
+    '按书高亮：没单独设置过的 B 书继承全局默认（开 + 藤紫），bookDisplay 里没有 B',
+    (await exec('window.__cwTest.caretSettings()')).enabled === true &&
+      (await exec('window.__cwTest.caretSettings()')).color === '#7a63b0' &&
+      (await exec('window.__cwTest.caretColorInfo()')).tint === 'rgba(122, 99, 176, 0.16)' &&
+      !('caretParagraph' in (await exec('window.__cwTest.caretSettings()')).bookDisplay) &&
+      !(caretCfgBInherit.bookDisplay || {})[caretBookIdB]
+  );
+
+  // B 书单独关掉 → 覆盖全局的「开」；换书再回来仍是关
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec('document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()');
+  await waitFor("window.__cwTest.caretSettings().bookDisplay.caretParagraph === false");
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(caretBookB)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  check(
+    '按书高亮：B 书单独关掉后覆盖全局的「开」，重新打开 B 仍是关（正文 / 书目不变）',
+    (await exec('window.__cwTest.caretSettings()')).enabled === false &&
+      (await exec('window.__cwTest.caretSettings()')).configEnabled === false &&
+      (await exec('window.__cwTest.caretSettings()')).bookDisplay.caretParagraph === false &&
+      (await readCaretMemConfig()).bookDisplay[caretBookIdB].caretParagraph === false &&
+      JSON.parse(await fs.readFile(path.join(caretBookB, '书目.json'), 'utf8')).chapters.length === 1
+  );
+
+  // C 书：没设置过 → 全局默认（开 + 藤紫）
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('按书高亮 C')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const caretBookIdC = await exec('window.__cwTest.bookId()');
+  const caretCfgC = await readCaretMemConfig();
+  check(
+    '按书高亮：另一本没设置过的 C 书同样继承全局默认，bookDisplay 里没有 C',
+    (await exec('window.__cwTest.caretSettings()')).enabled === true &&
+      (await exec('window.__cwTest.caretSettings()')).color === '#7a63b0' &&
+      !(caretCfgC.bookDisplay || {})[caretBookIdC]
+  );
+
+  // 回到 A：这本书自己的蓝色覆盖优先于全局藤紫；「恢复本书默认」后回全局
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(caretBookA)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec(`window.__cwTest.setCaret(${caretMemText.indexOf('第二段') + 3})`);
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  const caretAReopen = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '按书高亮：重新打开 A 书恢复自己的开关 + 湖蓝（优先于全局默认藤紫）',
+    (await exec('window.__cwTest.caretSettings()')).enabled === true &&
+      (await exec('window.__cwTest.caretSettings()')).color === '#3f7fbf' &&
+      Boolean(caretAReopen) &&
+      caretAReopen.background === 'rgba(63, 127, 191, 0.16)' &&
+      (await exec('window.__cwTest.caretMenuColor()')).active === '#3f7fbf'
+  );
+  await exec('window.__cwTest.openSettings()');
+  const caretBookSettings = await exec('window.__cwTest.settingsCaretState()');
+  check(
+    '按书高亮：写作页设置是「按这本书」作用域，显示 A 的开关 / 湖蓝，并说明只影响这本书',
+    (await exec('window.__cwTest.settingsScope()')) === 'book' &&
+      caretBookSettings.visible === true &&
+      caretBookSettings.checked === true &&
+      caretBookSettings.draft === '#3f7fbf' &&
+      caretBookSettings.active === '#3f7fbf' &&
+      caretBookSettings.hint.includes('只影响这本书')
+  );
+  await exec("document.getElementById('btn-reset-book-display').click()");
+  await waitFor("window.__cwTest.settingsCaretState().draft === '#7a63b0'");
+  const caretCfgReset = await readCaretMemConfig();
+  check(
+    '按书高亮：「恢复本书默认」清掉 bookDisplay[A]（开关 + 颜色），A 回到全局默认（开 + 藤紫）',
+    !(caretCfgReset.bookDisplay || {})[caretBookIdA] &&
+      (await exec('window.__cwTest.caretSettings()')).enabled === true &&
+      (await exec('window.__cwTest.caretSettings()')).color === '#7a63b0' &&
+      (await exec('window.__cwTest.caretColorInfo()')).tint === 'rgba(122, 99, 176, 0.16)'
+  );
+  await exec('window.__cwTest.closeSettings()');
+
+  // 收尾：A 的正文 / 书目从头到尾没被开关 / 换色动过
+  const caretTxtAFinal = await fs.stat(caretTxtA);
+  check(
+    '按书高亮：全程只写 config（A 的正文 txt 大小+mtime、书目字节、书内文件列表都不变，无 _trash）',
+    caretTxtAFinal.size === caretTxtAStat.size &&
+      caretTxtAFinal.mtimeMs === caretTxtAStat.mtimeMs &&
+      (await fs.readFile(caretMetaA, 'utf8')) === caretMetaABytes &&
+      (await fs.readdir(caretBookA)).sort().join('|') === caretDirABefore &&
+      !caretDirABefore.includes('.tmp-')
+  );
+
+  // 收尾：把全局默认清回（关 + 跟随主题），不给后面的用例留副作用
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setCheck('settings-caret-paragraph', false)");
+  await exec('document.querySelector(\'#settings-caret-colors [data-settings-caret-color=""]\').click()');
+  await exec('window.__cwTest.saveSettings()');
+  await waitFor("window.__cwTest.settingsOpen() === false");
+  await waitFor("window.__cwTest.globalConfig().caretParagraph === false");
+  const caretCfgClean = await readCaretMemConfig();
+  check(
+    '按书高亮：全局默认能改回「关 + 跟随主题」，配置里只有顶层默认与按书覆盖，没有书库 / 章节字段',
+    caretCfgClean.caretParagraph === false &&
+      caretCfgClean.caretParagraphColor === '' &&
+      ['books', 'chapters', 'chapterFiles', 'bookMeta'].every((key) => !(key in caretCfgClean))
   );
 
   // 51. 专注模式（提案 3.5）：隐藏左栏与顶栏、F11 / 按钮进出、Esc 退出、打字机模式。

@@ -26,6 +26,9 @@
   const templateLib = window.CWTemplate;
   // 导出简繁转换（v0.8 P0 N7）：core/s2t.js 里、Node 单测覆盖；只用于显示的档位文案
   const s2tLib = window.CWS2T;
+  // 当前段落高亮的颜色（v0.8-10b，提案 N10b）：core/caret-color.js 里、Node 单测覆盖。
+  // 只负责把配置里的 #rrggbb 换成 CSS 的 rgba，并做清洗；不写盘、不碰正文。
+  const caretColorLib = window.CWCaretColor;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -246,7 +249,9 @@
     marks: {
       invisibles: false, // 显示不可见字符（全角空格 ␣ / 行尾空白）
       longParagraphs: false, // 超长段落提示（>500 字左侧淡黄竖线）
-      caretParagraph: false, // 当前段落高亮（v0.8-10，提案 N10）：光标所在段淡色底 + 左侧细线
+      // 当前段落高亮（v0.8-10b，提案 N10b）：光标所在段淡色底 + 左侧细线。
+      // 运行时开关 = 生效配置（全局默认 + 这本书的 bookDisplay 覆盖）；切换会写 config，不碰正文。
+      caretParagraph: false,
       caretLine: 0, // 当前高亮的行号（1 基；0 = 没有高亮）
       caretTooLarge: false, // 正文超过 30 万字：暂不画段落高亮（和不可见字符同一上限）
       composing: false, // 中文输入法拼字中：先不重画标记层，免得闪
@@ -286,6 +291,7 @@
     settingsScope: 'global', // 设置弹层作用域：global = 全局默认；book = 只改这本书
     settingsBackup: null, // 设置弹窗里实时预览用：取消时恢复
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
+    settingsCaretColorDraft: '', // 设置里刚选的高亮颜色（'' = 跟随主题；点保存才落配置）
     suppressChapterClick: 0, // 拖拽结束后短暂屏蔽 click，避免误切章
     testMode: new URLSearchParams(location.search).has('test')
   };
@@ -480,8 +486,101 @@
     for (const theme of ['cream', 'green', 'night', 'kraft', 'grid']) {
       document.body.classList.toggle(`theme-${theme}`, cfg.editorPaper === theme);
     }
+    // 当前段落高亮颜色（v0.8-10b）：'跟随主题' 时清掉内联变量、让 body.theme-* 的配色接管；
+    // 自定义时把颜色换成 rgba 写到 body 内联变量上（内联优先于主题类，切主题也保持自定义色）。
+    applyCaretColor(cfg);
     // 字体 / 字号 / 行距变了，标记层要重新对齐
     scheduleMarksRender(30);
+  }
+
+  // ---------- 当前段落高亮的颜色（v0.8-10b，提案 N10b）----------
+  // 只作用于显示层：'' = 跟随当前背景主题（6 套主题各自的默认配色不变），
+  // '#rrggbb' = 作者自定义。清洗与 rgba 换算都在 core/caret-color.js（有单测）。
+  function caretColorValue(cfg) {
+    return caretColorLib.normalizeColor((cfg || state.config || {}).caretParagraphColor);
+  }
+
+  function applyCaretColor(cfg) {
+    const value = caretColorValue(cfg);
+    const style = caretColorLib.caretStyle(value);
+    const bodyStyle = document.body.style;
+    if (!style) {
+      bodyStyle.removeProperty('--caret-para-tint');
+      bodyStyle.removeProperty('--caret-para-edge');
+      return '';
+    }
+    bodyStyle.setProperty('--caret-para-tint', style.tint);
+    bodyStyle.setProperty('--caret-para-edge', style.edge);
+    return value;
+  }
+
+  // 打开书 / 回书架 / 保存设置后，把「生效配置」里的开关同步到显示层。
+  // 开关本身只在切换的那一下写 config；这里只读配置、不写盘。
+  function syncCaretParagraphFromConfig() {
+    state.marks.caretParagraph = Boolean(state.config && state.config.caretParagraph === true);
+    applyCaretColor(state.config);
+    renderMarksMenu();
+    if (state.view === 'editor' && state.bookPath && state.index >= 0) {
+      state.marks.caretLine = 0;
+      renderEditorMarks();
+    }
+  }
+
+  // 显示设置里按书改的项（含当前段落高亮的开关 / 颜色）：写作页写 bookDisplay，书架写全局默认。
+  // 只写 config.json（原子写），不碰正文 / 书目 / 章节文件。
+  async function persistDisplayPatch(patch) {
+    if (state.bookId) {
+      state.bookDisplay = (await call(api.setBookDisplay, state.bookId, patch)) || {};
+    } else {
+      state.globalConfig = await call(api.setConfig, patch);
+    }
+    state.config = effectiveConfig();
+    applyEditorStyle();
+    renderMarksMenu();
+    return state.config;
+  }
+
+  // 「排版 ▾」里切换当前段落高亮：先改显示层，再按书写 config；写失败就退回原状态。
+  async function setCaretParagraphPersisted(on, { quiet = false } = {}) {
+    const next = Boolean(on);
+    const previous = state.marks.caretParagraph;
+    setMarksToggle('caretParagraph', next);
+    try {
+      await persistDisplayPatch({ caretParagraph: next });
+      if (!quiet) {
+        toast(
+          next
+            ? `已开启当前段落高亮（${state.bookId ? '只对这本书' : '全局默认'}，会记住）`
+            : `已关闭当前段落高亮（${state.bookId ? '只对这本书' : '全局默认'}，会记住）`
+        );
+      }
+      return true;
+    } catch (err) {
+      setMarksToggle('caretParagraph', previous);
+      toast(`保存当前段落高亮开关失败：${err.message}`, 'error');
+      return false;
+    }
+  }
+
+  // 选高亮颜色（'' = 跟随主题 / '#rrggbb' = 自定义）：实时换色，再按书写 config。
+  // 写失败时退回上一个颜色，不留下「界面变了但没记住」的假象。
+  async function setCaretColorPersisted(color, { quiet = true } = {}) {
+    const next = caretColorLib.normalizeColor(color);
+    const previous = caretColorValue(state.config);
+    applyCaretColor({ caretParagraphColor: next });
+    renderCaretColorRow();
+    try {
+      await persistDisplayPatch({ caretParagraphColor: next });
+      if (!quiet) {
+        toast(next ? `高亮颜色已保存（${state.bookId ? '只对这本书' : '全局默认'}）` : '高亮颜色已恢复跟随背景主题');
+      }
+      return true;
+    } catch (err) {
+      applyCaretColor({ caretParagraphColor: previous });
+      renderCaretColorRow();
+      toast(`保存高亮颜色失败：${err.message}`, 'error');
+      return false;
+    }
   }
 
   // ---------- 章节栏 / 写作区 可拖动分隔条 ----------
@@ -529,6 +628,8 @@
       await loadCustomFont(state.config.editorCustomFontPath, { silent: true });
     }
     applyEditorStyle();
+    // 当前段落高亮的开关 / 颜色按这本书的覆盖（没有覆盖就用全局默认）
+    syncCaretParagraphFromConfig();
     applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
   }
 
@@ -2103,6 +2204,30 @@
     return true;
   }
 
+  // 「排版 ▾」里的高亮色板：当前生效颜色打圈；'' 时「跟随主题」那个拼色圆点打圈。
+  // 只改 class / 取色器的显示值，不写配置。
+  function renderCaretColorRow() {
+    const value = caretColorValue(state.config);
+    const row = $('format-caret-colors');
+    if (row) {
+      for (const btn of row.querySelectorAll('[data-caret-color]')) {
+        const swatch = caretColorLib.normalizeColor(btn.dataset.caretColor);
+        const active = swatch === value;
+        btn.dataset.active = active ? '1' : '0';
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        // 色块颜色用 CSSOM 写（CSP 不允许静态 style 属性）；空值交给 .caret-swatch-theme 的拼色渐变
+        if (swatch) btn.style.setProperty('--swatch', swatch);
+        else btn.style.removeProperty('--swatch');
+      }
+    }
+    const picker = $('format-caret-color');
+    if (picker) {
+      // input[type=color] 不能显示 ''：跟随主题时给最后一个色板色，只作为取色器起点，
+      // 真正保存的颜色仍以 state.config 为准（点取色器才会改成自定义）。
+      picker.value = value || caretColorLib.PRESET_VALUES[0];
+    }
+  }
+
   function renderMarksMenu() {
     const invisibles = $('format-invisibles');
     const long = $('format-long-para');
@@ -2122,8 +2247,9 @@
       caret.textContent = `${state.marks.caretParagraph ? '✓ ' : ''}当前段落高亮（光标所在段）`;
       caret.dataset.on = state.marks.caretParagraph ? '1' : '0';
       caret.title =
-        '光标所在的那一段（含折行）画一层淡色底 + 左侧细线，颜色跟着背景主题走。只显示，不改正文、不写盘、不写配置。';
+        '光标所在的那一段（含折行）画一层淡色底 + 左侧细线。开关和颜色都按书记忆（只写 config.json，不碰正文 / 书目 / 章节文件）；没单独设置过的书用全局默认。';
     }
+    renderCaretColorRow();
   }
 
   function setMarksToggle(name, on) {
@@ -4621,9 +4747,10 @@
     editorEl.value = '';
     // 回书架：查找会话跟着结束（高亮层只在写作页有意义）
     if (state.find.total) clearFindSession();
-    // 回到书架就切回全局显示设置
+    // 回到书架就切回全局显示设置（当前段落高亮也回到全局默认，下一本书打开时再按书覆盖）
     state.config = effectiveConfig();
     applyEditorStyle();
+    syncCaretParagraphFromConfig();
     applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
     showView('shelf');
     await refreshShelf();
@@ -6927,7 +7054,10 @@
       editorLetterSpacing: Number($('settings-letter-spacing').value),
       editorPaddingX: Number($('settings-padding-x').value),
       editorPageWidth: Number($('settings-page-width').value),
-      editorPaper: $('settings-paper').value
+      editorPaper: $('settings-paper').value,
+      // 当前段落高亮（N10b）：按书 / 全局都走同一份表单，保存时分别落到 bookDisplay / config
+      caretParagraph: $('settings-caret-paragraph').checked === true,
+      caretParagraphColor: caretColorLib.normalizeColor(state.settingsCaretColorDraft)
     };
   }
 
@@ -7335,6 +7465,24 @@
     return state.view === 'editor' && state.bookId ? 'book' : 'global';
   }
 
+  // 设置弹层里的高亮色板：当前草稿色打圈（'' = 跟随主题）；取色器只作为自定义入口。
+  function renderSettingsCaretColors() {
+    const row = $('settings-caret-colors');
+    const value = caretColorLib.normalizeColor(state.settingsCaretColorDraft);
+    if (row) {
+      for (const btn of row.querySelectorAll('[data-settings-caret-color]')) {
+        const swatch = caretColorLib.normalizeColor(btn.dataset.settingsCaretColor);
+        const active = swatch === value;
+        btn.dataset.active = active ? '1' : '0';
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        if (swatch) btn.style.setProperty('--swatch', swatch);
+        else btn.style.removeProperty('--swatch');
+      }
+    }
+    const picker = $('settings-caret-color');
+    if (picker) picker.value = value || caretColorLib.PRESET_VALUES[0];
+  }
+
   // 设置弹层里各输入框按给定配置回填
   function fillSettingsFields(cfg) {
     state.settingsFontDraft = {
@@ -7353,6 +7501,10 @@
     setSelectValue('settings-padding-x', cfg.editorPaddingX, 56);
     setSelectValue('settings-page-width', cfg.editorPageWidth, 0);
     setSelectValue('settings-paper', cfg.editorPaper, 'paper');
+    // 当前段落高亮（N10b）：开关 / 颜色都是显示设置，写作页按书、书架按全局
+    $('settings-caret-paragraph').checked = cfg.caretParagraph === true;
+    state.settingsCaretColorDraft = caretColorLib.normalizeColor(cfg.caretParagraphColor);
+    renderSettingsCaretColors();
     $('settings-snapshot-enabled').checked = cfg.snapshotEnabled === true;
     setSelectValue('settings-snapshot-days', cfg.snapshotKeepDays, 7);
     const goal = Math.max(0, Math.round(Number(cfg.dailyGoal) || 0));
@@ -7655,6 +7807,13 @@
       const el = $(id);
       if (el) el.classList.toggle('hidden', isBook);
     }
+    // 当前段落高亮在两种作用域里都显示：按书设置时只影响这本书，书架设置时改全局默认
+    const caretHint = $('settings-caret-hint');
+    if (caretHint) {
+      caretHint.textContent = isBook
+        ? '只影响这本书：开关与颜色存进 config.json 的 bookDisplay；没单独设置过的书继续用全局默认。'
+        : '全局默认：没有单独设置过的书都用这一份；在写作页里改只影响当前这本书。';
+    }
     const resetBtn = $('btn-reset-book-display');
     if (resetBtn) {
       resetBtn.classList.toggle('hidden', !isBook || !Object.keys(state.bookDisplay || {}).length);
@@ -7668,7 +7827,15 @@
 
   function previewSettings() {
     if (!state.settingsBackup) return;
-    applyEditorStyle({ ...state.settingsBackup, ...readDisplayForm() });
+    const form = readDisplayForm();
+    applyEditorStyle({ ...state.settingsBackup, ...form });
+    // 勾选 / 取消「当前段落高亮」时顺便预览开关本身（只改显示层，点保存才写 config）
+    if (state.view === 'editor' && state.bookPath && state.index >= 0) {
+      state.marks.caretParagraph = form.caretParagraph === true;
+      renderMarksMenu();
+      state.marks.caretLine = 0;
+      renderEditorMarks();
+    }
   }
 
   async function openSettings() {
@@ -7694,6 +7861,8 @@
     if (restore && state.settingsBackup) {
       state.config = state.settingsBackup;
       applyEditorStyle();
+      // 取消设置：开关 / 颜色回到打开前的生效配置（只读配置，不写盘）
+      syncCaretParagraphFromConfig();
       renderWriteTimer();
       renderDurationSettings();
     }
@@ -7711,6 +7880,7 @@
         await loadCustomFont(state.config.editorCustomFontPath, { silent: true });
       }
       applyEditorStyle();
+      syncCaretParagraphFromConfig();
       applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
       fillSettingsFields(state.config);
       state.settingsBackup = { ...state.config };
@@ -7731,6 +7901,7 @@
         state.bookDisplay = display || {};
         state.config = effectiveConfig();
         applyEditorStyle();
+        syncCaretParagraphFromConfig();
         applySidebarWidth(state.config.editorSidebarWidth != null ? state.config.editorSidebarWidth : 250);
         closeSettings({ restore: false });
         toast('已保存：这本书的显示设置（只影响本书）');
@@ -7753,6 +7924,7 @@
       state.globalConfig = cfg;
       state.config = effectiveConfig();
       applyEditorStyle();
+      syncCaretParagraphFromConfig();
       applyWriteTimerConfig();
       closeSettings({ restore: false });
       toast('设置已保存（全局默认）');
@@ -8175,6 +8347,14 @@
       toggleFormatMenu();
     });
     $('format-menu').addEventListener('click', async (event) => {
+      // 高亮色块（v0.8-10b）：不关菜单，方便作者连着试几个颜色；点一下 = 按书保存一色
+      const swatch = event.target.closest('[data-caret-color]');
+      if (swatch) {
+        event.preventDefault();
+        event.stopPropagation();
+        await setCaretColorPersisted(swatch.dataset.caretColor);
+        return;
+      }
       const btn = event.target.closest('button[data-action]');
       if (!btn) return;
       const action = btn.dataset.action;
@@ -8191,9 +8371,19 @@
       else if (action === 'preset-loose') await setDisplayPreset('loose');
       else if (action === 'toggle-invisibles') toggleMarks('invisibles');
       else if (action === 'toggle-long-para') toggleMarks('longParagraphs');
-      else if (action === 'toggle-caret-para') toggleMarks('caretParagraph');
+      else if (action === 'toggle-caret-para') await setCaretParagraphPersisted(!state.marks.caretParagraph);
       else if (action === 'display-settings') openSettings();
     });
+    // 取色器：拖动时只预览（不写盘），松手（change）才按书保存
+    const caretPicker = $('format-caret-color');
+    if (caretPicker) {
+      caretPicker.addEventListener('input', () => {
+        applyCaretColor({ caretParagraphColor: caretColorLib.normalizeColor(caretPicker.value) });
+      });
+      caretPicker.addEventListener('change', () => {
+        void setCaretColorPersisted(caretPicker.value);
+      });
+    }
 
     // 整理对话框：勾选/切换规则时实时刷新预览
     for (const id of ['fmt-indent', 'fmt-trailing', 'fmt-punct', 'fmt-quotes', 'fmt-ellipsis', 'fmt-cjkspace']) {
@@ -8210,6 +8400,28 @@
     // 设置里改显示项时实时预览，点「取消」恢复原样
     for (const id of displaySettingsIds) {
       $(id).addEventListener('change', previewSettings);
+    }
+    // 当前段落高亮（v0.8-10b）：勾选 / 色板 / 取色器都先改草稿并实时预览，点「保存设置」才写 config
+    $('settings-caret-paragraph').addEventListener('change', previewSettings);
+    const settingsCaretRow = $('settings-caret-colors');
+    if (settingsCaretRow) {
+      settingsCaretRow.addEventListener('click', (event) => {
+        const swatch = event.target.closest('[data-settings-caret-color]');
+        if (!swatch) return;
+        state.settingsCaretColorDraft = caretColorLib.normalizeColor(swatch.dataset.settingsCaretColor);
+        renderSettingsCaretColors();
+        previewSettings();
+      });
+    }
+    const settingsCaretPicker = $('settings-caret-color');
+    if (settingsCaretPicker) {
+      const syncDraft = () => {
+        state.settingsCaretColorDraft = caretColorLib.normalizeColor(settingsCaretPicker.value);
+        renderSettingsCaretColors();
+        previewSettings();
+      };
+      settingsCaretPicker.addEventListener('input', syncDraft);
+      settingsCaretPicker.addEventListener('change', syncDraft);
     }
 
     $('context-menu').addEventListener('click', async (event) => {
@@ -9291,6 +9503,67 @@
         };
       },
       editorCaretColor: () => getComputedStyle(editorEl).caretColor,
+      // 当前段落高亮按书记忆 + 自定义颜色（v0.8-10b，提案 N10b）
+      setCaretParagraphPersist: (on) => setCaretParagraphPersisted(on, { quiet: true }),
+      setCaretColor: (color) => setCaretColorPersisted(color),
+      previewCaretColor(color) {
+        applyCaretColor({ caretParagraphColor: caretColorLib.normalizeColor(color) });
+        renderCaretColorRow();
+        return caretColorLib.normalizeColor(color);
+      },
+      caretSettings() {
+        return {
+          enabled: Boolean(state.marks.caretParagraph),
+          scope: state.bookId ? 'book' : 'global',
+          bookId: state.bookId || '',
+          configEnabled: Boolean(state.config && state.config.caretParagraph === true),
+          globalEnabled: Boolean(state.globalConfig && state.globalConfig.caretParagraph === true),
+          color: caretColorValue(state.config),
+          globalColor: caretColorLib.normalizeColor(
+            state.globalConfig && state.globalConfig.caretParagraphColor
+          ),
+          bookDisplay: { ...(state.bookDisplay || {}) }
+        };
+      },
+      caretColorInfo() {
+        const bodyStyle = getComputedStyle(document.body);
+        const value = caretColorValue(state.config);
+        return {
+          value,
+          presetIndex: caretColorLib.presetIndex(value),
+          tint: bodyStyle.getPropertyValue('--caret-para-tint').trim(),
+          edge: bodyStyle.getPropertyValue('--caret-para-edge').trim(),
+          inlineTint: document.body.style.getPropertyValue('--caret-para-tint').trim(),
+          inlineEdge: document.body.style.getPropertyValue('--caret-para-edge').trim()
+        };
+      },
+      caretMenuColor() {
+        const active = document.querySelector('#format-caret-colors [data-active="1"]');
+        const picker = $('format-caret-color');
+        return {
+          active: active ? active.dataset.caretColor || '' : null,
+          picker: picker ? picker.value : '',
+          swatchCount: document.querySelectorAll('#format-caret-colors [data-caret-color]').length
+        };
+      },
+      setSettingsCaretColor(color) {
+        state.settingsCaretColorDraft = caretColorLib.normalizeColor(color);
+        renderSettingsCaretColors();
+        previewSettings();
+        return state.settingsCaretColorDraft;
+      },
+      settingsCaretState() {
+        const active = document.querySelector('#settings-caret-colors [data-active="1"]');
+        const picker = $('settings-caret-color');
+        return {
+          checked: $('settings-caret-paragraph').checked === true,
+          draft: caretColorLib.normalizeColor(state.settingsCaretColorDraft),
+          active: active ? active.dataset.settingsCaretColor || '' : null,
+          picker: picker ? picker.value : '',
+          hint: $('settings-caret-hint').textContent,
+          visible: !$('settings-caret-field').classList.contains('hidden')
+        };
+      },
       marksText: () => $('editor-marks').textContent,
       marksPayload: () => ({
         longItems: state.marks.longItems.map((item) => ({ ...item })),
@@ -9929,6 +10202,8 @@
       /* 拿不到提示不影响启动 */
     }
     applyEditorStyle();
+    // 当前段落高亮：启动时按全局默认同步开关（打开书后再按这本书的覆盖换一次）
+    syncCaretParagraphFromConfig();
     applySidebarWidth((state.config && state.config.editorSidebarWidth) || 250);
     // 字体真正加载完可能会改变换行：加载好以后把标记层重新对齐一次
     if (document.fonts && document.fonts.ready) {

@@ -9,6 +9,7 @@ const snapshotLib = require('./snapshot');
 const statsLib = require('./stats');
 const templateLib = require('./template');
 const s2tLib = require('./s2t');
+const caretColorLib = require('./caret-color');
 
 // 默认书架：当前用户的「文档\我的小说」（安装后可在应用里改）
 const DEFAULT_BOOKS_ROOT = path.join(os.homedir(), 'Documents', '我的小说');
@@ -26,7 +27,10 @@ const BOOK_DISPLAY_KEYS = [
   'editorLetterSpacing',
   'editorPageWidth',
   'editorPaddingX',
-  'editorPaper'
+  'editorPaper',
+  // 当前段落高亮（v0.8-10b，提案 N10b）：开关与自定义颜色都按书记忆
+  'caretParagraph',
+  'caretParagraphColor'
 ];
 
 const DEFAULTS = Object.freeze({
@@ -44,6 +48,10 @@ const DEFAULTS = Object.freeze({
   editorPageWidth: 0, // 0 = 通栏；>0 为正文最大宽度（px）
   editorPaddingX: 56, // 正文左右边距（px）
   editorPaper: 'paper', // paper 原纸白 / cream 米黄 / green 豆绿 / night 夜间 / kraft 牛皮纸 / grid 网格纸
+  // 当前段落高亮（v0.8-10b，提案 N10b）：默认关；颜色 '' = 跟随当前背景主题（默认配色不变），
+  // '#rrggbb' = 作者自定义。两项都可被 config.bookDisplay 按书覆盖，没设置过的书用这里的全局默认。
+  caretParagraph: false,
+  caretParagraphColor: '',
   // 每本书的显示设置覆盖：{ [bookId]: { 只放改过的项 } }；没有覆盖的书沿用上面的全局值
   bookDisplay: {},
   // 「整理本章」上一次用过的规则，下次打开对话框沿用（不改正文，只是记住勾选）
@@ -124,6 +132,12 @@ function sanitizeBookDisplayEntry(raw) {
   if (has('editorPaper')) {
     out.editorPaper = PAPER_THEMES.includes(raw.editorPaper) ? raw.editorPaper : DEFAULTS.editorPaper;
   }
+  // 当前段落高亮（v0.8-10b）：开关只认真正的 true / false（写错类型按全局默认 false），
+  // 颜色只认 #rgb / #rrggbb；写坏了一律当「跟随主题」（'' 也是一个有效的按书覆盖值）。
+  if (has('caretParagraph')) out.caretParagraph = raw.caretParagraph === true;
+  if (has('caretParagraphColor')) {
+    out.caretParagraphColor = caretColorLib.normalizeColor(raw.caretParagraphColor);
+  }
   // 覆盖成「自定义字体」但没带字体路径：这一项不算数，回落到全局字体
   if (out.editorFont === 'custom' && !out.editorCustomFontPath) delete out.editorFont;
   return out;
@@ -187,6 +201,9 @@ function sanitize(raw) {
     : 0;
   cfg.editorPaddingX = clampInt(cfg.editorPaddingX, 16, 200, DEFAULTS.editorPaddingX);
   cfg.editorPaper = PAPER_THEMES.includes(cfg.editorPaper) ? cfg.editorPaper : DEFAULTS.editorPaper;
+  // 当前段落高亮（v0.8-10b）：旧配置没有这两个键 = 关 / 跟随主题，行为和以前完全一样。
+  cfg.caretParagraph = cfg.caretParagraph === true;
+  cfg.caretParagraphColor = caretColorLib.normalizeColor(cfg.caretParagraphColor);
   cfg.bookDisplay = sanitizeBookDisplay(cfg.bookDisplay);
   cfg.formatOptions = formatLib.sanitizeOptions(cfg.formatOptions);
   // 上次导出的目录：只做基本清洗，路径不存在时由主进程退回「文档」目录

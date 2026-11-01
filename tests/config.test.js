@@ -199,6 +199,85 @@ test('按书显示设置：非法值按全局规则夹紧，非法 bookId 被忽
   assert.equal(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay && Object.keys(sanitize({ bookDisplay: 'not-an-object' }).bookDisplay).length, 0);
 });
 
+test('当前段落高亮（N10b）：默认关 + 跟随主题；旧配置缺字段照常启动', () => {
+  const cfg = sanitize({});
+  assert.equal(cfg.caretParagraph, false);
+  assert.equal(cfg.caretParagraphColor, '');
+  assert.equal(DEFAULTS.caretParagraph, false);
+  assert.equal(DEFAULTS.caretParagraphColor, '');
+
+  // 旧配置文件（v0.4.1 形状）里没有这两个键：读取后补的是默认值，不影响其它设置
+  const old = sanitize({ booksRoot: 'D:\\旧书架', editorFont: 'kai', editorPaper: 'night' });
+  assert.equal(old.caretParagraph, false);
+  assert.equal(old.caretParagraphColor, '');
+  assert.equal(old.editorPaper, 'night');
+  assert.equal(old.booksRoot, 'D:\\旧书架');
+});
+
+test('当前段落高亮（N10b）：开关只认布尔 true；颜色清洗成 #rrggbb 或回空', () => {
+  assert.equal(sanitize({ caretParagraph: true }).caretParagraph, true);
+  assert.equal(sanitize({ caretParagraph: 'true' }).caretParagraph, false);
+  assert.equal(sanitize({ caretParagraph: 1 }).caretParagraph, false);
+  assert.equal(sanitize({ caretParagraph: false }).caretParagraph, false);
+
+  assert.equal(sanitize({ caretParagraphColor: '#3F7FBF' }).caretParagraphColor, '#3f7fbf');
+  assert.equal(sanitize({ caretParagraphColor: '#ABC' }).caretParagraphColor, '#aabbcc');
+  assert.equal(sanitize({ caretParagraphColor: ' #abc ' }).caretParagraphColor, '#aabbcc');
+  assert.equal(sanitize({ caretParagraphColor: 'red' }).caretParagraphColor, '');
+  assert.equal(sanitize({ caretParagraphColor: '#12345' }).caretParagraphColor, '');
+  assert.equal(sanitize({ caretParagraphColor: null }).caretParagraphColor, '');
+});
+
+test('当前段落高亮（N10b）：按书覆盖能存开关 / 颜色，并与全局默认分开', async () => {
+  const dir = await mkTmp();
+  const store = createConfigStore(dir);
+
+  // 全局默认：打开 + 一个颜色
+  await store.set({ caretParagraph: true, caretParagraphColor: '#c8873c' });
+  let cfg = await store.get();
+  assert.equal(cfg.caretParagraph, true);
+  assert.equal(cfg.caretParagraphColor, '#c8873c');
+
+  // A 书：单独关掉 + 自定义颜色；B 书：不设置（沿用全局）
+  assert.deepEqual(await store.setBookDisplay('b_a', { caretParagraph: false, caretParagraphColor: '#3f7fbf' }), {
+    caretParagraph: false,
+    caretParagraphColor: '#3f7fbf'
+  });
+  assert.deepEqual(await store.getBookDisplay('b_b'), {});
+  assert.equal((await store.get()).caretParagraph, true, '按书覆盖不写回全局');
+
+  // 重启后仍在：A 书两项都在，B 书仍为空（= 回落全局）
+  const store2 = createConfigStore(dir);
+  assert.deepEqual(await store2.getBookDisplay('b_a'), {
+    caretParagraph: false,
+    caretParagraphColor: '#3f7fbf'
+  });
+  assert.deepEqual(await store2.getBookDisplay('b_b'), {});
+
+  // 只改开关不会冲掉颜色；把颜色清成 '' 仍是「有效的按书覆盖」（这本书回到主题色）
+  assert.deepEqual(await store2.setBookDisplay('b_a', { caretParagraph: true }), {
+    caretParagraph: true,
+    caretParagraphColor: '#3f7fbf'
+  });
+  assert.deepEqual(await store2.setBookDisplay('b_a', { caretParagraphColor: '' }), {
+    caretParagraph: true,
+    caretParagraphColor: ''
+  });
+
+  // 写坏的按书值被清洗：颜色回空、开关回 false，但这两个键本身仍作为覆盖保留
+  assert.deepEqual(await store2.setBookDisplay('b_c', { caretParagraph: 'yes', caretParagraphColor: 'blue' }), {
+    caretParagraph: false,
+    caretParagraphColor: ''
+  });
+
+  // 恢复本书默认：两项一起清掉，回全局
+  assert.equal(await store2.resetBookDisplay('b_a'), true);
+  assert.deepEqual(await store2.getBookDisplay('b_a'), {});
+  cfg = await createConfigStore(dir).get();
+  assert.equal(cfg.caretParagraph, true);
+  assert.equal(cfg.caretParagraphColor, '#c8873c');
+});
+
 test('导出目录记忆：默认空、去首尾空白、坏值回空', () => {
   assert.equal(sanitize({}).lastExportDir, '');
   assert.equal(sanitize({ lastExportDir: '  D:\\xxs  ' }).lastExportDir, 'D:\\xxs');
