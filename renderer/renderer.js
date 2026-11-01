@@ -45,6 +45,13 @@
   // 自定义字体的 base64 解码（代码审计 F11）：font-logic.js 里、Node 单测覆盖；
   // 优先浏览器原生 data: URL 解码，失败才回退 atob 循环。
   const fontLogic = window.CWFontLogic;
+  // 码字日历的纯逻辑（v0.9 B-6，代码精简 B6）：月份游标 / 翻月边界 / 网格计划 / 汇总文案都在
+  // stats-logic.js 里、Node 单测覆盖；这里只负责建 DOM。字数 / 时长格式化由本文件传进去
+  // （statsFormat），日历与书架用的是同一套口径。
+  const statsLogic = window.CWStatsLogic;
+  // 日历 / 统计文案用的格式化口径：就是本文件的 formatChars / formatDuration（函数声明会提升，
+  // 放在调用之前没问题）。stats-logic.js 自己不复制第二套格式，调用时把这对函数传进去。
+  const statsFormat = { formatChars, formatDuration };
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -3493,11 +3500,6 @@
     return state.stats;
   }
 
-  function statsTodayText(stats) {
-    const today = Math.max(0, Math.round(Number(stats && stats.todayChars) || 0));
-    return today > 0 ? `今天 +${formatChars(today)}` : '今天还没写字';
-  }
-
   function renderStatsUi() {
     const stats = state.stats;
     const shelf = $('shelf-stats');
@@ -3513,7 +3515,7 @@
     if (shelf) {
       shelf.classList.toggle('hidden', !stats);
       if (stats) {
-        $('shelf-stats-today').textContent = statsTodayText(stats);
+        $('shelf-stats-today').textContent = statsLogic.statsTodayText(stats, statsFormat);
         $('shelf-stats-goal').textContent = goal > 0 ? `目标 ${formatChars(goal)} · ${percent}%${met ? ' · 已达标' : ''}` : '';
         $('shelf-stats-goal').hidden = goal <= 0;
         $('shelf-goal-track').classList.toggle('hidden', goal <= 0);
@@ -3589,51 +3591,10 @@
 
   // ---------- 码字日历 / 连续写作天数 / 月度汇总（v0.8-1，提案 N1） ----------
   // 月视图由主进程从 stats.json 现算（只读，不另存文件）；渲染层只负责显示和翻月。
-  // 连续天数与「今天是哪个月」都以主进程 / 本机本地日期为准，不在这里重算。
-  function currentYearMonth() {
-    const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() + 1 };
-  }
-
-  function statsCalendarCursor() {
-    const view = state.calendar;
-    if (view && Number.isInteger(view.year) && Number.isInteger(view.month)) {
-      return { year: view.year, month: view.month };
-    }
-    return currentYearMonth();
-  }
-
-  function compareYearMonth(a, b) {
-    if (a.year !== b.year) return a.year - b.year;
-    return a.month - b.month;
-  }
-
-  function shiftYearMonth(cursor, delta) {
-    const date = new Date(cursor.year, cursor.month - 1 + Math.trunc(delta), 1, 12, 0, 0, 0);
-    return { year: date.getFullYear(), month: date.getMonth() + 1 };
-  }
-
-  function calendarStreakLabel(streak) {
-    const current = Math.max(0, Math.round(Number(streak && streak.current) || 0));
-    const best = Math.max(0, Math.round(Number(streak && streak.best) || 0));
-    if (best <= 0) return '还没有写作记录';
-    if (current > 0) return `已连续写作 ${current} 天 · 最长 ${best} 天`;
-    return `连续写作中断 · 最长 ${best} 天`;
-  }
-
+  // v0.9 B-6：月份游标、翻月边界、网格计划、汇总 / 连续天数文案都搬到 renderer/stats-logic.js，
+  // 这里只剩 DOM 与 IPC。calendarSummaryText 保留薄封装是因为测试钩子的 host 契约里还有这个名字。
   function calendarSummaryText(view) {
-    if (!view) return '';
-    const durationText = view.totalSeconds > 0 ? ` · 用时 ${formatDuration(view.totalSeconds)}` : '';
-    if (!view.writtenDays) {
-      const base = view.isCurrentMonth ? '本月还没有保存记录（保存一次后开始记录）' : '这个月没有保存记录';
-      return view.totalSeconds > 0 ? `${base}（计时 ${formatDuration(view.totalSeconds)}）` : base;
-    }
-    const goalText = view.goal > 0 ? ` · 达标 ${view.goalDays} 天` : '';
-    const bestText = view.bestDay
-      ? ` · 最高 ${view.bestDay.day.slice(5)}（${formatChars(view.bestDay.chars)}）`
-      : '';
-    const prefix = view.isCurrentMonth ? '本月' : `${view.month}月`;
-    return `${prefix} ${formatChars(view.total)} · 写了 ${view.writtenDays} 天 · 日均 ${formatChars(view.average)}${goalText}${bestText}${durationText}`;
+    return statsLogic.calendarSummaryText(view, statsFormat);
   }
 
   async function loadStatsCalendar(year, month) {
@@ -3651,18 +3612,15 @@
   }
 
   // 只允许往前 / 回到本月，不翻到未来（未来月份没有码字记录，翻过去只会看到空格子）。
+  // 边界判断（未来 / 1970 下限 / delta 为 0）在 stats-logic.js 的 shiftCalendarCursor 里，有单测。
   async function shiftStatsCalendar(delta) {
-    const step = Math.trunc(Number(delta));
-    if (!Number.isFinite(step) || step === 0) return false;
-    const next = shiftYearMonth(statsCalendarCursor(), step);
-    const now = currentYearMonth();
-    if (compareYearMonth(next, now) > 0) return false;
-    if (next.year < 1970) return false;
+    const next = statsLogic.shiftCalendarCursor(statsLogic.calendarCursor(state.calendar), delta);
+    if (!next) return false;
     return loadStatsCalendar(next.year, next.month);
   }
 
   async function goToCurrentCalendarMonth() {
-    const now = currentYearMonth();
+    const now = statsLogic.currentYearMonth();
     return loadStatsCalendar(now.year, now.month);
   }
 
@@ -3685,10 +3643,7 @@
     const todayBtn = $('calendar-today');
 
     if (weekdaysEl && weekdaysEl.childElementCount === 0) {
-      const labels = (view && Array.isArray(view.weekdayLabels) && view.weekdayLabels.length === 7)
-        ? view.weekdayLabels
-        : ['一', '二', '三', '四', '五', '六', '日'];
-      for (const text of labels) {
+      for (const text of statsLogic.weekdayLabels(view)) {
         const cell = document.createElement('span');
         cell.textContent = text;
         weekdaysEl.appendChild(cell);
@@ -3707,44 +3662,31 @@
     }
 
     if (labelEl) labelEl.textContent = view.label;
-    const current = currentYearMonth();
-    const isCurrent = view.year === current.year && view.month === current.month;
-    if (prevBtn) prevBtn.disabled = view.year <= 1970 && view.month <= 1;
-    if (nextBtn) nextBtn.disabled = isCurrent;
-    if (todayBtn) todayBtn.disabled = isCurrent;
+    const buttons = statsLogic.calendarButtons(view);
+    if (prevBtn) prevBtn.disabled = buttons.prevDisabled;
+    if (nextBtn) nextBtn.disabled = buttons.nextDisabled;
+    if (todayBtn) todayBtn.disabled = buttons.todayDisabled;
 
+    // 网格（月首空格 / 每天格子的 class + 悬停提示 + dataset / 月尾补空格）由纯逻辑算好，
+    // 这里只按计划建 DOM，不再自己算空格数和 class。
+    const plan = statsLogic.calendarCells(view, statsFormat);
     grid.innerHTML = '';
-    for (let i = 0; i < view.firstWeekday; i += 1) appendCalendarBlank(grid);
-    for (const item of view.days) {
+    for (let i = 0; i < plan.blanksBefore; i += 1) appendCalendarBlank(grid);
+    for (const item of plan.cells) {
       const cell = document.createElement('div');
-      cell.className = 'cal-day';
-      if (item.written) cell.classList.add('written', `lv${item.level}`);
-      if (item.goalMet) cell.classList.add('goal-met');
-      if (item.today) cell.classList.add('today');
-      if (item.future) cell.classList.add('future');
-      cell.dataset.day = item.day;
-      cell.dataset.chars = String(item.chars);
-      cell.dataset.seconds = String(item.seconds || 0);
-      cell.dataset.level = String(item.level);
-      cell.dataset.goalMet = item.goalMet ? '1' : '0';
+      cell.className = item.className;
+      for (const key of statsLogic.CELL_DATASET_KEYS) cell.dataset[key] = item.dataset[key];
       const num = document.createElement('span');
-      num.textContent = String(item.dayOfMonth);
+      num.textContent = item.dayOfMonth;
       cell.appendChild(num);
-      cell.title =
-        `${item.day} · ${item.chars > 0 ? formatChars(item.chars) : '没写'}` +
-        (item.seconds > 0 ? ` · 用时 ${formatDuration(item.seconds)}` : '') +
-        (item.goalMet ? ' · 已达标' : '') +
-        (item.today ? ' · 今天' : '') +
-        (item.future ? ' · 还没到' : '');
+      cell.title = item.title;
       grid.appendChild(cell);
     }
-    const filled = view.firstWeekday + view.days.length;
-    const tail = (7 - (filled % 7)) % 7;
-    for (let i = 0; i < tail; i += 1) appendCalendarBlank(grid);
+    for (let i = 0; i < plan.blanksAfter; i += 1) appendCalendarBlank(grid);
 
     if (summaryEl) summaryEl.textContent = calendarSummaryText(view);
     if (streakEl) {
-      streakEl.textContent = calendarStreakLabel(state.streak);
+      streakEl.textContent = statsLogic.calendarStreakLabel(state.streak);
       streakEl.classList.toggle('off', !(state.streak && state.streak.current > 0));
     }
   }
