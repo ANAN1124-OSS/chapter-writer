@@ -15,7 +15,8 @@ const groups = [
   require('./65-marks-lazy-spans'),
   require('./66-destructive-recovery'),
   require('./67-contrast-a11y'),
-  require('./68-dialog-focus')
+  require('./68-dialog-focus'),
+  require('./69-motion')
 ];
 
 module.exports = groups;

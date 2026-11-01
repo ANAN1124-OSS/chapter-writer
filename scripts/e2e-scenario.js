@@ -5485,6 +5485,10 @@ module.exports = async function runScenario(ctx) {
   const pfwSecondChapterRow = pfwBook.issues.findIndex((issue) => issue.chapterIndex === 1);
   await exec(`window.__cwTest.clickProofreadRow(${pfwSecondChapterRow})`);
   await waitFor("window.__cwTest.currentTitle().includes('续章')");
+  // 切章标题先变，选词是在 loadChapterAt 里那两步异步收尾（记上次打开章节 / 恢复查找书签）
+  // 之后才落下的：以前这里读完标题立刻读选区，偶发读到「光标还在末尾」的中间态。
+  // 等选区真的出现再断言（等不到照样红，断言本身一个字没改）。
+  await waitFor("window.__cwTest.selectionText() === '做为'", 5000);
   const pfwSecondSelection = {
     selection: await exec('window.__cwTest.selection()'),
     selectionText: await exec('window.__cwTest.selectionText()'),
@@ -6952,6 +6956,9 @@ module.exports = async function runScenario(ctx) {
   await exec(`window.__cwTest.clickSensitiveRow(${sensitiveNightIndex})`);
   await waitFor("window.__cwTest.currentTitle().includes('夜雨')");
   await waitFor('window.__cwTest.sensitivePanelOpen() === false');
+  // 同上（校对词表那一处）：标题与面板先到位，选词要等 loadChapterAt 的异步收尾，
+  // 等选区真的变成「暴力」再断言（等不到照样红）。实测改前读到的是选区还停在末尾的中间态（7,7）。
+  await waitFor("window.__cwTest.selectionText() === '暴力'", 5000);
   const sensitiveSecondSelection = {
     selection: await exec('window.__cwTest.selection()'),
     selectionText: await exec('window.__cwTest.selectionText()'),

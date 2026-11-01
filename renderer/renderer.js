@@ -345,8 +345,9 @@
       if (state.toastLog.length > 60) state.toastLog.shift();
     }
     setTimeout(() => {
-      el.style.opacity = '0';
-      el.style.transition = 'opacity .25s ease';
+      // 淡出（0.16s，与全界面动效同一档）与透明度都在 styles.css 的 .toast.leaving 里：
+      // 以前这里写死 .25s 的内联过渡，比别的动效慢一拍；内联简写里也不能写 var()（CSSOM 会丢）。
+      el.classList.add('leaving');
       setTimeout(() => el.remove(), 300);
     }, 3600);
   }
