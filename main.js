@@ -67,6 +67,7 @@ const updateLib = require('./core/update');
 const openBooksLib = require('./core/open-books');
 const fontPolicy = require('./core/font-policy');
 const securityPolicy = require('./core/security-policy');
+const ipcPaths = require('./core/ipc-paths');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -442,14 +443,10 @@ function handle(channel, fn) {
 
 // 书架相关的 IPC：第一个参数必须是「书架目录的直接子目录」，
 // 渲染层理论上不会传别的路径，但加一层校验，越权/手误都读不到书架以外的文件。
-function assertBookPath(bookPath, booksRoot) {
-  const root = path.resolve(String(booksRoot || ''));
-  const target = path.resolve(String(bookPath == null ? '' : bookPath));
-  if (path.dirname(target).toLowerCase() !== root.toLowerCase()) {
-    throw Object.assign(new Error('只能操作书架目录下的书'), { code: 'BAD_PATH' });
-  }
-  return target;
-}
+// 校验本身搬到 core/ipc-paths.js（纯逻辑，单测覆盖 `..` / 绝对路径 / 孙目录 / 空串），
+// 这里的名字保持不变：handleBook 与 window:open-book 照旧调用它（book:delete 另有一处
+// 自己的再校验，文案更具体：「只能删除书架目录下的书」）。
+const assertBookPath = ipcPaths.assertBookPath;
 
 // 只读文本类 IPC 的前置校验：渲染层传上来的正文必须是字符串（不读盘、只算文本）
 function assertText(text) {
@@ -1657,11 +1654,12 @@ function registerIpc() {
   }, { mutation: 'write' });
 
   handle('book:import', async (explicitPaths, options) => {
+    // 路径入口（v0.9 C-2）：导入目录的唯一正当来源是下面这个系统对话框。
+    // 渲染层如果自己传了目录，只有 automation（自检 / 截图）才认；生产环境一律拒（BAD_IMPORT_PATH），
+    // 免得被注入的脚本让主进程把任意文件夹（桌面 / 别的盘 / D:\我的小说）复制进书架。
+    let dirs = ipcPaths.importSourceDirs(explicitPaths, { allowExplicit: automation });
     const cfg = await getConfig();
     await fs.mkdir(cfg.booksRoot, { recursive: true });
-    let dirs = Array.isArray(explicitPaths)
-      ? explicitPaths.filter((p) => typeof p === 'string' && p.trim())
-      : [];
     if (!dirs.length) {
       const { canceled, filePaths } = await showOpenDialog({
         title: '导入小说（选择一个或多个书文件夹）',
