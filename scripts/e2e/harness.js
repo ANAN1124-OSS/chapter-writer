@@ -77,6 +77,16 @@ function createHarness(ctx) {
     }
   };
 
+  // 文件 / 目录存在与否（第 52 组「日志只写 userData\logs」这条断言要用；以前是场景里的局部函数）。
+  const fileExists = async (file) => {
+    try {
+      await fs.stat(file);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const deleteBookWithRetry = async (bookPath, attempts = 10) => {
     let last = null;
     for (let i = 0; i < attempts; i += 1) {
@@ -89,7 +99,7 @@ function createHarness(ctx) {
     return last;
   };
 
-  return { checks, check, waitFor, readLogs, waitForLog, deleteBookWithRetry, logDir, logNamePattern };
+  return { checks, check, waitFor, readLogs, waitForLog, deleteBookWithRetry, fileExists, logDir, logNamePattern };
 }
 
 module.exports = { createHarness };
