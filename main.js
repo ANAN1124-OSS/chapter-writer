@@ -34,12 +34,15 @@ if (userDataArg) {
 }
 
 const isE2E = process.argv.includes('--e2e');
+// 前端基准（v0.9 A-1）：和截图 / E2E 同一套自动化模式（临时 userData + 临时书库 + ?test=1
+// 测试钩子），只是驱动换成 scripts/bench-driver.js；正常启动路径完全不受影响。
+const isBench = process.argv.includes('--bench');
 const booksRootOverride = argValue('books-root');
 const screenshotPath = argValue('screenshot');
 const screenshotBook = argValue('book');
 const screenshotChapter = argValue('chapter');
 const screenshotDialog = argValue('dialog');
-const automation = isE2E || Boolean(screenshotPath);
+const automation = isE2E || isBench || Boolean(screenshotPath);
 
 const { createConfigStore } = require('./core/config');
 const { atomicWriteFile } = require('./core/atomic');
@@ -2201,6 +2204,11 @@ function automationHost() {
 
 async function runAutomation() {
   // 懒加载：只有自动化模式才需要这份驱动（scripts/ 不进安装包，生产启动路径不会 require）
+  if (isBench) {
+    const benchDriver = require('./scripts/bench-driver.js');
+    await benchDriver.run(automationHost());
+    return;
+  }
   const driver = require('./scripts/screenshot-driver.js');
   await driver.run(automationHost());
 }
