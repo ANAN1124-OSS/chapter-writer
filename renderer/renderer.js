@@ -9486,6 +9486,8 @@
   // ---------- 初始化 ----------
   async function init() {
     bindEvents();
+    // 弹层焦点管理（v0.9 A-5）：打开带焦点进来、Tab 不跑出弹层、关闭后还给背景
+    if (window.CWDialogFocus) window.CWDialogFocus.install();
     try {
       state.globalConfig = await call(api.getConfig);
       state.config = { ...state.globalConfig };

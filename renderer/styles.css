@@ -2627,3 +2627,20 @@ body.chapter-dragging * { user-select: none; }
   .statusbar { padding: 0 12px; }
   .status-hints { padding-left: 8px; gap: 4px; }
 }
+
+/* ---------- 减少动效（v0.9 A-5 无障碍）----------
+ * Windows「辅助功能 → 显示 → 在 Windows 中显示动画」关掉时，Chromium 会把
+ * prefers-reduced-motion 报成 reduce。界面里的悬停过渡、弹窗按钮动画、toast 滑入
+ * 都还在（各有 .1–.2s），对前庭敏感 / 需要读屏的用户是多余的干扰：这里统一压到
+ * 几乎瞬时（保留 0.01ms 而不是 0，避免个别浏览器把 0 当成「不写」）。
+ * 只改动效时长，不改颜色 / 布局 / 任何功能；日志、数据、保存一律不受影响。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

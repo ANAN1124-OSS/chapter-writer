@@ -5485,12 +5485,19 @@ module.exports = async function runScenario(ctx) {
   const pfwSecondChapterRow = pfwBook.issues.findIndex((issue) => issue.chapterIndex === 1);
   await exec(`window.__cwTest.clickProofreadRow(${pfwSecondChapterRow})`);
   await waitFor("window.__cwTest.currentTitle().includes('续章')");
+  const pfwSecondSelection = {
+    selection: await exec('window.__cwTest.selection()'),
+    selectionText: await exec('window.__cwTest.selectionText()'),
+    dirty: await exec('window.__cwTest.dirty()'),
+    text: (await exec('window.__cwTest.text()')).slice(0, 40)
+  };
   check(
     '校对词表：点第 2 章的命中会切章并选中那个词',
-    (await exec('window.__cwTest.selectionText()')) === '做为' &&
+    pfwSecondSelection.selectionText === '做为' &&
       (await exec('window.__cwTest.text()')) === pfwCh2 &&
-      (await exec('window.__cwTest.dirty()')) === false &&
-      (await storage.loadChapterText(pfwBookPath, pfwMetaBefore.chapters[1].file)).text === pfwCh2
+      pfwSecondSelection.dirty === false &&
+      (await storage.loadChapterText(pfwBookPath, pfwMetaBefore.chapters[1].file)).text === pfwCh2,
+    pfwSecondSelection
   );
 
   // 46i-4. 当前章未保存的内容也参与（只参与检查，不写盘）
@@ -6945,10 +6952,16 @@ module.exports = async function runScenario(ctx) {
   await exec(`window.__cwTest.clickSensitiveRow(${sensitiveNightIndex})`);
   await waitFor("window.__cwTest.currentTitle().includes('夜雨')");
   await waitFor('window.__cwTest.sensitivePanelOpen() === false');
+  const sensitiveSecondSelection = {
+    selection: await exec('window.__cwTest.selection()'),
+    selectionText: await exec('window.__cwTest.selectionText()'),
+    title: await exec('window.__cwTest.currentTitle()')
+  };
   check(
     '敏感词预检：点整本结果会切章并选中命中的词',
-    (await exec('window.__cwTest.selectionText()')) === '暴力' &&
-      (await exec('window.__cwTest.currentTitle()')).includes('夜雨')
+    sensitiveSecondSelection.selectionText === '暴力' &&
+      sensitiveSecondSelection.title.includes('夜雨'),
+    sensitiveSecondSelection
   );
 
   // 48d. 当前章未保存的内容参与检查，但绝不写盘
@@ -11540,7 +11553,11 @@ module.exports = async function runScenario(ctx) {
       storage,
       booksRoot,
       deleteBookWithRetry,
-      waitForLog
+      waitForLog,
+      // 键盘 / 焦点类断言要发**真实按键**（sendInputEvent）：渲染层 dispatch 的
+      // KeyboardEvent 走不到浏览器的默认 Tab 焦点遍历；按键之间还要留一拍再读 activeElement。
+      win,
+      sleep
     });
   }
 

@@ -14,7 +14,8 @@ const groups = [
   require('./64-data-safety'),
   require('./65-marks-lazy-spans'),
   require('./66-destructive-recovery'),
-  require('./67-contrast-a11y')
+  require('./67-contrast-a11y'),
+  require('./68-dialog-focus')
 ];
 
 module.exports = groups;
