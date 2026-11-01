@@ -12,6 +12,7 @@
 // 明确指定「在哪一段跑哪几组」，索引本身只负责登记与组号排序。
 const groups = [
   { id: 52, run: require('./52-crash-logs') },
+  { id: 53, run: require('./53-search-index') },
   { id: 60, run: require('./60-log-redaction') },
   { id: 61, run: require('./61-ipc-limits') },
   { id: 62, run: require('./62-common-tools') },
