@@ -44,9 +44,42 @@ module.exports = async function runScenario(ctx) {
         value = await exec(expr);
       } catch { /* 页面切换间隙可能短暂失败 */ }
       if (value) return value;
-      if (Date.now() - startedAt > timeout) throw new Error(`等待超时：${expr}`);
+      if (Date.now() - startedAt > timeout) {
+        // 超时带上一点现场（2026-11-01 v0.9 R0）：键盘 / 焦点类断言偶尔受窗口系统焦点影响，
+        // 只记 activeElement 与 document.hasFocus()，方便下次偶发失败时定位，不做任何补救动作。
+        let diag = '';
+        try {
+          diag = await exec(
+            'JSON.stringify({ activeId: document.activeElement && document.activeElement.id, hasFocus: document.hasFocus() })'
+          );
+        } catch { /* 页面刚好在切换，忽略 */ }
+        throw new Error(`等待超时：${expr}${diag ? `（现场：${diag}）` : ''}`);
+      }
       await sleep(120);
     }
+  };
+
+  // 场景开始时让自动化窗口拿一次系统焦点（2026-11-01 v0.9 R0）：
+  // Chromium 在窗口没有系统焦点时，元素 focus() 可能不派发 focus / focusin 事件，
+  // 会让「Tab 聚焦整理按钮出选择卡」这类键盘断言偶发超时（基线首跑实测 1 次，重跑即过）。
+  // 拿不到焦点也不中断（只 warn），避免把工作站锁屏等情况误判成功能回归。
+  const ensureWindowFocus = async () => {
+    try {
+      if (!win.isDestroyed()) {
+        win.show();
+        win.focus();
+        win.webContents.focus();
+      }
+    } catch { /* 窗口可能正在销毁 */ }
+    for (let i = 0; i < 10; i += 1) {
+      try {
+        if (await exec('document.hasFocus() === true')) return true;
+      } catch { /* 页面可能还没就绪 */ }
+      try { win.focus(); } catch { /* 忽略 */ }
+      await sleep(150);
+    }
+    console.warn('[e2e] 窗口拿不到系统焦点：键盘 / 焦点类断言可能不稳定（继续跑，不中断）');
+    return false;
   };
 
   const diskText = async (file) => {
@@ -124,6 +157,7 @@ module.exports = async function runScenario(ctx) {
   };
 
   await waitFor('Boolean(window.__cwTest && window.__cwTest.ready)');
+  await ensureWindowFocus();
 
   // 0. 界面版本号跟着 package.json 走（发版只改一处，避免界面还显示旧版本）
   check(
@@ -9005,6 +9039,9 @@ module.exports = async function runScenario(ctx) {
   check('整理交互：离开按钮与卡片后（短延迟）自动收起', (await exec('window.__cwTest.formatCardOpen()')) === false);
 
   // 键盘：Tab 聚焦「整理」按钮也出卡；Esc 收起
+  // 先 blur 再 focus：保证焦点确实发生「变化」（若按钮已经是 activeElement，focus() 是空操作，
+  // 不会派发 focusin，这里会白等到超时——2026-11-01 基线首跑偶发过一次）。
+  await exec('if (document.activeElement && document.activeElement.blur) document.activeElement.blur()');
   await exec("document.getElementById('btn-format').focus()");
   await waitFor('window.__cwTest.formatCardOpen() === true');
   check(
