@@ -776,7 +776,10 @@ async function replaceInBook(bookPath, options = {}) {
   const caseSensitive = Boolean(options.caseSensitive);
   if (!query.trim()) throw new StorageError('EMPTY_QUERY', '查找内容不能为空');
   const meta = await readBookMeta(bookPath);
-  const backupDir = path.join(bookPath, TRASH_DIR, `替换备份-${timestampForFile()}`);
+  // 备份目录名带时间戳（精确到秒），同一秒内连做两次整本替换会撞名：老实现直接复用同名目录，
+  // 第二次的「替换前原文」会盖掉第一次的，还原时就变成「两次替换的混合状态」——那在书里从未存在过。
+  // 所以和「整理备份 / 还原前备份」一样走 uniqueTrashDir，撞名自动加 -2、-3（没撞名时名字和以前完全一样）。
+  let backupDir = null;
   let chaptersChanged = 0;
   let occurrences = 0;
   let backupCreated = false;
@@ -786,6 +789,7 @@ async function replaceInBook(bookPath, options = {}) {
     const res = findLib.replaceAllLiteral(loaded.text, query, replacement, { caseSensitive });
     if (!res.count) continue;
     if (!backupCreated) {
+      backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), REPLACE_BACKUP_PREFIX);
       await ensureDir(backupDir);
       backupCreated = true;
     }
