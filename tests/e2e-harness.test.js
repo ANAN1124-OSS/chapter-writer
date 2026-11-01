@@ -202,7 +202,8 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），顺序
     '66-destructive-recovery',
     '67-contrast-a11y',
     '68-dialog-focus',
-    '69-motion'
+    '69-motion',
+    '70-a11y-keyboard'
   ]);
 });
 

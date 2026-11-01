@@ -277,8 +277,8 @@
 
   <!-- ============ 查找替换 ============ -->
   <div id="find-backdrop" class="backdrop hidden">
-    <div class="modal find-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">查找替换</h2>
+    <div class="modal find-modal" role="dialog" aria-modal="true" aria-labelledby="find-title">
+      <h2 class="modal-title" id="find-title">查找替换</h2>
       <div class="find-row">
         <input id="find-query" class="text-input" type="text" placeholder="要查找的内容（字面量，不是正则）" />
         <label class="check-row inline"><input type="checkbox" id="find-case" /> 区分大小写</label>
@@ -339,8 +339,8 @@
 
   <!-- ============ 校对（只报告，不改动） ============ -->
   <div id="proofread-backdrop" class="backdrop hidden">
-    <div class="modal proofread-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">校对</h2>
+    <div class="modal proofread-modal" role="dialog" aria-modal="true" aria-labelledby="proofread-title">
+      <h2 class="modal-title" id="proofread-title">校对</h2>
       <p class="modal-message">
         只把可疑的地方列出来，<strong>不改正文、不写盘</strong>：半角标点残留、超长段落、
         同一个双字词在短距离内反复出现、连续标点、多余空行，以及<strong>你自己的校对词表</strong>
@@ -381,8 +381,8 @@
 
   <!-- ============ 敏感词预检（只报告，不改动；词表归作者管理） ============ -->
   <div id="sensitive-backdrop" class="backdrop hidden">
-    <div class="modal proofread-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">敏感词预检</h2>
+    <div class="modal proofread-modal" role="dialog" aria-modal="true" aria-labelledby="sensitive-title">
+      <h2 class="modal-title" id="sensitive-title">敏感词预检</h2>
       <p class="modal-message">
         只按<strong>你自己的词表</strong>检查，<strong>应用不内置任何词表</strong>；把命中的位置列出来，
         <strong>不改正文、不写盘</strong>。要不要改、怎么改都由你自己决定。
@@ -417,7 +417,7 @@
 
   <!-- ============ 导出范围 ============ -->
   <div id="export-backdrop" class="backdrop hidden">
-    <div class="modal export-modal" role="dialog" aria-modal="true">
+    <div class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
       <h2 class="modal-title" id="export-title">导出 TXT</h2>
       <div class="export-scroll">
         <p class="modal-message" id="export-message">
@@ -457,8 +457,8 @@
 
   <!-- ============ 跳章（Ctrl+G） ============ -->
   <div id="jump-backdrop" class="backdrop hidden">
-    <div class="modal jump-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">跳到哪一章</h2>
+    <div class="modal jump-modal" role="dialog" aria-modal="true" aria-labelledby="jump-title">
+      <h2 class="modal-title" id="jump-title">跳到哪一章</h2>
       <p class="modal-message">
         输入章号（如 12、第12章）或章名的一部分，回车跳到那一章。跳章只切换当前章节，不改正文；有未保存内容时会照常先问你。
       </p>
@@ -474,8 +474,8 @@
 
   <!-- ============ 同步冲突副本提示 ============ -->
   <div id="conflict-backdrop" class="backdrop hidden">
-    <div class="modal conflict-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">检测到同步冲突副本</h2>
+    <div class="modal conflict-modal" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
+      <h2 class="modal-title" id="conflict-title">检测到同步冲突副本</h2>
       <p class="modal-message">
         这本书的文件夹里有同步盘（OneDrive / 坚果云等）生成的冲突副本。写作器<strong>不会自动合并</strong>，也不会改动或删除这些文件。
         请点「打开书文件夹」，对比后把要保留的内容合并回原章节，再把多余的副本移走。
@@ -492,8 +492,8 @@
 
   <!-- ============ 书籍信息（作者 / 简介 / 分组 / 标签，v0.8-3） ============ -->
   <div id="bookinfo-backdrop" class="backdrop hidden">
-    <div class="modal bookinfo-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">书籍信息</h2>
+    <div class="modal bookinfo-modal" role="dialog" aria-modal="true" aria-labelledby="bookinfo-title">
+      <h2 class="modal-title" id="bookinfo-title">书籍信息</h2>
       <p class="modal-message">
         作者 / 简介 / 分组 / 标签只写进这本书的 <code>书目.json</code>（可选字段、纯文本）：不会改书文件夹名，也不会动任何章节 txt。旧书没有这些字段照常打开。
       </p>
@@ -527,7 +527,7 @@
 
   <!-- ============ 本书历史（_trash 备份） ============ -->
   <div id="history-backdrop" class="backdrop hidden">
-    <div class="modal history-modal" role="dialog" aria-modal="true">
+    <div class="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
       <h2 class="modal-title" id="history-title">本书历史</h2>
       <p class="modal-message">
         这里统一列出书内 <code>_trash</code> 里的备份：整本替换、整本整理、还原前备份、删除的章节，以及书文件夹里的上一版书目。
@@ -556,8 +556,8 @@
 
   <!-- ============ 灵感箱：记一条碎片 ============ -->
   <div id="fragment-backdrop" class="backdrop hidden">
-    <div class="modal fragment-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">记一条碎片</h2>
+    <div class="modal fragment-modal" role="dialog" aria-modal="true" aria-labelledby="fragment-title">
+      <h2 class="modal-title" id="fragment-title">记一条碎片</h2>
       <p class="modal-message">
         灵感先记下来，不用新建一章。内容会原样存成书架根目录 <code>_碎片</code> 文件夹里的一个普通 txt
         （文件名按当天日期编号，不会覆盖以前的碎片）；资源管理器里直接能看到，也能用记事本打开。
@@ -577,8 +577,8 @@
 
   <!-- ============ 灵感箱：插入碎片 ============ -->
   <div id="fragments-backdrop" class="backdrop hidden">
-    <div class="modal insert-fragment-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">插入碎片</h2>
+    <div class="modal insert-fragment-modal" role="dialog" aria-modal="true" aria-labelledby="fragments-title">
+      <h2 class="modal-title" id="fragments-title">插入碎片</h2>
       <p class="modal-message">
         选一条碎片插到光标处：只改编辑区（仍是未保存，Ctrl+S 才写盘），<strong>不会删除原碎片文件</strong>。
         想先记一条新的，回书架点「＋ 碎片」。
@@ -606,7 +606,7 @@
 
   <!-- ============ 通用模态 ============ -->
   <div id="modal-backdrop" class="backdrop hidden">
-    <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <h2 id="modal-title" class="modal-title"></h2>
       <p id="modal-message" class="modal-message"></p>
       <input id="modal-input" class="modal-input hidden" type="text" />
@@ -616,8 +616,8 @@
 
   <!-- ============ 排版：整理本章 ============ -->
   <div id="format-backdrop" class="backdrop hidden">
-    <div class="modal format-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">智能排版 · 仅当前章</h2>
+    <div class="modal format-modal" role="dialog" aria-modal="true" aria-labelledby="format-title">
+      <h2 class="modal-title" id="format-title">智能排版 · 仅当前章</h2>
       <div class="format-scroll">
         <p class="modal-message">
           只处理当前这一章，不改章名、不碰别的章。结果先放进编辑区，仍是「未保存」：Ctrl+S 才写盘，Ctrl+Z 或「排版 → 撤销上次整理」可退回。
@@ -662,8 +662,8 @@
 
   <!-- ============ 设置 ============ -->
   <div id="settings-backdrop" class="backdrop hidden">
-    <div class="modal settings-modal" role="dialog" aria-modal="true">
-      <h2 class="modal-title">设置</h2>
+    <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <h2 class="modal-title" id="settings-title">设置</h2>
       <div class="settings-scroll">
       <p class="settings-scope-hint muted small" id="settings-scope-hint"></p>
       <label class="field" id="settings-root-field">
@@ -973,6 +973,7 @@
   <script src="save-logic.js"></script>
   <script src="font-logic.js"></script>
   <script src="stats-logic.js"></script>
+  <script src="list-keyboard.js"></script>
   <script src="dialog-focus.js"></script>
 <script src="renderer.js"></script>
 </body>

@@ -49,6 +49,9 @@
   // stats-logic.js 里、Node 单测覆盖；这里只负责建 DOM。字数 / 时长格式化由本文件传进去
   // （statsFormat），日历与书架用的是同一套口径。
   const statsLogic = window.CWStatsLogic;
+  // 键盘可达（v0.9 A-5b）：章节列表 / 书架书卡的 roving tabindex + Enter / 空格 / 方向键，
+  // 纯逻辑在 list-keyboard.js 里、Node 单测覆盖；这里只接线（不碰鼠标行为）。
+  const listKeyboard = window.CWListKeyboard;
   // 日历 / 统计文案用的格式化口径：就是本文件的 formatChars / formatDuration（函数声明会提升，
   // 放在调用之前没问题）。stats-logic.js 自己不复制第二套格式，调用时把这对函数传进去。
   const statsFormat = { formatChars, formatDuration };
@@ -1228,6 +1231,11 @@
         (conflictCount ? ' has-conflict' : '');
       card.dataset.path = book.path;
       card.dataset.folder = book.folder;
+      // 键盘可达（v0.9 A-5b）：整张书卡可 Tab 到、Enter / 空格打开这本书；「⋯」自己的
+      // Enter / 空格仍走它自己的点击，不被卡片抢。
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `打开《${book.title}》`);
 
       const title = document.createElement('div');
       title.className = 'book-card-title';
@@ -1780,6 +1788,11 @@
       .filter(Boolean)
       .join('\n');
     item.title = `单击切换；双击重命名；右键更多\n${tip}`;
+    // 键盘可达（v0.9 A-5b）：章节条目本身可 Tab 到、Enter / 空格切章；整张列表只有当前章
+    // 是 Tab 停留点（roving tabindex），方向键在列表内移焦点——1000 章不会变成 1000 个 Tab 站。
+    item.tabIndex = index === state.index ? 0 : -1;
+    item.setAttribute('role', 'button');
+    item.setAttribute('aria-label', `打开${chapterTitle(index, chapter.name)}`);
 
     const dot = document.createElement('span');
     dot.className = 'chapter-status-dot';
@@ -1860,6 +1873,8 @@
       }
     }
     list.replaceChildren(frag);
+    // 当前章在折叠的卷里时列表里一条 tabIndex 0 都没有：给第一个条目补一个 Tab 停留点
+    listKeyboard.ensureTabStop(list, '.chapter-item');
     const active = list.querySelector('.chapter-item.active');
     if (active) active.scrollIntoView({ block: 'nearest' });
   }
@@ -1898,9 +1913,13 @@
       return;
     }
     const previous = list.querySelector('.chapter-item.active');
-    if (previous && previous !== next) previous.classList.remove('active', 'dirty');
+    if (previous && previous !== next) {
+      previous.classList.remove('active', 'dirty');
+      previous.tabIndex = -1;
+    }
     next.classList.add('active');
     next.classList.toggle('dirty', Boolean(state.dirty));
+    next.tabIndex = 0; // roving tabindex：Tab 停留点跟着当前章走（v0.9 A-5b）
     next.scrollIntoView({ block: 'nearest' });
   }
 
@@ -9489,6 +9508,23 @@
     bindEvents();
     // 弹层焦点管理（v0.9 A-5）：打开带焦点进来、Tab 不跑出弹层、关闭后还给背景
     if (window.CWDialogFocus) window.CWDialogFocus.install();
+    // 键盘可达（v0.9 A-5b）：章节列表方向键 + Enter / 空格切章；书卡 Enter / 空格打开。
+    // 只挂容器上的 keydown（事件委托），不碰 click / 双击 / 右键 / 拖拽。
+    listKeyboard.install({
+      container: $('chapter-list'),
+      itemSelector: '.chapter-item',
+      arrows: true,
+      onActivate: (item) => switchChapter(Number(item.dataset.index))
+    });
+    listKeyboard.install({
+      container: $('book-grid'),
+      // 只认真正的书卡：同一张网格里还有「＋ 新建一本书」，那是原生 <button>，
+      // 它自己的 Enter / 空格照旧走 click（不能让卡片拦掉）。
+      itemSelector: '.book-card[data-path]',
+      onActivate: (card) => {
+        if (card.dataset.path) openBookByPath(card.dataset.path);
+      }
+    });
     try {
       state.globalConfig = await call(api.getConfig);
       state.config = { ...state.globalConfig };
