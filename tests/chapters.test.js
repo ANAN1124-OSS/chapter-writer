@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const ch = require('../core/chapters');
 
 test('formatTitle：章号按数组下标现算，不在数据里存 N', () => {
@@ -21,6 +24,53 @@ test('formatTitle：原文自带章节标题原样显示，不叠加「第N章�
 test('formatTitle：支持自定义模板', () => {
   const meta = { titleTemplate: 'Chapter {num} - {name}' };
   assert.equal(ch.formatTitle(meta, 2, '起风'), 'Chapter 3 - 起风');
+});
+
+test('formatTitle：自定义模板下原文标题 / 空名仍按 core 口径，坏模板回落默认', () => {
+  const meta = { titleTemplate: 'Chapter {num} - {name}' };
+  // 原文自带标题永远原样显示（哪怕书目写了自定义模板），避免「Chapter 3 - 第3章 …」重复
+  assert.equal(ch.formatTitle(meta, 0, '第1章 关于本作品'), '第1章 关于本作品');
+  assert.equal(ch.formatTitle(meta, 3, '楔子'), '楔子');
+  // 空名无论模板怎么写都只显示「第N章」（渲染层章节列表也走这条，不再补「未命名」）
+  assert.equal(ch.formatTitle(meta, 4, '  '), '第5章');
+  assert.equal(ch.formatTitle(meta, 4, null), '第5章');
+  // 模板只有空白 / 不是字符串 = 用默认模板
+  assert.equal(ch.formatTitle({ titleTemplate: '   ' }, 1, '夜雨'), '第2章：夜雨');
+  assert.equal(ch.formatTitle({ titleTemplate: 123 }, 1, '夜雨'), '第2章：夜雨');
+  // 模板里没有 {name}：界面与导出都只出章号，不偷偷补名字
+  assert.equal(ch.formatTitle({ titleTemplate: '第{num}节' }, 2, '起风'), '第3节');
+  // 重复占位符全部展开；不认识的占位符原样保留
+  assert.equal(
+    ch.formatTitle({ titleTemplate: '{num}-{num} {name}{unknown}' }, 0, '起风'),
+    '1-1 起风{unknown}'
+  );
+});
+
+test('UMD：Node require 行为不变，浏览器加载挂到 window.CWChapters', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'core', 'chapters.js'), 'utf8');
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox, { filename: 'core/chapters.js' });
+  const browserCh = sandbox.CWChapters;
+  assert.equal(typeof browserCh, 'object');
+  assert.equal(typeof browserCh.formatTitle, 'function');
+  // 浏览器里的实现与 Node require 的是同一套 API（导出名一个不少、顺序无关）
+  assert.deepEqual(Object.keys(browserCh).sort(), Object.keys(ch).sort());
+  assert.equal(browserCh.TITLE_TEMPLATE, '第{num}章：{name}');
+  // 渲染层真正用到的标题规则逐项与 Node 侧一致（自定义模板 / 原文标题 / 空名）
+  const meta = { titleTemplate: 'Chapter {num} - {name}' };
+  for (const [index, name] of [
+    [0, '起风'],
+    [1, '第2章 旧标题'],
+    [2, ''],
+    [3, null],
+    [4, '  ']
+  ]) {
+    assert.equal(browserCh.formatTitle(meta, index, name), ch.formatTitle(meta, index, name));
+    assert.equal(browserCh.formatTitle(null, index, name), ch.formatTitle(null, index, name));
+  }
+  // 浏览器分支不污染 Node 模块（同一个文件被两边加载，各拿各的实例）
+  assert.equal(typeof ch.formatTitle, 'function');
 });
 
 test('插入章节后，后面所有章号自动顺延（顺序即编号）', () => {

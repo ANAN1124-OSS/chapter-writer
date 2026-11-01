@@ -8,6 +8,10 @@
   const api = window.api;
   const $ = (id) => document.getElementById(id);
   const editorEl = $('editor');
+  // 章节标题 / 编号 / 文件名净化 / 分卷等纯逻辑，core/chapters.js 里、Node 单测覆盖；
+  // UMD 加载后挂成 window.CWChapters，渲染层不再自己复制一套「第N章：」规则
+  // （v0.8.6 R3，代码审计 F6：以前界面不认书目里的 titleTemplate，和导出 / 复制不一致）。
+  const chaptersLib = window.CWChapters;
   // 编辑器小件的纯逻辑（选中字数 / 段落导航 / 超长段落 / 不可见字符 / 章节字数对比），
   // 在 editor-logic.js 里、Node 单测覆盖；这里只负责显示和事件。
   const editorLogic = window.CWEditorLogic;
@@ -91,16 +95,23 @@
     return String(text == null ? '' : text).replace(/\s/g, '').length;
   }
 
-  // 章节标题显示规则（与 core/chapters.js 的 formatTitle 保持一致）：
-  // 原文自带章节标题（第1章 / 楔子 / Chapter N…）原样显示；没有名字显示「第N章」；其余显示「第N章：名字」
-  const RAW_TITLE_RE =
-    /^(?:第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部话幕]|楔子|序章|序言|引子|前言|前传|外传|尾声|后记|番外|终章|大结局|附录|开篇|Chapter\s+\d+)/i;
-
+  // 章节标题显示名：全部交给 core/chapters.js 的 formatTitle（原文自带标题原样显示、
+  // 空名回退「第N章」、书目里的自定义 titleTemplate 也生效）。这里只做薄封装，
+  // 不再本地复制 RAW_TITLE_RE / 「第N章：」规则——以前注释说「与 core 一致」其实是两套。
   function chapterTitle(index, name) {
+    return chaptersLib.formatTitle(state.meta, index, name);
+  }
+
+  // 章节列表是「序号格 + 章名格」两段：能按 formatTitle 的结果拆出章名就拆（默认模板
+  // 「第N章：名字」），拆不出来（原文自带标题 / 空名 / 模板不含 {name}）就整段放进章名格。
+  // 两格拼起来必须与标题栏一字不差；空名章和 core 一样只显示「第N章」，不再补「未命名」。
+  function chapterListLabel(index, name) {
+    const title = chapterTitle(index, name);
     const clean = String(name == null ? '' : name).trim();
-    if (clean && RAW_TITLE_RE.test(clean)) return clean;
-    if (!clean) return `第${index + 1}章`;
-    return `第${index + 1}章：${clean}`;
+    if (clean && title.length > clean.length && title.endsWith(clean)) {
+      return { num: title.slice(0, title.length - clean.length), name: clean };
+    }
+    return { num: '', name: title };
   }
 
   // 章节状态 / 备注（与 core/chapters.js 的清洗规则保持一致）：只存在 书目.json 里，不动正文。
@@ -1733,6 +1744,7 @@
     const chars = chapterCharsOf(chapter);
     const previousChars = index > 0 ? chapterCharsOf(state.chapters[index - 1]) : null;
     const comparison = chars != null ? editorLogic.compareChapterChars(chars, previousChars) : null;
+    const label = chapterListLabel(index, chapter.name);
     const item = document.createElement('div');
     item.className = `chapter-item status-${status}` + (index === state.index ? ' active' : '');
     if (index === state.index && state.dirty) item.classList.add('dirty');
@@ -1754,11 +1766,11 @@
 
     const num = document.createElement('span');
     num.className = 'chapter-num';
-    num.textContent = `第${index + 1}章`;
+    num.textContent = label.num;
 
     const name = document.createElement('span');
     name.className = 'chapter-name';
-    name.textContent = String(chapter.name || '').trim() || '未命名';
+    name.textContent = label.name;
 
     item.appendChild(dot);
     item.appendChild(num);
@@ -4319,7 +4331,7 @@
       name = await promptText({
         title: appending ? '新建章节' : '插入章节',
         message:
-          '输入章节名，可留空（显示为「未命名」）。章号由顺序自动生成，不用自己写。' +
+          '输入章节名，可留空（只显示章号）。章号由顺序自动生成，不用自己写。' +
           (volumeId ? `\n新章会放进「${volumeDisplayName(volumeId)}」。` : ''),
         placeholder: '例如：夜雨'
       });
@@ -9245,6 +9257,13 @@
         testVerifyBook = typeof fn === 'function' ? fn : null;
       },
       chapterTitles: () => state.chapters.map((c, i) => chapterTitle(i, c.name)),
+      // 章节列表 DOM 里真正显示的两格拼起来（序号格 + 章名格），E2E 用它对照 core.formatTitle
+      chapterListLabels: () =>
+        Array.from(document.querySelectorAll('#chapter-list .chapter-item')).map((item) => {
+          const num = item.querySelector('.chapter-num');
+          const name = item.querySelector('.chapter-name');
+          return `${num ? num.textContent : ''}${name ? name.textContent : ''}`;
+        }),
       chapterNames: () => state.chapters.map((c) => c.name),
       chapterFiles: () => state.chapters.map((c) => c.file),
       // 章节状态 / 备注

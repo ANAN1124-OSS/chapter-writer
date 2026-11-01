@@ -10540,6 +10540,143 @@ module.exports = async function runScenario(ctx) {
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
 
+  // 54h. 章节标题统一（v0.8.6 R3，代码审计 F6）：标题栏 / 章节列表不再自己拼「第N章：」，
+  //      统一走 core/chapters.js 的 formatTitle（UMD 后渲染层也能加载）。原来渲染层不认
+  //      书目里的 titleTemplate，同一章在界面和导出 / 复制里会不一样；这里造一本临时书，
+  //      分别按默认模板和自定义模板打开，逐章对照界面标题 / 章节列表与 core。
+  const titleBook = await storage.createBook(booksRoot, '标题统一测试书');
+  const titleBookPath = titleBook.path;
+  const titleDefs = [
+    { name: '起风', text: '风从海面吹来。' },
+    { name: '第1章 关于本作品', text: '原文自带标题的章。' },
+    { name: '', text: '没有章名的章。' },
+    { name: '夜雨', text: '雨下了一夜。' }
+  ];
+  for (let i = 1; i < titleDefs.length; i += 1) {
+    await storage.createChapter(titleBookPath, i, titleDefs[i].name);
+  }
+  let titleMeta = await storage.readBookMeta(titleBookPath);
+  for (let i = 0; i < titleDefs.length; i += 1) {
+    const chapter = titleMeta.chapters[i];
+    chapter.name = titleDefs[i].name;
+    await storage.saveChapterText(titleBookPath, chapter.file, titleDefs[i].text);
+    chapter.chars = chaptersLib.countChars(titleDefs[i].text);
+  }
+  await storage.writeBookMeta(titleBookPath, titleMeta);
+  titleMeta = await storage.readBookMeta(titleBookPath);
+  const titleExpected = (meta) =>
+    meta.chapters.map((chapter, index) => chaptersLib.formatTitle(meta, index, chapter.name));
+  const titleFilesBefore = (await fs.readdir(titleBookPath)).sort().join('|');
+  const titleTxtBefore = {};
+  for (const chapter of titleMeta.chapters) {
+    titleTxtBefore[chapter.file] = await fs.readFile(path.join(titleBookPath, chapter.file), 'utf8');
+  }
+
+  // 默认模板：普通章「第1章：起风」、原文标题原样、空名「第3章」；界面三处（API / 标题栏 / 列表）一致
+  const titleDefaultExpected = titleExpected(titleMeta);
+  check(
+    '标题统一：默认模板下 core 的标题形态符合预期（普通 / 原文标题 / 空名）',
+    JSON.stringify(titleDefaultExpected) ===
+      JSON.stringify(['第1章：起风', '第1章 关于本作品', '第3章', '第4章：夜雨']),
+    titleDefaultExpected
+  );
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(titleBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const titleDefaultUi = await exec('window.__cwTest.chapterTitles()');
+  check(
+    '标题统一：默认模板下界面章节标题与 core.formatTitle 逐项一致',
+    JSON.stringify(titleDefaultUi) === JSON.stringify(titleDefaultExpected),
+    { ui: titleDefaultUi, core: titleDefaultExpected }
+  );
+  check(
+    '标题统一：默认模板下标题栏就是 core 的「第1章：起风」',
+    (await exec('window.__cwTest.currentTitle()')) === titleDefaultExpected[0]
+  );
+  const titleDefaultList = await exec('window.__cwTest.chapterListLabels()');
+  check(
+    '标题统一：默认模板下章节列表两格拼起来与 core / 标题栏一字不差',
+    JSON.stringify(titleDefaultList) === JSON.stringify(titleDefaultExpected),
+    { list: titleDefaultList, core: titleDefaultExpected }
+  );
+  const titleDefaultParts = await exec(`(() => Array.from(document.querySelectorAll('#chapter-list .chapter-item')).map((item) => ({
+    num: item.querySelector('.chapter-num').textContent,
+    name: item.querySelector('.chapter-name').textContent
+  })))()`);
+  check(
+    '标题统一：默认模板下列表按「第N章：」+ 名字两段显示，空名章只显示章号、不再补「未命名」',
+    titleDefaultParts[0].num === '第1章：' &&
+      titleDefaultParts[0].name === '起风' &&
+      titleDefaultParts[1].num === '' &&
+      titleDefaultParts[1].name === '第1章 关于本作品' &&
+      titleDefaultParts[2].num === '' &&
+      titleDefaultParts[2].name === '第3章' &&
+      titleDefaultParts[3].num === '第4章：' &&
+      titleDefaultParts[3].name === '夜雨',
+    titleDefaultParts
+  );
+  await exec("window.__cwTest.switchTo(1, 'discard')");
+  check(
+    '标题统一：切到原文自带标题的章，标题栏原样显示、不叠加章号',
+    (await exec('window.__cwTest.currentTitle()')) === '第1章 关于本作品'
+  );
+  await exec("window.__cwTest.switchTo(2, 'discard')");
+  check(
+    '标题统一：切到空名章，标题栏只显示「第3章」（与 core / 列表一致）',
+    (await exec('window.__cwTest.currentTitle()')) === '第3章'
+  );
+  await exec("window.__cwTest.switchTo(3, 'discard')");
+
+  // 自定义 titleTemplate：以前只有 TXT / EPUB / DOCX 导出与「复制本章」认模板，界面不认
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  titleMeta = await storage.readBookMeta(titleBookPath);
+  await storage.writeBookMeta(titleBookPath, { ...titleMeta, titleTemplate: 'Chapter {num} - {name}' });
+  const titleCustomMeta = await storage.readBookMeta(titleBookPath);
+  const titleCustomExpected = titleExpected(titleCustomMeta);
+  check(
+    '标题统一：自定义 titleTemplate 下 core 的标题正确（原文标题 / 空名仍按 core 口径）',
+    JSON.stringify(titleCustomExpected) ===
+      JSON.stringify(['Chapter 1 - 起风', '第1章 关于本作品', '第3章', 'Chapter 4 - 夜雨']),
+    titleCustomExpected
+  );
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(titleBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const titleCustomUi = await exec('window.__cwTest.chapterTitles()');
+  const titleCustomList = await exec('window.__cwTest.chapterListLabels()');
+  check(
+    '标题统一：自定义 titleTemplate 下界面标题 / 章节列表都跟 core 一致（以前只有导出认模板）',
+    JSON.stringify(titleCustomUi) === JSON.stringify(titleCustomExpected) &&
+      JSON.stringify(titleCustomList) === JSON.stringify(titleCustomExpected),
+    { ui: titleCustomUi, list: titleCustomList, core: titleCustomExpected }
+  );
+  // 重新打开会回到上次那章（上面刚切到第 4 章），先切回第 1 章再验标题栏
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  check(
+    '标题统一：自定义 titleTemplate 下第 1 章标题栏是「Chapter 1 - 起风」（界面认模板、不再写死「第N章：」）',
+    (await exec('window.__cwTest.currentTitle()')) === titleCustomExpected[0],
+    await exec('window.__cwTest.currentTitle()')
+  );
+  await exec("window.__cwTest.switchTo(3, 'discard')");
+  check(
+    '标题统一：自定义 titleTemplate 下切到第 4 章，标题栏跟着变「Chapter 4 - 夜雨」',
+    (await exec('window.__cwTest.currentTitle()')) === titleCustomExpected[3]
+  );
+  const titleMetaAfterUi = await storage.readBookMeta(titleBookPath);
+  const titleFilesAfter = (await fs.readdir(titleBookPath)).sort().join('|');
+  const titleTxtAfter = {};
+  for (const chapter of titleMetaAfterUi.chapters) {
+    titleTxtAfter[chapter.file] = await fs.readFile(path.join(titleBookPath, chapter.file), 'utf8');
+  }
+  check(
+    '标题统一：打开书 / 切章只改书目的 lastOpenChapterId——书目录文件列表与四章 txt 逐字节不变',
+    titleFilesAfter === titleFilesBefore &&
+      JSON.stringify(titleTxtAfter) === JSON.stringify(titleTxtBefore) &&
+      titleMetaAfterUi.titleTemplate === 'Chapter {num} - {name}',
+    { titleFilesAfter, titleFilesBefore }
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+
   // 55. 多窗口（提案 7.2，作者 2026-11-01 03:45 拍板）：
   //     书卡右键「在新窗口打开」/ 禁止同书双开 / 跨窗口删改拦截 / 各自编辑保存 /
   //     关一个窗口不退出、最后窗口关闭才退出 / 各自未保存拦截 / 继续上次写作 /
