@@ -101,6 +101,9 @@ contextBridge.exposeInMainWorld('api', {
 
   getConfig: () => invoke('config:get'),
   setConfig: (patch) => invoke('config:set', patch),
+  // 仅自检：模拟「在系统对话框里选中了书架目录 / 词表路径」，生产环境主进程不会注册这个频道。
+  // 参数顺序与主进程一致：路径在前、字段名在后（静态闸门盯第一参数）。
+  testPickConfigPath: (pickedPath, field) => invoke('config:test-pick', pickedPath, field),
   getStats: () => invoke('stats:get'),
   // 码字日历：只读某个月的每日字数（year/month 由渲染层传，主进程清洗），不写盘
   getStatsCalendar: (calendar) => invoke('stats:calendar', calendar),

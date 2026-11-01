@@ -9935,10 +9935,16 @@
         row.click();
         return true;
       },
-      // 测试用：直接把词表路径写进配置（正常流程走系统对话框选文件，E2E 没法点原生对话框）
+      // 测试用：直接把词表路径写进配置（正常流程走系统对话框选文件，E2E 没法点原生对话框）。
+      // v0.9 C-2b：config:set 只认「对话框刚选中的值」，所以先让主进程记一次「模拟选中」，
+      // 再照常保存 —— 这样 E2E 走的是生产同一条校验链，而不是绕过它。
       async setSensitiveWordsPath(wordPath) {
+        const target = String(wordPath == null ? '' : wordPath);
+        if (api.testPickConfigPath) {
+          await call(api.testPickConfigPath, target, 'sensitiveWordsPath').catch(() => null);
+        }
         const cfg = await call(api.setConfig, {
-          sensitiveWordsPath: String(wordPath == null ? '' : wordPath)
+          sensitiveWordsPath: target
         });
         state.globalConfig = cfg;
         state.config = effectiveConfig();
@@ -9951,9 +9957,14 @@
       sensitiveSettingsStatus: () => $('settings-sensitive-status').textContent,
       sensitiveSettingsVisible: () => !$('settings-sensitive-field').classList.contains('hidden'),
       // 测试用：直接把校对词表路径写进配置（正常流程走系统对话框选文件）
+      // 同 setSensitiveWordsPath：先让主进程记一次「模拟对话框选中」，再照常保存。
       async setProofreadWordsPath(wordPath) {
+        const target = String(wordPath == null ? '' : wordPath);
+        if (api.testPickConfigPath) {
+          await call(api.testPickConfigPath, target, 'proofreadWordsPath').catch(() => null);
+        }
         const cfg = await call(api.setConfig, {
-          proofreadWordsPath: String(wordPath == null ? '' : wordPath)
+          proofreadWordsPath: target
         });
         state.globalConfig = cfg;
         state.config = effectiveConfig();

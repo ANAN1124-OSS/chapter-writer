@@ -68,6 +68,7 @@ const openBooksLib = require('./core/open-books');
 const fontPolicy = require('./core/font-policy');
 const securityPolicy = require('./core/security-policy');
 const ipcPaths = require('./core/ipc-paths');
+const configGate = require('./core/config-gate');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -87,6 +88,10 @@ let configStore = null;
 let config = null;
 let statsStore = null; // 每日字数统计（userData/stats.json，绝不写书库）
 let configWarning = null; // 配置损坏被归档时的提示，界面启动后取一次
+// 配置里「指向磁盘」的三项（书架目录 / 两份词表）只认对话框选中的值：
+// 按窗口记「刚在系统对话框里选中的路径」，config:set 拿它做来源校验（v0.9 C-2b）。
+// 只在内存里，窗口关闭时清掉；不写盘、不跨窗口。
+const pickedConfigPaths = configGate.createPickedPathStore();
 // 正常使用时就是 Electron 的系统剪贴板；只有 E2E 在锁屏/无交互桌面环境（系统剪贴板
 // 拒绝所有读写）时会临时换成进程内剪贴板，见 createE2EClipboard()。
 let activeClipboard = clipboard;
@@ -280,6 +285,31 @@ function logError(kind, err, extra = {}) {
   } catch {
     /* 日志本身永远不能影响应用 */
   }
+}
+
+// 配置里「指向磁盘」的项被来源不明地改动时记一条 info 日志：
+// 只记字段名 —— 绝不记路径值，也不把任何路径回给渲染层（日志里没有本机目录）。
+function logRejectedConfigPaths(fields) {
+  if (!Array.isArray(fields) || !fields.length) return;
+  try {
+    logError(
+      'config-rejected-path',
+      {
+        code: 'BAD_CONFIG_SOURCE',
+        message: `已忽略来源不明的配置项：${fields.join('、')}（设置里请用「选择…」按钮挑）`
+      },
+      { level: 'info' }
+    );
+  } catch {
+    /* 日志失败不影响设置保存 */
+  }
+}
+
+// 记住「这个窗口刚在系统对话框里选中的路径」；没有窗口上下文就忽略（不写盘）。
+function rememberPickedConfigPath(field, value) {
+  const session = flowSession();
+  if (!session) return;
+  pickedConfigPaths.remember(session.id, field, value);
 }
 
 // 给作者看的固定提示（不把错误细节 / 任何正文塞进界面）
@@ -696,13 +726,39 @@ function registerIpc() {
     return cfg.lastBook || null;
   });
 
+  // 改配置（v0.9 C-2b）：显示设置 / 统计 / 模板这些随便改，但「指向磁盘」的三项
+  // （书架目录 + 两份词表）只认「这个窗口刚在系统对话框里选中的值」或「与原值相同 / 清空」。
+  // 设置界面本来就只有「选择…」按钮（三个输入框都是只读的），所以正常用起来毫无区别；
+  // 被注入的脚本想借 config:set 让主进程去读写别的目录 / 文件，会被 core/config-gate.js 挡掉。
   handle('config:set', async (patch) => {
-    await getConfig();
-    const next = await configStore.set(patch || {});
+    const current = await getConfig();
+    const session = flowSession();
+    const gated = configGate.filterPathPatch(patch, {
+      current,
+      picked: session ? pickedConfigPaths.snapshot(session.id) : null
+    });
+    // 只把放行的字段交给配置仓库：被拒的字段保留原值，正常字段照旧生效
+    const next = await configStore.set(gated.patch);
     config = booksRootOverride ? { ...next, booksRoot: booksRootOverride } : next;
     await fs.mkdir(config.booksRoot, { recursive: true });
+    if (gated.rejected.length) logRejectedConfigPaths(gated.rejected);
     return config;
   });
+
+  if (automation) {
+    // 仅自检：模拟「在系统目录对话框里选中了某个路径」（E2E 没法真的点原生对话框）。
+    // 和 font:test-pick / update:test-mock 一样只在 automation 下注册，生产环境这个频道不存在。
+    // 参数顺序有意把路径放第一位：tests/ipc-paths.test.js 的静态闸门只盯第一参数带路径的频道，
+    // 这样以后谁再改这个频道也不会悄悄绕过清单（见 PATH_CHANNEL_ALLOWLIST）。
+    handle('config:test-pick', async (pickedPath, field) => {
+      const session = flowSession();
+      const value = typeof pickedPath === 'string' ? pickedPath.trim() : '';
+      const key = typeof field === 'string' ? field.trim() : '';
+      if (!session || !value || !configGate.GUARDED_PATH_FIELDS.includes(key)) return false;
+      pickedConfigPaths.remember(session.id, key, value);
+      return true;
+    });
+  }
 
   // 每日字数统计摘要：今天多少字 + 近 30 天（含今天）+ 当月码字日历 + 连续写作天数。
   // 统计文件在 userData，不在书库；月视图只读，切换月份走 stats:calendar。
@@ -907,7 +963,9 @@ function registerIpc() {
 
   // 选词表（校对 / 敏感词共用）：只允许通过系统文件对话框选，渲染层不能自己指定路径去读任意文件。
   // read 负责把选中的文件解析成「公开信息」（只含数量 / 提示，绝不含词表正文）。
-  async function pickWordListFile({ title, read }) {
+  // field：这个对话框选出来的路径属于配置里的哪一项（v0.9 C-2b 的来源校验靠它记账——
+  // 设置里点「选择…」→ 主进程记下这次选中的文件 → config:set 才允许写进配置）。
+  async function pickWordListFile({ title, read, field }) {
     const { canceled, filePaths } = await showOpenDialog({
       title,
       buttonLabel: '使用这个词表',
@@ -918,6 +976,7 @@ function registerIpc() {
       ]
     });
     if (canceled || !filePaths || !filePaths.length) return { canceled: true };
+    rememberPickedConfigPath(field, filePaths[0]);
     return { canceled: false, ...(await read(filePaths[0])) };
   }
 
@@ -925,6 +984,7 @@ function registerIpc() {
   handle('proofread:pick-words', async () => {
     return pickWordListFile({
       title: '选择校对词表（每行一个词，可写「错词 → 建议」）',
+      field: 'proofreadWordsPath',
       read: async (filePath) => glossaryLib.publicGlossaryInfo(await glossaryLib.readGlossaryFile(filePath))
     });
   });
@@ -941,6 +1001,7 @@ function registerIpc() {
   handle('sensitive:pick-words', async () => {
     return pickWordListFile({
       title: '选择敏感词表（每行一个词）',
+      field: 'sensitiveWordsPath',
       read: async (filePath) => sensitiveLib.publicWordListInfo(await sensitiveLib.readWordListFile(filePath))
     });
   });
@@ -1736,6 +1797,8 @@ function registerIpc() {
       properties: ['openDirectory', 'createDirectory']
     });
     if (canceled || !filePaths || !filePaths.length) return null;
+    // v0.9 C-2b：书架目录同样只认这次对话框选中的路径（设置里的输入框是只读的）
+    rememberPickedConfigPath('booksRoot', filePaths[0]);
     return filePaths[0];
   });
 
@@ -1989,6 +2052,8 @@ async function createWindow({ bookPath = null, cascade = false, runAutomationFlo
     clearTimeout(session.boundsTimer);
     windowSessions.delete(session.id);
     webContentsSessions.delete(webContentsId);
+    // 这个窗口「刚在对话框里选中的配置路径」登记也一起清掉（只在内存里）
+    pickedConfigPaths.forget(session.id);
     try {
       storage.openBookRegistry.unregisterWindow(session.id);
     } catch {

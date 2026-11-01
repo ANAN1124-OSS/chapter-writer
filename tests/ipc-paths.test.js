@@ -144,7 +144,8 @@ const PATH_CHANNEL_ALLOWLIST = {
   'window:open-book': 'main.js 里就地调 assertBookPath（同一本书只开一个窗口）',
   'fragments:read': 'core/fragments.js assertFragmentName（只认 _碎片 里的 .txt 基名，禁止分隔符 / 控制字符）',
   'book:import': 'core/ipc-paths.js importSourceDirs（显式目录只在 automation 模式认）',
-  'font:test-pick': '只在 automation 下注册；记下的路径还要过 font-policy（扩展名 / 24MB），font:read 不接受渲染层路径'
+  'font:test-pick': '只在 automation 下注册；记下的路径还要过 font-policy（扩展名 / 24MB），font:read 不接受渲染层路径',
+  'config:test-pick': '只在 automation 下注册；记下的路径只当「刚在对话框里选中的值」，config:set 还要过 core/config-gate.js 的来源校验'
 };
 
 test('IPC 清单：所有注册点都经 handle / handleBook，没有裸 ipcMain', () => {

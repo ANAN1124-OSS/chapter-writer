@@ -12,8 +12,8 @@
 //
 // 已知残余风险（本轮不修，写进验收清单 / README 已知限制）：
 //   · 书文件夹本身是符号链接 / 目录联接指到库外时，文本路径判定拦不住（要作者自己先造出这种链接）；
-//   · config:set 仍可改 booksRoot / 词表路径（设置界面的正常用法就是这么保存的），
-//     属于「渲染层决定主进程读哪个目录」，留给下一项 C-2b 做「来源校验（只认对话框选中的路径）」。
+//   · config:set 里 booksRoot / 两份词表路径已由 core/config-gate.js 做「来源校验」（v0.9 C-2b，
+//     只认主进程自己弹出的对话框刚选中的路径），不再是残余风险。
 const path = require('node:path');
 
 class IpcPathError extends Error {
