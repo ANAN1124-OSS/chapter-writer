@@ -7767,13 +7767,53 @@ module.exports = async function runScenario(ctx) {
   );
   await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
   await waitFor("window.__cwTest.dirty() === false");
+  // 50j-4b. 标记层超长门控（v0.8.6 R5，代码审计 F9）：只开「当前段落高亮」时，以前也会把整章正文
+  // 塞进 #editor-marks（每次按键重建约 1MB 的 DOM 镜像）——现在 renderEditorMarks 入口直接整层收起。
+  await exec('window.__cwTest.clearToasts()');
+  await exec("window.__cwTest.setText('长'.repeat(300001))");
+  await sleep(250);
+  const marksTooLargeToasts = await exec('window.__cwTest.toasts()');
+  check(
+    '标记层超长门控：正文超过 30 万字时整层镜像不建（只开当前段落高亮也不建），正文照常可编辑',
+    (await exec('window.__cwTest.marksOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.marksLineCount()')) === 0 &&
+      (await exec('window.__cwTest.marksLongParaCount()')) === 0 &&
+      (await exec('window.__cwTest.longParaBarCount()')) === 0 &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
+      (await exec('window.__cwTest.marksCaretTooLarge()')) === true &&
+      (await exec('window.__cwTest.marksFlags()')).caretParagraph === true &&
+      (await exec('window.__cwTest.text()')).length === 300001 &&
+      (await exec('window.__cwTest.dirty()')) === true
+  );
+  check(
+    '标记层超长门控：超长只提示一次，文案说明标记层收起、正文与保存不受影响',
+    marksTooLargeToasts.length === 1 &&
+      marksTooLargeToasts[0].kind === 'warn' &&
+      marksTooLargeToasts[0].message.includes('30 万字') &&
+      marksTooLargeToasts[0].message.includes('标记层')
+  );
+  await exec("window.__cwTest.setText('长'.repeat(300002))");
+  await sleep(200);
+  check(
+    '标记层超长门控：超长期间继续打字不会再弹提示（一次性，不是每按键一次）',
+    (await exec('window.__cwTest.toasts()')).length === 1 &&
+      (await exec('window.__cwTest.marksOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.marksLineCount()')) === 0
+  );
+  await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  check(
+    '标记层超长门控：回到 30 万字以内标记层恢复（镜像重新建、当前段落高亮照常）',
+    (await exec('window.__cwTest.marksOverlayVisible()')) === true &&
+      (await exec('window.__cwTest.marksLineCount()')) > 0 &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 1
+  );
   await exec("window.__cwTest.setText('长'.repeat(300001))");
   await sleep(250);
   check(
-    '当前段落高亮：正文超过 30 万字时暂不高亮（和不可见字符同一上限，不卡界面）',
-    (await exec('window.__cwTest.marksCaretTooLarge()')) === true &&
-      (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
-      (await exec('window.__cwTest.marksFlags()')).caretParagraph === true
+    '标记层超长门控：回到上限以内后再次超长会重新提示一次（不是永久静音）',
+    (await exec('window.__cwTest.toasts()')).length === 2 &&
+      (await exec('window.__cwTest.marksLineCount()')) === 0
   );
   await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
   await waitFor('window.__cwTest.marksCaretParaCount() === 1');

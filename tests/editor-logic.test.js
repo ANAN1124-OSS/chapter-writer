@@ -426,3 +426,36 @@ test('当前段落：和 paragraphRanges 完全对齐（段号 / 区间 / 行号
   assert.equal(tail.paragraph, 0);
   assert.equal(tail.line, 6);
 });
+
+// ---------- 标记层超长门控（v0.8.6 R5，代码审计 F9） ----------
+// 标记层是整章正文的 DOM 镜像：正文 > MAX_MARK_CHARS（30 万字）时渲染层入口直接整层收起。
+// 这个纯函数只判边界（正好 30 万字仍然画，和不可见字符 / 超长段落同一口径）。
+test('标记层门控：正好 30 万字仍然画，超过 1 个字就跳过（边界）', () => {
+  assert.equal(logic.MAX_MARK_CHARS, 300000);
+  assert.equal(logic.marksTooLarge(''), false);
+  assert.equal(logic.marksTooLarge('字'.repeat(logic.MAX_MARK_CHARS)), false);
+  assert.equal(logic.marksTooLarge('字'.repeat(logic.MAX_MARK_CHARS + 1)), true);
+  // 门控看的是整章文本长度（换行 / 空白也算），不是去空白后的字数
+  assert.equal(logic.marksTooLarge(`${'a'.repeat(logic.MAX_MARK_CHARS - 1)}\n`), false);
+  assert.equal(logic.marksTooLarge(`${'a'.repeat(logic.MAX_MARK_CHARS)}\n`), true);
+  // 100 万字单章（「整本一章」导入）必须跳过
+  assert.equal(logic.marksTooLarge('a'.repeat(1000000)), true);
+});
+
+test('标记层门控：坏输入按空文本处理，和既有 30 万字上限同一口径', () => {
+  for (const value of [null, undefined, '', 0, false]) {
+    assert.equal(logic.marksTooLarge(value), false);
+  }
+  // 数字按字符串看（toText 口径），不会被当成「字符数」
+  assert.equal(logic.marksTooLarge(300001), false);
+  assert.equal(logic.marksTooLarge({}), false);
+  const exact = '字'.repeat(logic.MAX_MARK_CHARS);
+  const over = `${exact}字`;
+  // 和 invisibleMarks 的 tooLarge 同一上限：正好 30 万字两边都画，多 1 字两边都跳过
+  assert.equal(logic.marksTooLarge(exact), false);
+  assert.equal(logic.invisibleMarks(exact).tooLarge, false);
+  assert.equal(logic.marksTooLarge(over), true);
+  assert.equal(logic.invisibleMarks(over).tooLarge, true);
+  // 超长段落自己的兜底是 200 万字，比标记层门控更晚——门控先按 30 万字拦下，整层不建
+  assert.equal(logic.longParagraphs(over).tooLarge, false);
+});

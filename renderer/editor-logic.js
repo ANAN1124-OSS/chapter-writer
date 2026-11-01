@@ -222,6 +222,15 @@
     };
   }
 
+  // 标记层字数门控（v0.8.6 R5，代码审计 F9）：标记层是「整章正文的 DOM 镜像」，正文超过
+  // MAX_MARK_CHARS 时每次按键（80ms 防抖）都会重建约 1MB 文本的 DOM——只开「当前段落高亮」
+  // 也会走到这里。所以渲染层在入口就整层不建；这个纯函数只负责判边界，不碰 DOM、不读盘。
+  // 边界：正好 300000 字仍然画（和 invisibleMarks / longParagraphs 的口径一致：> 才跳过）；
+  // 坏输入按空文本处理（和 toText 的其它函数一致），不会抛错。
+  function marksTooLarge(text) {
+    return toText(text).length > MAX_MARK_CHARS;
+  }
+
   function sanitizeMaxMarks(value) {
     return clampInt(value, MAX_MARK_ITEMS, MARK_ITEM_LIMITS);
   }
@@ -362,6 +371,7 @@
     caretParagraph,
     sanitizeThreshold,
     longParagraphs,
+    marksTooLarge,
     invisibleMarks,
     compareChapterChars,
     formatCharsShort,

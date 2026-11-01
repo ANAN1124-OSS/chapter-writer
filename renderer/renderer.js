@@ -287,7 +287,8 @@
       longTruncated: false,
       markCounts: { fullwidth: 0, trailing: 0 },
       markTruncated: false,
-      marksTooLarge: false, // 正文太长（>30 万字）时不再逐字画标记
+      marksTooLarge: false, // 正文太长（>30 万字）时整层不建（renderEditorMarks 入口门控）
+      tooLargeWarned: false, // 本次超长已经提示过一次（回到 30 万字以内重新武装，避免每次按键都弹）
       barBaseScrollTop: 0, // 左侧黄线的基准滚动位置（滚动时只改 top，不重新量行框）
       resizeObserver: null
     },
@@ -1948,7 +1949,8 @@
   }
 
   // 当前段落高亮（v0.8-10，提案 N10）：只算「光标落在哪一段」给显示层用。
-  // 和不可见字符同一上限：正文超过 30 万字先不高亮（把整章塞进影子层太重），菜单里会提示一次。
+  // 正文超过 30 万字时 renderEditorMarks 入口已经把整层收起（F9），这里只是第二道防线，
+  // 不单独提示（提示统一由入口门控弹一次）。
   function currentCaretParagraph() {
     if (!state.marks.caretParagraph) return null;
     if (editorEl.value.length > editorLogic.MAX_MARK_CHARS) {
@@ -2085,6 +2087,17 @@
     }
   }
 
+  // 标记层超长提示只弹一次（代码审计 F9）：超长期间每次按键都会重新渲染，不能每次都 toast。
+  // 回到 30 万字以内后重新武装，下次再超长还会提示一次。
+  function warnMarksTooLargeOnce() {
+    if (state.marks.tooLargeWarned) return;
+    state.marks.tooLargeWarned = true;
+    toast(
+      '正文超过 30 万字，暂时不画标记层（不可见字符 / 超长段落 / 当前段落高亮）；正文和保存不受影响',
+      'warn'
+    );
+  }
+
   function renderEditorMarks() {
     const overlay = $('editor-marks');
     if (!overlay) return;
@@ -2093,6 +2106,16 @@
       return;
     }
     const text = editorEl.value;
+    // 代码审计 F9：整层是「整章正文的 DOM 镜像」——超长时只清标记项挡不住镜像本身的构建，
+    // 所以入口直接整层收起、只提示一次；正文与保存完全不受影响。
+    if (editorLogic.marksTooLarge(text)) {
+      hideEditorMarks();
+      state.marks.marksTooLarge = true;
+      state.marks.caretTooLarge = true;
+      warnMarksTooLargeOnce();
+      return;
+    }
+    state.marks.tooLargeWarned = false;
     const longResult = state.marks.longParagraphs
       ? editorLogic.longParagraphs(text, LONG_PARAGRAPH_THRESHOLD)
       : { items: [], count: 0, truncated: false, tooLarge: false };
@@ -2172,7 +2195,8 @@
   }
 
   // 光标移动时只改 class（不重画整层）：把上一段的高亮摘掉、给新段落加上。
-  // 空行（只有空白）不高亮；正文超过 30 万字时整层本来就没建，直接跳过。
+  // 空行（只有空白）不高亮；正文超过 30 万字时 renderEditorMarks 入口已把整层收起（带 hidden），
+  // 这里判断 overlay 隐藏就直接跳过——不是在「已经建好的空层」上补高亮。
   function updateCaretParagraph() {
     const overlay = $('editor-marks');
     if (!overlay || overlay.classList.contains('hidden') || !state.marks.caretParagraph) return;
@@ -2296,13 +2320,9 @@
     if (name !== 'invisibles' && name !== 'longParagraphs' && name !== 'caretParagraph') return false;
     state.marks[name] = Boolean(on);
     renderMarksMenu();
+    // 超长正文的提示统一由 renderEditorMarks 的入口门控弹一次（F9）：这里不再按开关各弹一句，
+    // 否则「打开一个开关」会同时收到门控与开关两条提示，超长期间反复切换也会重复弹。
     renderEditorMarks();
-    if (name === 'invisibles' && state.marks.invisibles && state.marks.marksTooLarge) {
-      toast('正文超过 30 万字，暂时不逐字标不可见字符（超长段落提示仍然可用）', 'warn');
-    }
-    if (name === 'caretParagraph' && state.marks.caretParagraph && state.marks.caretTooLarge) {
-      toast('正文超过 30 万字，暂时不显示当前段落高亮（其它标记仍可用）', 'warn');
-    }
     return state.marks[name];
   }
 
