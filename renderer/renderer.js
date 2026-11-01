@@ -9525,6 +9525,10 @@
         if (card.dataset.path) openBookByPath(card.dataset.path);
       }
     });
+    // 菜单键盘（v0.9 A-5c）：右键 / 顶栏菜单打开时焦点进第一条、方向键走、Esc 收起并还给打开它的元素
+    if (window.CWMenuKeyboard) window.CWMenuKeyboard.install();
+    // 分卷标题行（v0.9 A-5c）：Tab 可达 + Enter / 空格折叠展开，列表重建后焦点回到同一卷
+    listKeyboard.installVolumeHeaders({ container: $('chapter-list') });
     try {
       state.globalConfig = await call(api.getConfig);
       state.config = { ...state.globalConfig };

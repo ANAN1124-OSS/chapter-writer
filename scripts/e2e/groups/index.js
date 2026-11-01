@@ -17,7 +17,8 @@ const groups = [
   require('./67-contrast-a11y'),
   require('./68-dialog-focus'),
   require('./69-motion'),
-  require('./70-a11y-keyboard')
+  require('./70-a11y-keyboard'),
+  require('./71-menu-keyboard')
 ];
 
 module.exports = groups;

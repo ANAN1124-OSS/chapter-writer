@@ -112,5 +112,70 @@
     };
   }
 
-  return { isActivateKey, nextIndex, keyAction, applyTabStops, ensureTabStop, install };
+  // 分卷标题行（v0.9 A-5c）：以前是普通 <div>（tabIndex -1），Tab 到不了、键盘收不起卷。
+  // 这里只补「可聚焦 + Enter / 空格折叠展开 + 重建后焦点回到同一卷」：激活直接复用原来的
+  // click 处理（折叠逻辑只有一份），鼠标点行照旧；列表重建时靠 MutationObserver 重新装饰。
+  function installVolumeHeaders(options) {
+    const opts = options || {};
+    const container = opts.container;
+    const rowSelector = opts.itemSelector || '.volume-item';
+    const MO = opts.MutationObserver || (typeof MutationObserver === 'function' ? MutationObserver : null);
+    if (!container || !container.addEventListener) return { decorate() { return 0; }, destroy() {} };
+
+    const rowsOf = () => Array.from(container.querySelectorAll(rowSelector));
+    const decorate = () => {
+      const rows = rowsOf();
+      for (const row of rows) {
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-expanded', row.classList.contains('collapsed') ? 'false' : 'true');
+      }
+      return rows.length;
+    };
+
+    // 折叠 / 展开会把整张列表重建，旧的行连同焦点一起消失：记下是哪个卷，重建后把焦点放回去。
+    let pendingKey = null;
+    const refocus = () => {
+      if (pendingKey === null) return false;
+      const key = pendingKey;
+      pendingKey = null;
+      const row = rowsOf().find((el) => (el.dataset ? el.dataset.volumeId || '' : '') === key);
+      if (row && typeof row.focus === 'function') {
+        row.focus();
+        return true;
+      }
+      return false;
+    };
+
+    const onKeyDown = (event) => {
+      if (!event || typeof event.key !== 'string') return;
+      if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+      const row = event.target && typeof event.target.closest === 'function' ? event.target.closest(rowSelector) : null;
+      if (!row || (typeof container.contains === 'function' && !container.contains(row))) return;
+      if (event.preventDefault) event.preventDefault();
+      pendingKey = row.dataset ? row.dataset.volumeId || '' : '';
+      if (typeof row.click === 'function') row.click();
+    };
+
+    let observer = null;
+    if (typeof MO === 'function') {
+      observer = new MO(() => {
+        decorate();
+        refocus();
+      });
+      observer.observe(container, { childList: true });
+    }
+    decorate();
+    container.addEventListener('keydown', onKeyDown);
+    return {
+      decorate,
+      refocus,
+      destroy() {
+        container.removeEventListener('keydown', onKeyDown);
+        if (observer) observer.disconnect();
+      }
+    };
+  }
+
+  return { isActivateKey, nextIndex, keyAction, applyTabStops, ensureTabStop, install, installVolumeHeaders };
 });

@@ -265,3 +265,109 @@ test('静态闸门：13 个弹层都有无障碍名称（标题 id + aria-labell
     assert.ok(title, `${id} 的 aria-labelledby 指向了不存在的 ${labelledby[1]}`);
   }
 });
+
+// ---------- 分卷标题行（v0.9 A-5c） ----------
+
+function makeVolumeRow(id, collapsed = false) {
+  const classes = new Set(['volume-item']);
+  if (collapsed) classes.add('collapsed');
+  const row = {
+    dataset: { volumeId: id },
+    tabIndex: -1,
+    focused: false,
+    clicks: 0,
+    attrs: {},
+    classList: {
+      contains: (name) => classes.has(name),
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name)
+    },
+    setAttribute(name, value) { row.attrs[name] = String(value); },
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(row.attrs, name) ? row.attrs[name] : null; },
+    click() { row.clicks += 1; },
+    focus() { row.focused = true; },
+    closest(selector) { return selector === '.volume-item' ? row : null; }
+  };
+  return row;
+}
+
+function makeVolumeContainer(rows) {
+  const handlers = [];
+  const container = {
+    rows,
+    querySelectorAll: () => container.rows,
+    contains: (el) => container.rows.indexOf(el) >= 0,
+    addEventListener: (type, fn) => handlers.push([type, fn]),
+    removeEventListener: (type, fn) => {
+      const at = handlers.findIndex(([t, f]) => t === type && f === fn);
+      if (at >= 0) handlers.splice(at, 1);
+    },
+    fire: (event) => {
+      for (const [type, fn] of handlers) if (type === event.type) fn(event);
+    },
+    handlerCount: () => handlers.length
+  };
+  return container;
+}
+
+test('分卷键盘：标题行补成可聚焦的按钮，并报告折叠状态', () => {
+  const rows = [makeVolumeRow('v1'), makeVolumeRow('v2', true)];
+  const container = makeVolumeContainer(rows);
+  const inst = listKeyboard.installVolumeHeaders({ container, MutationObserver: null });
+  assert.deepEqual(rows.map((row) => row.tabIndex), [0, 0], '两条都 Tab 得到（以前 tabIndex -1）');
+  assert.deepEqual(rows.map((row) => row.attrs.role), ['button', 'button']);
+  assert.deepEqual(rows.map((row) => row.attrs['aria-expanded']), ['true', 'false'], '折叠状态读 class');
+  inst.destroy();
+});
+
+test('分卷键盘：Enter / 空格激活原来的 click（不抄第二份折叠逻辑），列表重建后焦点回到同一卷', () => {
+  const first = [makeVolumeRow('v1'), makeVolumeRow('v2')];
+  const container = makeVolumeContainer(first);
+  const observers = [];
+  class FakeMO {
+    constructor(cb) { this.cb = cb; observers.push(this); }
+    observe() {}
+    disconnect() { this.disconnected = true; }
+    trigger() { this.cb(); }
+  }
+  const inst = listKeyboard.installVolumeHeaders({ container, MutationObserver: FakeMO });
+  assert.equal(container.handlerCount(), 1, '只挂一个 keydown（不碰鼠标）');
+
+  let prevented = 0;
+  container.fire({ type: 'keydown', key: 'Enter', target: first[0], preventDefault: () => (prevented += 1) });
+  assert.equal(first[0].clicks, 1, '激活走原来的 click 处理');
+  assert.equal(prevented, 1, '拦住 Enter 的默认行为');
+
+  // 折叠会重建整张列表：旧行没了，新行是同名的新对象
+  const rebuilt = [makeVolumeRow('v1', true), makeVolumeRow('v2')];
+  container.rows = rebuilt;
+  observers[0].trigger();
+  assert.equal(rebuilt[0].focused, true, '焦点回到同一卷的标题行（不是丢到 body）');
+  assert.equal(rebuilt[0].attrs['aria-expanded'], 'false', '重建后折叠状态同步');
+  assert.equal(rebuilt[0].tabIndex, 0);
+
+  container.fire({ type: 'keydown', key: ' ', target: rebuilt[1], preventDefault() {} });
+  assert.equal(rebuilt[1].clicks, 1, '空格也能折叠 / 展开');
+  assert.equal(rebuilt[0].clicks, 0, '别的卷不被带着点一下');
+
+  container.fire({ type: 'keydown', key: 'a', target: rebuilt[0], preventDefault() {} });
+  assert.equal(rebuilt[0].clicks, 0, '普通按键不激活');
+  inst.destroy();
+  assert.equal(container.handlerCount(), 0, 'destroy 摘掉监听');
+  assert.equal(observers[0].disconnected, true, 'destroy 断开观察者');
+});
+
+test('分卷键盘：折叠后没有同名卷时不乱抢焦点（保持浏览器默认）', () => {
+  const rows = [makeVolumeRow('v1')];
+  const container = makeVolumeContainer(rows);
+  class FakeMO {
+    constructor(cb) { this.cb = cb; }
+    observe() {}
+    disconnect() {}
+    trigger() { this.cb(); }
+  }
+  const inst = listKeyboard.installVolumeHeaders({ container, MutationObserver: FakeMO });
+  inst.refocus();
+  assert.equal(rows[0].focused, false, '没有待恢复的卷时不动焦点');
+  inst.destroy();
+});
