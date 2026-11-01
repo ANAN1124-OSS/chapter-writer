@@ -12,6 +12,7 @@ const bookInfoLib = require('./bookinfo');
 const historyLib = require('./history');
 const snapshotLib = require('./snapshot');
 const openBooksLib = require('./open-books');
+const errorText = require('./error-text');
 
 const BOOK_FILE = '书目.json';
 const BOOK_BAK = '书目.json.bak';
@@ -258,12 +259,14 @@ async function scanConflictCopies(bookPath) {
 }
 
 async function listBooks(booksRoot) {
-  await ensureDir(booksRoot);
+  // 建目录 + 列目录放在同一个 try 里：书架目录指向一个普通文件 / 盘符不可用时，
+  // 以前会抛 Node 的英文 EEXIST 原文（还带完整路径），现在统一成 ROOT_UNREADABLE + 中文原因。
   let entries;
   try {
+    await ensureDir(booksRoot);
     entries = await fs.readdir(booksRoot, { withFileTypes: true });
   } catch (err) {
-    throw new StorageError('ROOT_UNREADABLE', `书架目录无法读取：${err.message}`);
+    throw new StorageError('ROOT_UNREADABLE', `书架目录无法读取：${errorText.describeForUi(err).message}`);
   }
 
   const candidates = entries
@@ -687,7 +690,7 @@ async function deleteChapter(bookPath, chapterId) {
   try {
     trashPath = await moveToTrash(bookPath, target.file);
   } catch (err) {
-    throw new StorageError('TRASH_FAILED', `无法把章节移到回收目录：${err.message}`);
+    throw new StorageError('TRASH_FAILED', `无法把章节移到回收目录：${errorText.describeForUi(err).message}`);
   }
   let updated = chaptersLib.removeChapter(meta, chapterId);
   let newChapter = null;
@@ -968,7 +971,7 @@ async function restoreReplaceBackup(bookPath, backupName) {
   try {
     entries = await fs.readdir(backupDir, { withFileTypes: true });
   } catch (err) {
-    throw new StorageError('BACKUP_UNREADABLE', `替换备份读不出来：${err.message}`);
+    throw new StorageError('BACKUP_UNREADABLE', `替换备份读不出来：${errorText.describeForUi(err).message}`);
   }
   const currentFiles = new Set(meta.chapters.map((chapter) => chapter.file));
   const fileEntries = entries.filter((entry) => entry.isFile());

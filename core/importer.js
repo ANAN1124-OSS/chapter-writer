@@ -14,6 +14,7 @@ const chaptersLib = require('./chapters');
 const storage = require('./storage');
 const repair = require('./repair');
 const { decodeBuffer, normalizeText, splitChapters, splitChaptersRaw } = require('./txt');
+const errorText = require('./error-text');
 
 const CHAPTER_FILE_RE =
   /^\s*(?:\d+\s*[-_.、\s]|第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷集篇部])/;
@@ -131,7 +132,7 @@ async function importBookFolder(booksRoot, sourceDir, analysis) {
     };
   } catch (err) {
     await fs.rm(target, { recursive: true, force: true }).catch(() => {});
-    throw new storage.StorageError('IMPORT_FAILED', `复制失败：${err.message}`);
+    throw new storage.StorageError('IMPORT_FAILED', `复制失败：${errorText.describeForUi(err).message}`);
   }
 }
 
@@ -386,7 +387,7 @@ async function importFolders(booksRoot, sources, options = {}) {
           const result = await importNovelFile(root, path.join(plan.sourceDir, file), { mode });
           imported.push(result);
         } catch (err) {
-          failed.push({ source: path.join(plan.sourceDir, file), message: err.message });
+          failed.push({ source: path.join(plan.sourceDir, file), message: errorText.describeForUi(err).message });
         }
         bump(file);
       }
@@ -395,7 +396,7 @@ async function importFolders(booksRoot, sources, options = {}) {
         const result = await importBookFolder(root, plan.sourceDir, plan.analysis);
         imported.push(result);
       } catch (err) {
-        failed.push({ source: plan.source, message: err.message });
+        failed.push({ source: plan.source, message: errorText.describeForUi(err).message });
       }
       bump(path.basename(plan.sourceDir));
     }

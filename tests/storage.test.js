@@ -167,6 +167,27 @@ test('章节状态/备注：写进书目、txt 一个字节不动、可清空、
   assert.equal((await fs.stat(metaPath)).mtimeMs, metaStat.mtimeMs);
 });
 
+test('书架扫描：书架目录指向普通文件时报 ROOT_UNREADABLE，提示里没有完整路径（v0.9 C-4）', async () => {
+  const root = await mkTmp();
+  const notADir = path.join(root, '这里是一个文件.txt');
+  await fs.writeFile(notADir, '模拟「书架目录被改成某个文件」', 'utf8');
+  await assert.rejects(
+    () => storage.listBooks(notADir),
+    (err) => {
+      assert.equal(err.code, 'ROOT_UNREADABLE');
+      assert.match(err.message, /^书架目录无法读取：/);
+      // 提示里只剩最后一节文件名，书架根目录 / 盘符 / 用户名都不出现
+      assert.equal(err.message.includes(root), false);
+      assert.equal(/[A-Za-z]:[\\/]/.test(err.message), false);
+      assert.match(err.message, /…\\这里是一个文件\.txt$/);
+      return true;
+    }
+  );
+  // 目录还是目录的时候照常（这个失败没有把书库弄坏）
+  await fs.mkdir(path.join(root, '书'), { recursive: true });
+  assert.deepEqual(await storage.listBooks(root), []);
+});
+
 test('旧版书目（v0.4.1，无 status/note）：照常打开、不自动补字段、完稿数为 0', async () => {
   const root = await mkTmp();
   const { path: bookPath } = await storage.createBook(root, '旧版书');

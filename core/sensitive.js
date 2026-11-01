@@ -14,6 +14,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const findLib = require('./find');
 const txtLib = require('./txt');
+const errorText = require('./error-text');
 
 // 词表文件上限：再大就不像「每行一个词」的词表了，读进来只会拖慢整本检查
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -169,8 +170,8 @@ async function readWordListFile(filePath) {
       ok: false,
       code: missing ? 'WORD_LIST_MISSING' : 'WORD_LIST_UNREADABLE',
       message: missing
-        ? `词表文件不存在：${resolved}（可能被移动或删除了，请重新选择）`
-        : `读不了词表文件：${(err && err.message) || err}`
+        ? `词表文件不存在：${errorText.maskPath(resolved)}（可能被移动或删除了，请重新选择）`
+        : `读不了词表文件：${errorText.describeForUi(err).message}`
     };
   }
   if (!stat.isFile()) {
@@ -193,7 +194,7 @@ async function readWordListFile(filePath) {
       ...base,
       ok: false,
       code: 'WORD_LIST_UNREADABLE',
-      message: `读不了词表文件：${(err && err.message) || err}`
+      message: `读不了词表文件：${errorText.describeForUi(err).message}`
     };
   }
   const decoded = decodeWordListBuffer(buffer);

@@ -95,6 +95,27 @@ test('崩溃日志：sanitizeMessage 压成单行、去控制字符、隐去正�
   assert.match(many, /\[已截断 \d+ 字\]$/);
 });
 
+test('崩溃日志：sanitizeMessage 里的本机绝对路径只留最后一节（v0.9 C-4）', () => {
+  // 真实形状：Node 的 fs 错误把完整路径写进 message，日志里不能再带本机目录 / 用户名
+  const masked = logsLib.sanitizeMessage(
+    "EPERM: operation not permitted, open 'C:\\Users\\uid72\\AppData\\Local\\Programs\\chapter-writer\\书\\001-第1章.txt'"
+  );
+  assert.equal(masked, "EPERM: operation not permitted, open '…\\001-第1章.txt'");
+  assert.equal(masked.includes('uid72'), false);
+  assert.equal(masked.includes('C:\\'), false);
+  // 多条路径Together一条也照收；相对路径与网址不动
+  assert.equal(
+    logsLib.sanitizeMessage('先开 D:\\书\\a.txt 再开 D:\\书\\b.txt'),
+    '先开 …\\a.txt 再开 …\\b.txt'
+  );
+  assert.equal(
+    logsLib.sanitizeMessage('下载页 https://github.com/x/y 打不开（0001-第1章.txt 不受影响）'),
+    '下载页 https://github.com/x/y 打不开（0001-第1章.txt 不受影响）'
+  );
+  // 日志的「书名」信息仍看得出：最后一节保留
+  assert.match(logsLib.sanitizeMessage("ENOENT: no such file or directory, scandir 'D:\\我的小说'"), /…\\我的小说'$/);
+});
+
 test('崩溃日志：sanitizePath 单行、去控制字符、超长截断', () => {
   assert.equal(logsLib.sanitizePath('D:\\小说\\书\\001-起风.txt'), 'D:\\小说\\书\\001-起风.txt');
   assert.equal(logsLib.sanitizePath('a\nb\tc'), 'a b c');
@@ -113,6 +134,13 @@ test('崩溃日志：sanitizeStack 去空行、限行数、限单行长度、隐
   assert.equal(logsLib.sanitizeStack(`  at x (${body})`)[0].includes(body), false);
   assert.deepEqual(logsLib.sanitizeStack(null), []);
   assert.deepEqual(logsLib.sanitizeStack(['a', 'b']), ['a', 'b']);
+  // 栈里的绝对路径：保留最后两节（仍看得出哪个文件哪一行），本机目录 / 用户名收掉
+  const appStack = logsLib.sanitizeStack(
+    "Error: boom\n    at save (C:\\Users\\uid72\\AppData\\Local\\Programs\\chapter-writer\\resources\\app.asar\\core\\storage.js:395:11)"
+  );
+  assert.deepEqual(appStack, ['Error: boom', 'at save (…\\core\\storage.js:395:11)']);
+  assert.equal(appStack.join('\n').includes('uid72'), false);
+  assert.equal(appStack.join('\n').includes('app.asar'), false);
 });
 
 test('崩溃日志：sanitizeEntry 只留白名单字段，坏值回落默认', () => {

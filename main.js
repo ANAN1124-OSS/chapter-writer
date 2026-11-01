@@ -69,6 +69,7 @@ const fontPolicy = require('./core/font-policy');
 const securityPolicy = require('./core/security-policy');
 const ipcPaths = require('./core/ipc-paths');
 const configGate = require('./core/config-gate');
+const errorText = require('./core/error-text');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -439,13 +440,16 @@ function ok(data) {
   return { ok: true, data };
 }
 
+// IPC 失败统一出口（v0.9 C-4，安全审计 C5）：
+// 回给界面的文案先过 core/error-text.js —— 本机绝对路径只留最后一节、常见文件系统错误码换成中文、
+// 控制字符与超长文本收掉；原始错误对象仍交给 logError 写进本机日志（日志侧同样只留文件名）。
+// 错误码（code）原样保留：界面与 E2E 都按 code 分支，不受文案影响。
 function fail(err, channel) {
-  const code = (err && err.code) || 'ERROR';
-  const message = (err && err.message) || String(err);
-  console.error('[ipc-fail]', channel ? `${channel}:` : '', code, message);
+  const described = errorText.describeForUi(err);
+  console.error('[ipc-fail]', channel ? `${channel}:` : '', described.code, described.message);
   // 保存失败单独记一条（错误码 + 章节文件名，绝不含正文），方便排查「保存失败」类反馈
   logError(channel === 'chapter:save' ? 'save-failed' : 'ipc-error', err, { channel });
-  return { ok: false, code, message };
+  return { ok: false, code: described.code, message: described.message };
 }
 
 // 只接受来自本应用管理的窗口的 IPC（防止将来引入 webview / 远程内容后越权）
@@ -1101,7 +1105,7 @@ function registerIpc() {
           snapshot = {
             taken: false,
             reason: 'ERROR',
-            message: err.message,
+            message: errorText.describeForUi(err).message,
             dir: null,
             file: chapter.file,
             bytes: 0,
@@ -1782,7 +1786,7 @@ function registerIpc() {
           method: 'move',
           folder: path.basename(target),
           trashPath,
-          note: `回收站不可用（${err.message}），已移到书架的 _trash`
+          note: `回收站不可用（${errorText.describeForUi(err).message}），已移到书架的 _trash`
         };
       }
     }
@@ -1804,7 +1808,7 @@ function registerIpc() {
 
   handleBook('shell:open-book-folder', async (bookPath) => {
     const err = await shell.openPath(bookPath);
-    if (err) throw new storage.StorageError('OPEN_FAILED', err);
+    if (err) throw new storage.StorageError('OPEN_FAILED', errorText.cleanText(errorText.redactPaths(err)));
     return true;
   });
 
@@ -1823,7 +1827,7 @@ function registerIpc() {
     // 自检环境不要真的在作者桌面上弹出资源管理器窗口，只回报目录
     if (isE2E) return { dir: store.dir, opened: false, note: '自检环境不打开资源管理器' };
     const err = await shell.openPath(store.dir);
-    if (err) throw new storage.StorageError('OPEN_FAILED', err);
+    if (err) throw new storage.StorageError('OPEN_FAILED', errorText.cleanText(errorText.redactPaths(err)));
     return { dir: store.dir, opened: true };
   });
 
@@ -1883,7 +1887,7 @@ function registerIpc() {
     try {
       await shell.openExternal(url);
     } catch (err) {
-      return { opened: false, url, message: `打不开浏览器：${(err && err.message) || err}` };
+      return { opened: false, url, message: `打不开浏览器：${errorText.describeForUi(err).message}` };
     }
     return { opened: true, url };
   });

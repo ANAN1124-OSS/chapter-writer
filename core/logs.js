@@ -5,6 +5,10 @@
 // - 只记元数据：时间、级别、类型、错误码、IPC 频道、路径、应用版本、pid、栈。
 //   **绝不写正文**：调用方只传这些字段；message / stack 里还会把连续 24 个以上的汉字
 //   当成正文隐去（错误信息、路径、栈里正常不会出现这么长的连续汉字）。
+// - **不写本机完整路径**（v0.9 C-4，安全审计 C5）：message / stack 里的绝对路径统一收成
+//   `…\最后一节`（栈保留最后两节，`…\core\storage.js` 仍看得懂是哪一行），
+//   本机用户名 / 书架上级目录 / 章节所在书的完整位置都不会落进日志。
+//   路径字段（path）只收调用方显式给出的「书相对」信息，不在这里做二次改写。
 // - 写日志永远吞掉错误：日志目录没权限、磁盘满、被别的程序占用都不能影响正文保存与界面。
 // - 按天 + 按大小滚动：每天一个 chapter-writer-YYYY-MM-DD[.N].log，单份超过上限就换下一个
 //   序号；只保留最近 12 份（旧的按文件名里的日期 / 序号删，不碰别的文件）。
@@ -12,6 +16,7 @@
 // - 不读也不写 config.json，旧配置一键照常启动；日志只存在 %APPDATA%\chapter-writer\logs。
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const errorText = require('./error-text');
 
 const LOG_DIR_NAME = 'logs';
 const FILE_PREFIX = 'chapter-writer';
@@ -122,13 +127,15 @@ function sanitizePid(value) {
   return Number.isFinite(n) && n > 0 ? Math.min(n, 2147483647) : 0;
 }
 
-// message：单行、去控制字符、隐去长串汉字、限制长度。正文不会出现在这里（调用方只传错误信息）。
+// message：单行、去控制字符、隐去长串汉字、隐去本机绝对路径、限制长度。
+// 正文不会出现在这里（调用方只传错误信息）。
 function sanitizeMessage(value) {
   let text = typeof value === 'string' ? value : safeString(value);
   text = text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ');
   text = text.replace(CONTROL_RE, '');
   text = text.replace(/\n+/g, ' ');
   text = maskLongCjk(text);
+  text = errorText.redactPaths(text);
   text = text.replace(/\s{2,}/g, ' ').trim();
   if (text.length > MAX_MESSAGE_CHARS) {
     const rest = text.length - MAX_MESSAGE_CHARS;
@@ -154,7 +161,8 @@ function sanitizeStack(value) {
     .filter((line) => line.trim())
     .slice(0, MAX_STACK_LINES)
     .map((line) => {
-      const masked = maskLongCjk(line);
+      // 栈里保留最后两节（`…\core\storage.js:395:11`）：够定位文件，又不会把本机目录写进日志
+      const masked = errorText.redactPaths(maskLongCjk(line), { keep: 2 });
       return masked.length > MAX_STACK_LINE_CHARS ? `${masked.slice(0, MAX_STACK_LINE_CHARS)}…` : masked;
     });
   // 总量兜底：栈再长也不能把日志撑大
