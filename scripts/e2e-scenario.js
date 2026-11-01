@@ -8856,6 +8856,256 @@ module.exports = async function runScenario(ctx) {
     Object.keys(JSON.parse(await fs.readFile(r1ConfigPath, 'utf8'))).sort().join(',') ===
       r1ConfigKeysBefore
   );
+  // 50p. 前端界面优化（v0.8.5 R2）：顶栏按钮分组 / 间距 / 悬停按下禁用反馈、
+  // 下拉菜单与悬浮选择卡视觉统一、章节列表当前章强调、状态栏信息层级、
+  // 1294×766（作者窗口）与窄窗口不挤压、亮色与夜间两套主题都成立。
+  // 纯 CSS / class 改动：按钮 id、顺序、事件都不变；不写章节 txt / 书目，不给配置加字段。
+  const uiBookSidebar = await exec('window.__cwTest.sidebarWidth()');
+  const uiTxt0Before = await fs.stat(r1Txt0Path);
+  const uiMetaBefore = await fs.readFile(r1MetaPath, 'utf8');
+  const uiDirBefore = (await fs.readdir(r1BookPath)).sort().join('|');
+  const uiLayout = await exec(`(() => {
+    const header = document.querySelector('.editor-header');
+    const groups = Array.from(document.querySelectorAll('.editor-actions > .action-group'));
+    const groupIds = groups.map((g) => Array.from(g.querySelectorAll(':scope > .btn, :scope > .dropdown > .btn')).map((b) => b.id));
+    const save = document.getElementById('btn-save');
+    const items = Array.from(document.querySelectorAll('.editor-actions .btn')).concat([save]);
+    const rect = (el) => {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return { id: el.id, left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height, ws: cs.whiteSpace, opacity: cs.opacity, cursor: cs.cursor, disabled: el.disabled };
+    };
+    const rects = items.map(rect);
+    const overlaps = [];
+    for (let i = 0; i < rects.length; i += 1) {
+      for (let j = i + 1; j < rects.length; j += 1) {
+        const a = rects[i];
+        const b = rects[j];
+        if (a.width > 0 && b.width > 0 && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) overlaps.push([a.id, b.id]);
+      }
+    }
+    const clipped = rects.filter((r) => r.left < -0.5 || r.right > window.innerWidth + 0.5 || r.width < 36 || r.height < 26);
+    const sep = groups.length > 1 ? getComputedStyle(groups[1], '::before') : null;
+    const menuPick = (id) => {
+      const cs = getComputedStyle(document.getElementById(id));
+      return { id, bg: cs.backgroundColor, border: cs.borderTopColor, radius: cs.borderTopLeftRadius, shadow: cs.boxShadow, pad: cs.paddingTop + '/' + cs.paddingLeft, minWidth: cs.minWidth };
+    };
+    return {
+      vw: window.innerWidth,
+      headerH: Math.round(header.getBoundingClientRect().height),
+      groups: groups.length,
+      groupIds,
+      saveParent: save.parentElement.className,
+      rects,
+      clipped,
+      overlaps,
+      sep: sep ? { width: sep.width, height: sep.height } : null,
+      menus: ['format-menu', 'display-menu', 'export-menu'].map(menuPick),
+      menuItem: (() => { const cs = getComputedStyle(document.querySelector('#display-menu button')); return { radius: cs.borderTopLeftRadius, minHeight: cs.minHeight }; })(),
+      chapter: (() => {
+        const active = document.querySelector('.chapter-item.active');
+        const sidebar = document.getElementById('sidebar');
+        if (!active || !sidebar) return null;
+        const a = getComputedStyle(active);
+        return { bg: a.backgroundColor, sidebarBg: getComputedStyle(sidebar).backgroundColor, borderW: a.borderLeftWidth, borderColor: a.borderLeftColor, weight: a.fontWeight, radius: a.borderTopLeftRadius, ring: a.boxShadow };
+      })(),
+      status: (() => {
+        const bar = document.querySelector('.statusbar');
+        const char = document.getElementById('char-count');
+        const hints = document.querySelector('.status-hints');
+        if (!bar || !char || !hints) return null;
+        return { barH: Math.round(bar.getBoundingClientRect().height), charBorder: getComputedStyle(char).borderLeftWidth, hintBorder: getComputedStyle(hints).borderLeftWidth, hintDisplay: getComputedStyle(hints).display, kbd: hints.querySelectorAll('.kbd').length, statusWeight: getComputedStyle(document.getElementById('status-text')).fontWeight };
+      })(),
+      save: rects.find((r) => r.id === 'btn-save')
+    };
+  })()`);
+  const uiTops = uiLayout.rects.map((r) => Math.round(r.top));
+  check(
+    '界面优化：顶栏按「写作 / 插入 / 整理与显示 / 导出」分成 4 组，按钮 id 与顺序不变、保存按钮独立在组外',
+    uiLayout.groups === 4 &&
+      JSON.stringify(uiLayout.groupIds) ===
+        JSON.stringify([
+          ['btn-find', 'btn-focus', 'btn-reading', 'btn-proofread', 'btn-tts'],
+          ['btn-insert-fragment', 'btn-insert'],
+          ['btn-format', 'btn-display'],
+          ['btn-export']
+        ]) &&
+      uiLayout.saveParent.split(' ').includes('editor-header'),
+    { groups: uiLayout.groups, groupIds: uiLayout.groupIds, saveParent: uiLayout.saveParent }
+  );
+  check(
+    '界面优化：组与组之间有一条 1×18px 的细分隔线（不是靠大空隙硬隔开）',
+    Boolean(uiLayout.sep) && uiLayout.sep.width === '1px' && uiLayout.sep.height === '18px',
+    uiLayout.sep
+  );
+  check(
+    '界面优化：顶栏按钮不折字、不互相重叠、不被窗口裁掉（宽度 / 高度都完整）',
+    uiLayout.clipped.length === 0 &&
+      uiLayout.overlaps.length === 0 &&
+      uiLayout.rects.every((r) => r.ws === 'nowrap'),
+    { vw: uiLayout.vw, clipped: uiLayout.clipped, overlaps: uiLayout.overlaps }
+  );
+  check(
+    '界面优化：禁用的「保存」有明确的禁用外观（半透明 + 默认光标）',
+    uiLayout.save && uiLayout.save.disabled === true && Number(uiLayout.save.opacity) <= 0.5 && uiLayout.save.cursor === 'default',
+    uiLayout.save
+  );
+  const uiMenuSig = uiLayout.menus.map((m) => [m.bg, m.border, m.radius, m.shadow, m.pad].join('|'));
+  check(
+    '界面优化：下拉菜单与悬浮选择卡视觉统一（同一套底色 / 描边 / 圆角 / 投影 / 内边距）',
+    new Set(uiMenuSig).size === 1 && uiLayout.menus[0].radius === '10px',
+    uiLayout.menus
+  );
+  check(
+    '界面优化：菜单条目统一 32px 高、7px 圆角（三处弹层同一套）',
+    uiLayout.menuItem.radius === '7px' && uiLayout.menuItem.minHeight === '32px',
+    uiLayout.menuItem
+  );
+  check(
+    '界面优化：章节列表当前章有更重的底色 + 3px 强调线 + 细内描边，和侧栏底色分得开',
+    uiLayout.chapter &&
+      uiLayout.chapter.borderW === '3px' &&
+      uiLayout.chapter.weight === '600' &&
+      uiLayout.chapter.radius === '7px' &&
+      uiLayout.chapter.bg !== uiLayout.chapter.sidebarBg &&
+      uiLayout.chapter.ring !== 'none',
+    uiLayout.chapter
+  );
+  check(
+    '界面优化：状态栏用细竖线分出「本章字数 / 快捷键」层级，两条快捷键提示成组',
+    uiLayout.status &&
+      uiLayout.status.barH === 34 &&
+      uiLayout.status.charBorder === '1px' &&
+      uiLayout.status.hintBorder === '1px' &&
+      uiLayout.status.hintDisplay !== 'none' &&
+      uiLayout.status.kbd === 2,
+    uiLayout.status
+  );
+
+  // 1294×766（作者窗口）：默认 250px 章节栏时顶栏仍是一行，按钮完整可见
+  const uiOrigBounds = win.getBounds();
+  win.setSize(1294, 766);
+  await sleep(450);
+  const uiWide = await exec(`(() => {
+    const header = document.querySelector('.editor-header');
+    const items = Array.from(document.querySelectorAll('.editor-actions .btn')).concat([document.getElementById('btn-save')]);
+    const rects = items.map((el) => { const r = el.getBoundingClientRect(); return { id: el.id, l: r.left, r: r.right, t: Math.round(r.top), w: r.width, h: r.height }; });
+    return { vw: window.innerWidth, headerH: Math.round(header.getBoundingClientRect().height), rects, sidebar: window.__cwTest.sidebarWidth() };
+  })()`);
+  check(
+    '界面优化：1294×766 顶栏一行放下全部按钮（不挤压、不裁切、标题不换行）',
+    uiWide.vw >= 1200 &&
+      new Set(uiWide.rects.map((r) => r.t)).size === 1 &&
+      uiWide.headerH <= 64 &&
+      uiWide.rects.every((r) => r.l >= -0.5 && r.r <= uiWide.vw + 0.5 && r.w >= 40),
+    uiWide
+  );
+  win.setSize(uiOrigBounds.width, uiOrigBounds.height);
+  await sleep(450);
+
+  // 窄窗口（960 宽，应用允许的最小值）：顶栏自动排成两行，按钮仍然完整可见
+  win.setSize(960, 700);
+  await sleep(500);
+  const uiNarrow = await exec(`(() => {
+    const header = document.querySelector('.editor-header');
+    const items = Array.from(document.querySelectorAll('.editor-actions .btn')).concat([document.getElementById('btn-save')]);
+    const rects = items.map((el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return { id: el.id, l: r.left, r: r.right, t: Math.round(r.top), w: r.width, h: r.height, ws: cs.whiteSpace }; });
+    const overlaps = [];
+    for (let i = 0; i < rects.length; i += 1) for (let j = i + 1; j < rects.length; j += 1) {
+      const a = rects[i]; const b = rects[j];
+      if (a.l < b.r - 1 && b.l < a.r - 1 && a.t === b.t && a.t < b.t + b.h - 1 && b.t < a.t + a.h - 1) overlaps.push([a.id, b.id]);
+    }
+    return { vw: window.innerWidth, headerH: Math.round(header.getBoundingClientRect().height), rows: new Set(rects.map((r) => r.t)).size, rects, overlaps };
+  })()`);
+  check(
+    '界面优化：960 窄窗口顶栏排成两行（标题 + 保存 / 工具按钮），按钮不折字、不重叠、不出窗口',
+    uiNarrow.vw <= 960 &&
+      uiNarrow.rows >= 2 &&
+      uiNarrow.overlaps.length === 0 &&
+      uiNarrow.rects.every((r) => r.ws === 'nowrap' && r.l >= -0.5 && r.r <= uiNarrow.vw + 0.5 && r.w >= 40 && r.h >= 26),
+    uiNarrow
+  );
+  win.setSize(uiOrigBounds.width, uiOrigBounds.height);
+  await sleep(1100);
+  check(
+    '界面优化：窗口尺寸来回变完，顶栏回到原布局（按钮顺序 / 分组没乱）',
+    (await exec("document.querySelectorAll('.editor-actions > .action-group').length")) === 4 &&
+      (await exec("document.querySelector('.editor-header').getBoundingClientRect().height")) < 90
+  );
+
+  // 亮色 / 夜间两套主题：夜间时菜单 / 选择卡 / 当前章 / 状态栏都换成深色，不是白底浅字
+  const uiBookId = await exec('window.__cwTest.bookId()');
+  const uiConfigPaperBefore = JSON.parse(await fs.readFile(r1ConfigPath, 'utf8')).editorPaper;
+  await exec('window.__cwTest.openSettings()');
+  await waitFor('window.__cwTest.settingsOpen() === true');
+  await exec("window.__cwTest.setSelect('settings-paper', 'night')");
+  await sleep(250);
+  const uiNight = await exec(`(() => {
+    const pick = (el) => { const cs = getComputedStyle(el); return { bg: cs.backgroundColor, border: cs.borderTopColor, color: cs.color }; };
+    const rgb = (value) => (value.match(/\\d+/g) || []).map(Number);
+    const menu = pick(document.getElementById('format-menu'));
+    const item = pick(document.querySelector('#format-menu button'));
+    const bar = pick(document.querySelector('.statusbar'));
+    const active = pick(document.querySelector('.chapter-item.active'));
+    const lightActiveBg = ${JSON.stringify(uiLayout.chapter.bg)};
+    return { bodyClass: document.body.className, menu, item, bar, active, menuDark: rgb(menu.bg).slice(0, 3).every((n) => n < 80), itemLight: rgb(item.color).slice(0, 3).every((n) => n > 150), barDark: rgb(bar.bg).slice(0, 3).every((n) => n < 80), activeDiff: active.bg !== lightActiveBg };
+  })()`);
+  check(
+    '界面优化：夜间主题下菜单 / 选择卡是深色底、浅色字（不出现白底白字）',
+    uiNight.bodyClass.includes('theme-night') &&
+      uiNight.menuDark &&
+      uiNight.itemLight &&
+      uiNight.menu.border !== 'rgba(0, 0, 0, 0)' &&
+      uiNight.barDark &&
+      uiNight.activeDiff,
+    uiNight
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor('window.__cwTest.settingsOpen() === false');
+  await sleep(250);
+  const uiConfigAfterPreview = JSON.parse(await fs.readFile(r1ConfigPath, 'utf8'));
+  check(
+    '界面优化：夜间只是界面预览（关掉设置后配置里仍是原主题、这本书没有多出夜间覆盖）',
+    uiConfigAfterPreview.editorPaper === uiConfigPaperBefore &&
+      !(uiConfigAfterPreview.bookDisplay && uiConfigAfterPreview.bookDisplay[uiBookId] && uiConfigAfterPreview.bookDisplay[uiBookId].editorPaper) &&
+      !(await exec('document.body.className')).includes('theme-night'),
+    { paper: uiConfigAfterPreview.editorPaper, before: uiConfigPaperBefore, bookDisplay: uiConfigAfterPreview.bookDisplay ? uiConfigAfterPreview.bookDisplay[uiBookId] : null }
+  );
+
+  // 分组 / 换行之后按钮仍然接原来的事件：点「查找」照常开面板，Esc 关掉
+  await exec("document.getElementById('btn-find').click()");
+  await waitFor('window.__cwTest.findPanelOpen() === true');
+  check(
+    '界面优化：顶栏重新分组后按钮事件不变（点「查找」照常打开查找面板）',
+    (await exec('window.__cwTest.findPanelOpen()')) === true
+  );
+  await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  await waitFor('window.__cwTest.findPanelOpen() === false');
+  check(
+    '界面优化：界面调整全程不写书库（txt 大小 + mtime、书目、书内文件列表都不变，无 _trash / 临时文件）',
+    (await fs.stat(r1Txt0Path)).size === uiTxt0Before.size &&
+      (await fs.stat(r1Txt0Path)).mtimeMs === uiTxt0Before.mtimeMs &&
+      (await fs.readFile(r1MetaPath, 'utf8')) === uiMetaBefore &&
+      (await fs.readdir(r1BookPath)).sort().join('|') === uiDirBefore &&
+      !(await fs.readdir(r1BookPath)).join('|').includes('_trash')
+  );
+  const uiTextAfter = await exec('window.__cwTest.text()');
+  const uiDirtyAfter = await exec('window.__cwTest.dirty()');
+  const uiConfigKeysAfter = Object.keys(JSON.parse(await fs.readFile(r1ConfigPath, 'utf8'))).sort().join(',');
+  check(
+    '界面优化：章节正文与未保存状态都没被界面操作碰到，配置也没加新字段',
+    uiTextAfter === r1Messy && uiDirtyAfter === false && uiConfigKeysAfter === r1ConfigKeysBefore,
+    {
+      sidebar: uiBookSidebar,
+      textSame: uiTextAfter === r1Messy,
+      textNow: uiTextAfter,
+      textExpected: r1Messy,
+      dirty: uiDirtyAfter,
+      keysNow: uiConfigKeysAfter,
+      keysBefore: r1ConfigKeysBefore
+    }
+  );
+
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
 

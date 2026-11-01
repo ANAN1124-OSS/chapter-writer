@@ -30,6 +30,19 @@
   --find-hit-tint: rgba(214, 158, 40, .24);
   --find-hit-current-tint: rgba(222, 138, 30, .46);
   --find-hit-current-edge: rgba(150, 82, 16, .90);
+  /* 界面小件（v0.8.5 R2）：按钮 / 菜单 / 章节列表统一的反馈色与层级。
+   * 只影响观感：悬停 / 按下 / 焦点 / 当前章，不动任何功能与数据。 */
+  --btn-press: rgba(43, 40, 34, .09);
+  --btn-primary-hover: #7a4d31;
+  --btn-primary-press: #6b422a;
+  --menu-radius: 10px;
+  --menu-shadow: 0 14px 34px rgba(60, 48, 30, .18), 0 2px 6px rgba(60, 48, 30, .07);
+  --menu-hover: rgba(138, 90, 59, .10);
+  --menu-item-radius: 7px;
+  --chapter-hover: rgba(138, 90, 59, .065);
+  --chapter-active-bg: color-mix(in srgb, var(--accent) 7%, var(--paper-soft));
+  --chapter-active-hover: color-mix(in srgb, var(--accent) 11%, var(--paper-soft));
+  --chapter-active-ring: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 /* 背景主题：只换纸色/纹理（书架、章节栏、正文一起变），正文墨色默认不动 */
@@ -97,6 +110,16 @@ body.theme-night {
   --find-hit-tint: rgba(236, 182, 92, .20);
   --find-hit-current-tint: rgba(240, 172, 80, .40);
   --find-hit-current-edge: rgba(255, 208, 128, .85);
+  /* 夜间界面小件：按钮 / 菜单 / 当前章都用一层淡淡的暖白，避免纯黑死板 */
+  --btn-press: rgba(255, 255, 255, .04);
+  --btn-primary-hover: #b07a4f;
+  --btn-primary-press: #9d6b45;
+  --menu-shadow: 0 16px 40px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .35);
+  --menu-hover: rgba(255, 255, 255, .08);
+  --chapter-hover: rgba(255, 255, 255, .055);
+  --chapter-active-bg: color-mix(in srgb, var(--accent) 12%, var(--paper-soft));
+  --chapter-active-hover: color-mix(in srgb, var(--accent) 17%, var(--paper-soft));
+  --chapter-active-ring: color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -155,7 +178,21 @@ html, body {
 }
 .brand-name { font-size: 17px; font-weight: 600; letter-spacing: 1px; }
 .version { transform: translateY(-2px); }
-.topbar-right { display: flex; align-items: center; gap: 14px; }
+.topbar-right { display: flex; align-items: center; gap: 12px; min-width: 0; }
+/* 书架顶栏：搜索框 / 书库路径 / 右侧按钮分三块。路径太长时省略，不把搜索框和按钮挤变形。 */
+#books-root-label {
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
 
 /* 书架搜索（书名 / 章节名） */
 .shelf-search { position: relative; width: 238px; }
@@ -458,30 +495,43 @@ html, body {
 .btn {
   font-family: var(--ui-font);
   font-size: 13px;
+  line-height: 1.2;
   color: var(--ink);
   background: transparent;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
-  padding: 6px 13px;
+  padding: 6px 12px;
+  min-height: 30px;
+  white-space: nowrap;
   cursor: pointer;
-  transition: background .12s ease, border-color .12s ease;
+  transition: background .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease;
   user-select: none;
 }
-.btn:hover { background: var(--paper-deep); }
-.btn:disabled { opacity: .42; cursor: default; }
+.btn:hover:not(:disabled) { background: var(--paper-deep); }
+.btn:active:not(:disabled) {
+  background: var(--btn-press);
+  box-shadow: inset 0 1px 3px rgba(43, 40, 34, .10);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+.btn:disabled { opacity: .45; cursor: default; }
 .btn:disabled:hover { background: transparent; }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
 }
-.btn.primary:hover { background: #7a4d31; }
+.btn.primary:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
+.btn.primary:active:not(:disabled) { background: var(--btn-primary-press); }
 .btn.primary:disabled { background: var(--accent); }
 .btn.ghost { border-color: transparent; color: var(--ink-soft); }
-.btn.ghost:hover { background: var(--paper-deep); color: var(--ink); }
+.btn.ghost:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
+.btn.ghost:active:not(:disabled) { background: var(--btn-press); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover { background: #8f3836; }
-.btn.tiny { font-size: 11px; padding: 2px 7px; }
+.btn.tiny { font-size: 11px; padding: 2px 7px; min-height: 0; }
 
 /* ---------- 编辑器布局 ---------- */
 .editor-view { flex-direction: row; }
@@ -554,21 +604,26 @@ body.resizing .editor {
   display: flex;
   align-items: baseline;
   gap: 5px;
-  padding: 8px 9px;
+  padding: 8px 10px;
   margin-bottom: 2px;
-  border-radius: 6px;
+  border-radius: 7px;
   border-left: 3px solid transparent;
   cursor: pointer;
   font-size: 13.5px;
   line-height: 1.5;
   color: var(--ink);
+  transition: background .12s ease, box-shadow .12s ease;
 }
-.chapter-item:hover { background: var(--hover-tint); }
+.chapter-item:hover { background: var(--chapter-hover); }
+/* 当前章（v0.8.5 R2）：比悬停更重的一层底色 + 左侧强调线 + 一圈细内描边，一眼能看出写到哪。
+ * 颜色全部来自主题变量，亮色 / 夜间各自成立；只改外观，不改当前章的选中逻辑。 */
 .chapter-item.active {
-  background: var(--paper-soft);
+  background: var(--chapter-active-bg);
   border-left-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--chapter-active-ring);
   font-weight: 600;
 }
+.chapter-item.active:hover { background: var(--chapter-active-hover); }
 .chapter-num { flex: 0 0 auto; color: var(--ink-soft); font-size: 12px; }
 .chapter-item.active .chapter-num { color: var(--accent); }
 .chapter-name {
@@ -592,7 +647,8 @@ body.resizing .editor {
 }
 .chapter-item.status-revising .chapter-status-dot { background: #d99a2b; }
 .chapter-item.status-done .chapter-status-dot { background: #3f9e5f; }
-.chapter-item.active .chapter-status-dot { box-shadow: 0 0 0 2px var(--paper-soft); }
+/* 章节画一个当前章小圆点 / 备注 / 字数的彩色提示，只在当前章加一圈与底色同色的描边，让圆点更清楚 */
+.chapter-item.active .chapter-status-dot { box-shadow: 0 0 0 2px var(--chapter-active-bg); }
 .chapter-note-mark { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
 .chapter-item.active .chapter-note-mark { color: var(--ink-soft); }
 /* 章节列表的字数（来自书目缓存，保存后更新）：紧凑的「1.2万」，窄栏也不会把章名挤没 */
@@ -652,54 +708,82 @@ body.resizing .editor {
   background: var(--paper);
 }
 .editor-header {
-  height: 56px;
-  flex: 0 0 56px;
+  min-height: 56px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  column-gap: 14px;
+  row-gap: 6px;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 8px 20px;
   border-bottom: 1px solid var(--line);
   background: var(--paper-soft);
 }
 .chapter-title {
+  /* 标题让位给按钮：flex-basis 0 让它在同一行里只吃剩下的宽度（超长就省略号），
+   * 不会被按钮组「挤」成两行、也不会把按钮挤出窗口。 */
+  flex: 1 1 0;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.editor-actions { display: flex; align-items: center; gap: 8px; }
+.editor-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+/* 顶栏分组（v0.8.5 R2）：写作 / 插入 / 整理与显示 / 导出，组间一条 18px 的细线。
+ * 组本身只是 flex 容器，按钮 id / 顺序 / 事件全都不变；窗口变窄时先整体换行、不压扁按钮。 */
+.action-group { display: flex; align-items: center; gap: 6px; }
+.action-group + .action-group::before {
+  content: "";
+  width: 1px;
+  height: 18px;
+  margin: 0 4px 0 2px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
 
 .dropdown { position: relative; }
+/* 下拉菜单 / 悬浮选择卡共用一套外观（v0.8.5 R2）：同一套圆角、描边、投影、内边距与条目高亮，
+ * 三个入口（整理 / 显示 / 导出）看起来是同一件东西；只改视觉，不改展开 / 收起逻辑。 */
 .dropdown-menu {
   position: absolute;
-  top: 34px;
+  top: calc(100% + 6px);
   right: 0;
   z-index: 30;
-  min-width: 190px;
-  padding: 5px;
+  min-width: 200px;
+  padding: 6px;
   background: var(--paper-soft);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  box-shadow: 0 10px 26px rgba(60, 48, 30, .18);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
 }
 /* 「整理」悬浮选择卡 / 「显示」菜单：条目较长（一键整理本书… / 显示不可见字符…），给宽一点避免折行 */
 #format-menu,
 #display-menu { min-width: 250px; }
 /* 悬浮选择卡：鼠标从按钮移到卡片中间隔了几像素，给卡片加一块透明的「搭桥」区，
-   这样指针一路都落在 wrapper 的后代上，不会先触发 pointerleave（卡片还没等鼠标到就收起）。 */
+   这样指针一路都落在 wrapper 的后代上，不会先触发 pointerleave（卡片还没等鼠标到就收起）。
+   卡片与按钮的间距由上面的 calc(100% + 6px) 决定，这里覆盖 6px 间隙 + 上方余量。 */
 #format-menu::before {
   content: '';
   position: absolute;
   left: 0;
   right: 0;
-  top: -10px;
-  height: 10px;
+  top: -12px;
+  height: 12px;
 }
 /* 选择卡顶部一句说明：点「整理」= 直接用记住的规则整理本章 */
 .format-card-note {
-  padding: 3px 10px 8px;
-  margin-bottom: 3px;
+  padding: 3px 9px 8px;
+  margin: 0 0 4px;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   line-height: 1.45;
@@ -708,17 +792,25 @@ body.resizing .editor {
 .dropdown-menu button {
   display: block;
   width: 100%;
-  padding: 8px 10px;
+  min-height: 32px;
+  padding: 7px 10px;
   text-align: left;
   font-family: var(--ui-font);
   font-size: 13px;
+  line-height: 1.35;
   color: var(--ink);
   background: none;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--menu-item-radius);
   cursor: pointer;
+  transition: background .1s ease, color .1s ease;
 }
-.dropdown-menu button:hover { background: var(--paper-deep); }
+.dropdown-menu button:hover:not(:disabled) { background: var(--menu-hover); }
+.dropdown-menu button:active:not(:disabled) { background: var(--btn-press); }
+.dropdown-menu button:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: -2px;
+}
 
 /* 当前段落高亮颜色（v0.8-10b，提案 N10b）：色板 + 取色器。
    「排版 ▾」菜单和「设置 → 当前段落高亮」共用同一套样式；色块只是显示层，点了才写 config。 */
@@ -999,12 +1091,28 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   flex: 0 0 34px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 0 20px;
+  gap: 8px;
+  padding: 0 18px;
   border-top: 1px solid var(--line);
   background: var(--paper-soft);
   font-size: 12px;
   color: var(--ink-soft);
+}
+/* 状态栏信息层级（v0.8.5 R2）：左边「保存状态」，右边依次是计时 / 统计 / 小标签 / 本章字数 / 快捷键。
+ * 只用细竖线分组、字重与透明度分主次；状态文案、数字与按钮的语义全部没变。 */
+#status-text { font-weight: 500; }
+#char-count {
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.status-hints {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
 }
 .dot {
   width: 8px;
@@ -1042,7 +1150,7 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.status-timer:hover { background: var(--paper); }
+.status-timer:hover { background: var(--paper-deep); }
 .status-timer.running {
   border-color: var(--ok);
   color: var(--ok);
@@ -1085,13 +1193,16 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 }
 .status-find:hover { background: var(--paper-deep); }
 #char-count.count-short { color: var(--warn); }
+/* 快捷键提示：压低对比度，只作提示，不跟正文信息抢注意力 */
 .kbd {
-  padding: 1px 6px;
-  border: 1px solid var(--line-strong);
+  padding: 0 5px;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--paper);
+  background: transparent;
   font-size: 11px;
+  line-height: 1.6;
   color: var(--ink-faint);
+  white-space: nowrap;
 }
 
 /* ---------- 模态 ---------- */
@@ -1352,7 +1463,7 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 /* ---------- 排版 ---------- */
 .dropdown-sep {
   height: 1px;
-  margin: 5px 6px;
+  margin: 6px 4px;
   background: var(--line);
 }
 .dropdown-menu button:disabled {
@@ -2182,19 +2293,21 @@ body.chapter-dragging * { user-select: none; }
 }
 
 /* ---------- 右键菜单 ---------- */
+/* 和顶栏下拉菜单 / 悬浮选择卡共用一套外观变量（v0.8.5 R2），三处弹层看起来统一 */
 .context-menu {
   position: fixed;
   z-index: 150;
   min-width: 184px;
-  padding: 5px;
+  padding: 6px;
   background: var(--paper-soft);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  box-shadow: 0 12px 28px rgba(60, 48, 30, .2);
+  border-radius: var(--menu-radius);
+  box-shadow: var(--menu-shadow);
 }
 .context-menu button {
   display: block;
   width: 100%;
+  min-height: 32px;
   padding: 7px 10px;
   text-align: left;
   font-family: var(--ui-font);
@@ -2202,11 +2315,16 @@ body.chapter-dragging * { user-select: none; }
   color: var(--ink);
   background: none;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--menu-item-radius);
   cursor: pointer;
+  transition: background .1s ease;
 }
-.context-menu button:hover { background: var(--paper-deep); }
-.context-menu-sep { height: 1px; margin: 4px 6px; background: var(--line-strong); }
+.context-menu button:hover { background: var(--menu-hover); }
+.context-menu button:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: -2px;
+}
+.context-menu-sep { height: 1px; margin: 6px 4px; background: var(--line); }
 .danger-text { color: var(--danger) !important; }
 
 /* ---------- 朗读（悬浮小条：只读正文、不改字、不写盘） ---------- */
@@ -2404,4 +2522,42 @@ body.chapter-dragging * { user-select: none; }
   padding: 7px 22px;
   background: var(--paper-soft);
   border-top: 1px solid var(--line);
+}
+
+/* ---------- 窄窗口适配（v0.8.5 R2）----------
+ * 作者常用窗口 1294×766（内容区约 1267×717）保持原来的宽松间距；窗口再窄时先收紧按钮与分组间距，
+ * 还不够就把顶栏排成两行：第一行「章节标题 + 保存」，第二行整排工具按钮。
+ * 按钮文字永远不折行、不被裁掉；只是布局换行，不隐藏任何按钮、不改事件、不改功能区域。 */
+@media (max-width: 1220px) {
+  .editor-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title save"
+      "actions actions";
+    align-items: center;
+  }
+  .chapter-title { grid-area: title; max-width: none; }
+  .editor-actions { grid-area: actions; margin-left: 0; justify-content: flex-end; }
+  #btn-save { grid-area: save; justify-self: end; }
+}
+@media (max-width: 1200px) {
+  .editor-header { padding: 8px 14px; column-gap: 10px; }
+  .editor-actions { gap: 4px; }
+  .action-group { gap: 4px; }
+  .action-group + .action-group::before { margin: 0 2px; }
+  .editor-header .btn { padding: 5px 9px; font-size: 12.5px; }
+  .topbar { padding: 0 18px; }
+  .shelf-search { width: 220px; }
+  #books-root-label { max-width: 170px; }
+}
+@media (max-width: 1040px) {
+  .editor-header { padding: 6px 12px; row-gap: 4px; }
+  .chapter-title { max-width: none; }
+  .editor-actions { gap: 4px; row-gap: 4px; }
+  .editor-header .btn { padding: 5px 8px; }
+  .shelf-search { width: 190px; }
+  #books-root-label { max-width: 120px; }
+  .statusbar { padding: 0 12px; }
+  .status-hints { padding-left: 8px; gap: 4px; }
 }

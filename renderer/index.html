@@ -23,9 +23,11 @@
             <button id="btn-shelf-search-clear" class="shelf-search-clear hidden" type="button" title="清除搜索（Esc）">×</button>
           </div>
           <span id="books-root-label" class="muted small"></span>
-          <button id="btn-add-fragment" class="btn ghost" type="button" title="灵感箱：随手记一条碎片，存到书架根目录的 _碎片 文件夹（纯 txt，不用新建章节）">＋ 碎片</button>
-          <button id="btn-import" class="btn ghost" type="button" title="把一个外部文件夹导入成书架里的一本书">导入小说</button>
-          <button id="btn-settings" class="btn ghost" type="button">设置</button>
+          <div class="topbar-actions">
+            <button id="btn-add-fragment" class="btn ghost" type="button" title="灵感箱：随手记一条碎片，存到书架根目录的 _碎片 文件夹（纯 txt，不用新建章节）">＋ 碎片</button>
+            <button id="btn-import" class="btn ghost" type="button" title="把一个外部文件夹导入成书架里的一本书">导入小说</button>
+            <button id="btn-settings" class="btn ghost" type="button">设置</button>
+          </div>
         </div>
       </header>
       <div class="shelf-body">
@@ -82,66 +84,76 @@
         <header class="editor-header">
           <div class="chapter-title" id="chapter-title"></div>
           <div class="editor-actions">
-            <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
-            <button id="btn-focus" class="btn ghost" type="button" title="专注模式：隐藏左栏与顶栏，只留正文（F11 进出，Esc 退出；不写配置）">专注</button>
-            <button id="btn-reading" class="btn ghost" type="button" title="阅读模式：把整本书当只读稿子连续读（字号 / 行距 / 目录 / 上一章 / 下一章；不改字、不写盘、不改书目，Esc 退出）">阅读</button>
-            <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
-            <button id="btn-tts" class="btn ghost" type="button" title="朗读本章：用 Windows 自带语音读正文，只读不改、不写盘（Esc 停止）">朗读</button>
-            <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
-            <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
-            <!-- 「整理」：点击 = 直接用上次记住的规则整理本章；鼠标悬浮 / Tab 聚焦 = 出现选择卡 -->
-            <div class="dropdown" id="format-dropdown">
-              <button id="btn-format" class="btn ghost" type="button" title="点击：直接用上次记住的规则整理本章（只改编辑区、仍是未保存，Ctrl+S 保存 / Ctrl+Z 撤销）。鼠标悬浮或 Tab 聚焦：打开选择卡（排版设置… / 一键整理本书… / 撤销上次整理）">整理 ▾</button>
-              <div class="dropdown-menu format-card hidden" id="format-menu" aria-label="整理选项">
-                <div class="format-card-note" id="format-card-note">点「整理」= 直接用记住的规则整理本章</div>
-                <button type="button" data-action="settings" id="format-settings-item" title="打开「智能排版 · 仅当前章」对话框：调规则 + 预览 + 套用到本章">排版设置…</button>
-                <button type="button" data-action="apply-book" id="format-book-item" title="用同一套规则把整本书逐章整理（先预检查 + 确认，写盘前整本备份到 _trash）">一键整理本书…</button>
-                <button type="button" data-action="undo" id="format-undo-item" title="把最近一次整理退回编辑区（仍在编辑区、未写盘）">撤销上次整理</button>
-              </div>
+            <!-- v0.8.5 R2：顶栏按「写作 / 插入 / 整理与显示 / 导出」分组（纯 class + CSS，不动任何功能） -->
+            <div class="action-group">
+              <button id="btn-find" class="btn ghost" type="button" title="查找替换（Ctrl+F）">查找</button>
+              <button id="btn-focus" class="btn ghost" type="button" title="专注模式：隐藏左栏与顶栏，只留正文（F11 进出，Esc 退出；不写配置）">专注</button>
+              <button id="btn-reading" class="btn ghost" type="button" title="阅读模式：把整本书当只读稿子连续读（字号 / 行距 / 目录 / 上一章 / 下一章；不改字、不写盘、不改书目，Esc 退出）">阅读</button>
+              <button id="btn-proofread" class="btn ghost" type="button" title="校对：只列出可疑的地方，不改正文、不写盘">校对</button>
+              <button id="btn-tts" class="btn ghost" type="button" title="朗读本章：用 Windows 自带语音读正文，只读不改、不写盘（Esc 停止）">朗读</button>
             </div>
-            <!-- 「显示」：只改 CSS 的显示项（正文一个字都不动），点一下展开 -->
-            <div class="dropdown" id="display-dropdown">
-              <button id="btn-display" class="btn ghost" type="button" title="正文显示：预设 / 不可见字符 / 超长段落提示 / 当前段落高亮 / 高亮颜色 / 正文显示设置（只改显示，不动正文）">显示 ▾</button>
-              <div class="dropdown-menu hidden" id="display-menu">
-                <button type="button" data-action="preset-compact">显示：紧凑</button>
-                <button type="button" data-action="preset-normal">显示：标准</button>
-                <button type="button" data-action="preset-loose">显示：宽松</button>
-                <div class="dropdown-sep"></div>
-                <button type="button" data-action="toggle-invisibles" id="format-invisibles">显示不可见字符（␣ / 行尾空白）</button>
-                <button type="button" data-action="toggle-long-para" id="format-long-para">超长段落提示（>500 字左侧黄线）</button>
-                <button type="button" data-action="toggle-caret-para" id="format-caret-para" title="光标所在那一段画一层淡色底 + 左侧细线。开关与颜色都按书记忆（存在 config.json 的 bookDisplay 里，不碰正文 / 书目 / 章节文件）。">当前段落高亮（光标所在段）</button>
-                <div class="caret-color-row" id="format-caret-colors" title="高亮颜色按书记忆；默认跟随当前背景主题">
-                  <span class="caret-color-label">高亮颜色</span>
-                  <div class="caret-swatches">
-                    <button type="button" class="caret-swatch caret-swatch-theme" data-caret-color="" title="跟随背景主题（默认）" aria-label="跟随背景主题"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#c8873c" title="琥珀（暖色，接近默认木质色调）" aria-label="琥珀"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#3f7fbf" title="湖蓝（冷色，夜间也清楚）" aria-label="湖蓝"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#4f8a5b" title="豆绿（护眼绿）" aria-label="豆绿"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#b45f6d" title="胭脂（偏红）" aria-label="胭脂"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#7a63b0" title="藤紫（低饱和紫）" aria-label="藤紫"></button>
-                    <button type="button" class="caret-swatch" data-caret-color="#7d8794" title="石墨（中性灰，最不抢眼）" aria-label="石墨"></button>
-                  </div>
-                  <input id="format-caret-color" class="caret-color-input" type="color" value="#c8873c" title="取色器：自定义高亮颜色（按书记忆）" aria-label="自定义高亮颜色" />
+            <div class="action-group">
+              <button id="btn-insert-fragment" class="btn ghost" type="button" title="插入碎片…：把 _碎片 里的一条灵感插到光标处（只改编辑区、不写盘，原碎片保留）">插入碎片…</button>
+              <button id="btn-insert" class="btn ghost" type="button" title="在当前章之后插入新章">＋ 插入</button>
+            </div>
+            <div class="action-group">
+              <!-- 「整理」：点击 = 直接用上次记住的规则整理本章；鼠标悬浮 / Tab 聚焦 = 出现选择卡 -->
+              <div class="dropdown" id="format-dropdown">
+                <button id="btn-format" class="btn ghost" type="button" title="点击：直接用上次记住的规则整理本章（只改编辑区、仍是未保存，Ctrl+S 保存 / Ctrl+Z 撤销）。鼠标悬浮或 Tab 聚焦：打开选择卡（排版设置… / 一键整理本书… / 撤销上次整理）">整理 ▾</button>
+                <div class="dropdown-menu format-card hidden" id="format-menu" aria-label="整理选项">
+                  <div class="format-card-note" id="format-card-note">点「整理」= 直接用记住的规则整理本章</div>
+                  <button type="button" data-action="settings" id="format-settings-item" title="打开「智能排版 · 仅当前章」对话框：调规则 + 预览 + 套用到本章">排版设置…</button>
+                  <button type="button" data-action="apply-book" id="format-book-item" title="用同一套规则把整本书逐章整理（先预检查 + 确认，写盘前整本备份到 _trash）">一键整理本书…</button>
+                  <button type="button" data-action="undo" id="format-undo-item" title="把最近一次整理退回编辑区（仍在编辑区、未写盘）">撤销上次整理</button>
                 </div>
-                <div class="dropdown-sep"></div>
-                <button type="button" data-action="display-settings">正文显示设置…</button>
+              </div>
+              <!-- 「显示」：只改 CSS 的显示项（正文一个字都不动），点一下展开 -->
+              <div class="dropdown" id="display-dropdown">
+                <button id="btn-display" class="btn ghost" type="button" title="正文显示：预设 / 不可见字符 / 超长段落提示 / 当前段落高亮 / 高亮颜色 / 正文显示设置（只改显示，不动正文）">显示 ▾</button>
+                <div class="dropdown-menu hidden" id="display-menu">
+                  <button type="button" data-action="preset-compact">显示：紧凑</button>
+                  <button type="button" data-action="preset-normal">显示：标准</button>
+                  <button type="button" data-action="preset-loose">显示：宽松</button>
+                  <div class="dropdown-sep"></div>
+                  <button type="button" data-action="toggle-invisibles" id="format-invisibles">显示不可见字符（␣ / 行尾空白）</button>
+                  <button type="button" data-action="toggle-long-para" id="format-long-para">超长段落提示（>500 字左侧黄线）</button>
+                  <button type="button" data-action="toggle-caret-para" id="format-caret-para" title="光标所在那一段画一层淡色底 + 左侧细线。开关与颜色都按书记忆（存在 config.json 的 bookDisplay 里，不碰正文 / 书目 / 章节文件）。">当前段落高亮（光标所在段）</button>
+                  <div class="caret-color-row" id="format-caret-colors" title="高亮颜色按书记忆；默认跟随当前背景主题">
+                    <span class="caret-color-label">高亮颜色</span>
+                    <div class="caret-swatches">
+                      <button type="button" class="caret-swatch caret-swatch-theme" data-caret-color="" title="跟随背景主题（默认）" aria-label="跟随背景主题"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#c8873c" title="琥珀（暖色，接近默认木质色调）" aria-label="琥珀"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#3f7fbf" title="湖蓝（冷色，夜间也清楚）" aria-label="湖蓝"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#4f8a5b" title="豆绿（护眼绿）" aria-label="豆绿"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#b45f6d" title="胭脂（偏红）" aria-label="胭脂"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#7a63b0" title="藤紫（低饱和紫）" aria-label="藤紫"></button>
+                      <button type="button" class="caret-swatch" data-caret-color="#7d8794" title="石墨（中性灰，最不抢眼）" aria-label="石墨"></button>
+                    </div>
+                    <input id="format-caret-color" class="caret-color-input" type="color" value="#c8873c" title="取色器：自定义高亮颜色（按书记忆）" aria-label="自定义高亮颜色" />
+                  </div>
+                  <div class="dropdown-sep"></div>
+                  <button type="button" data-action="display-settings">正文显示设置…</button>
+                </div>
               </div>
             </div>
-            <div class="dropdown">
-              <button id="btn-export" class="btn ghost" type="button">导出 ▾</button>
-              <div class="dropdown-menu hidden" id="export-menu">
-                <button type="button" data-action="copy">复制整本到剪贴板</button>
-                <button type="button" data-action="txt">导出 TXT…</button>
-                <button type="button" data-action="epub" title="整本或按卷 / 按章节范围导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
-                <button type="button" data-action="docx" title="整本或按卷 / 按章节范围导出成 Word 文档（.docx）：标题页 + 卷 / 章标题 + 段首缩进 2 字、1.5 倍行距">导出 DOCX…</button>
-                <button type="button" data-action="sensitive" title="按你自己的词表检查命中位置：只报告、不改正文、不写盘（应用不内置任何词表）">敏感词预检…</button>
-                <button type="button" data-action="folder">打开本书文件夹</button>
-                <div class="dropdown-sep"></div>
-                <button type="button" data-action="history" title="查看书内 _trash 的替换 / 整理 / 删除章节 / 书目备份">本书历史…</button>
+            <div class="action-group">
+              <div class="dropdown">
+                <button id="btn-export" class="btn ghost" type="button">导出 ▾</button>
+                <div class="dropdown-menu hidden" id="export-menu">
+                  <button type="button" data-action="copy">复制整本到剪贴板</button>
+                  <button type="button" data-action="txt">导出 TXT…</button>
+                  <button type="button" data-action="epub" title="整本或按卷 / 按章节范围导出成 EPUB 电子书：分卷做目录级、一章一个 XHTML、段首缩进 + 段间空行">导出 EPUB…</button>
+                  <button type="button" data-action="docx" title="整本或按卷 / 按章节范围导出成 Word 文档（.docx）：标题页 + 卷 / 章标题 + 段首缩进 2 字、1.5 倍行距">导出 DOCX…</button>
+                  <button type="button" data-action="sensitive" title="按你自己的词表检查命中位置：只报告、不改正文、不写盘（应用不内置任何词表）">敏感词预检…</button>
+                  <button type="button" data-action="folder">打开本书文件夹</button>
+                  <div class="dropdown-sep"></div>
+                  <button type="button" data-action="history" title="查看书内 _trash 的替换 / 整理 / 删除章节 / 书目备份">本书历史…</button>
+                </div>
               </div>
             </div>
-            <button id="btn-save" class="btn primary" type="button" disabled>保存</button>
           </div>
+          <!-- 保存按钮放在分组外面：窄窗口时它和章节标题同一行，按钮组整体换到第二行（v0.8.5 R2） -->
+          <button id="btn-save" class="btn primary" type="button" disabled>保存</button>
         </header>
         <!-- 专注模式（提案 3.5）：隐藏左栏与顶栏，只留正文；这一条是极简退出条（Esc / F11 也能退出） -->
         <div id="focus-bar" class="focus-bar hidden" role="toolbar" aria-label="专注模式">
@@ -173,8 +185,10 @@
           <button id="status-long-para" class="status-long hidden" type="button">超长段落</button>
           <button id="status-find" class="status-find hidden" type="button" title="查找高亮：单击跳到下一处；F3 下一处 / Shift+F3 上一处；Esc 清除">查找</button>
           <span id="char-count" class="muted small" title="本章字数（不含空白），未保存的编辑也算"></span>
-          <span class="kbd">Ctrl+G 跳章</span>
-          <span class="kbd">Ctrl+S 保存</span>
+          <span class="status-hints">
+            <span class="kbd">Ctrl+G 跳章</span>
+            <span class="kbd">Ctrl+S 保存</span>
+          </span>
         </footer>
       </main>
     </section>
