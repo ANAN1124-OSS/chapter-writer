@@ -1768,6 +1768,8 @@
     if (index === state.index && state.dirty) item.classList.add('dirty');
     item.dataset.index = String(index);
     item.dataset.status = status;
+    // 章节 id（v0.9 A-2）：切章只挪高亮、不重建列表时用它核对「列表还是不是这份章节数组」
+    item.dataset.chapterId = String(chapter.id == null ? '' : chapter.id);
     const tip = [
       `状态：${CHAPTER_STATUS_LABELS[status]}`,
       note ? `备注：${note}` : '',
@@ -1826,11 +1828,14 @@
 
   function renderChapterList() {
     const list = $('chapter-list');
-    list.innerHTML = '';
+    // 先离线拼好整条列表，再一次性挂上去：千章书一次重建 1000 条时，逐条 appendChild
+    // 会让容器反复失效（实测能省掉几毫秒）；配合 CSS 的 content-visibility，屏幕外的
+    // 条目连布局都跳过。
+    const frag = document.createDocumentFragment();
     const volumes = volumeList();
     if (!volumes.length) {
       // 没分卷的书：和以前完全一样，平铺章节
-      state.chapters.forEach((chapter, index) => list.appendChild(makeChapterItem(chapter, index)));
+      state.chapters.forEach((chapter, index) => frag.appendChild(makeChapterItem(chapter, index)));
     } else {
       const buckets = new Map(volumes.map((v) => [v.id, []]));
       const orphans = [];
@@ -1840,21 +1845,62 @@
         else orphans.push({ chapter, index });
       });
       if (orphans.length) {
-        list.appendChild(makeVolumeHeader(null, '未分卷', orphans.length));
+        frag.appendChild(makeVolumeHeader(null, '未分卷', orphans.length));
         if (!state.collapsedVolumes.has('')) {
-          orphans.forEach(({ chapter, index }) => list.appendChild(makeChapterItem(chapter, index)));
+          orphans.forEach(({ chapter, index }) => frag.appendChild(makeChapterItem(chapter, index)));
         }
       }
       for (const volume of volumes) {
         const items = buckets.get(volume.id) || [];
-        list.appendChild(makeVolumeHeader(volume.id, volumeDisplayName(volume.id), items.length));
+        frag.appendChild(makeVolumeHeader(volume.id, volumeDisplayName(volume.id), items.length));
         if (!state.collapsedVolumes.has(volume.id)) {
-          items.forEach(({ chapter, index }) => list.appendChild(makeChapterItem(chapter, index)));
+          items.forEach(({ chapter, index }) => frag.appendChild(makeChapterItem(chapter, index)));
         }
       }
     }
+    list.replaceChildren(frag);
     const active = list.querySelector('.chapter-item.active');
     if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  // 章节栏当前应该显示多少条：折叠的卷不渲染；volumeId 指向不存在的卷按「未分卷」算
+  // （和下面 renderChapterList 的 bucketing 同一套规则，切章快路径用它判断列表是否过期）。
+  function visibleChapterCount() {
+    const volumes = volumeList();
+    if (!volumes.length) return state.chapters.length;
+    const ids = new Set(volumes.map((volume) => volume.id));
+    let count = 0;
+    for (const chapter of state.chapters) {
+      const volumeId = chapterVolumeId(chapter);
+      const key = volumeId && ids.has(volumeId) ? volumeId : '';
+      if (!state.collapsedVolumes.has(key)) count += 1;
+    }
+    return count;
+  }
+
+  // 切章只改「当前章」高亮，不重建整条列表（v0.9 A-2）。
+  // 大书 1000 条整表重建一次十几毫秒，而切章时章节没增删、顺序没变、折叠状态也没变——
+  // 唯一要变的就是 active / dirty 两个 class。
+  // 正确性优先，两道核对都对得上才走快路径：
+  //   ① 列表里的条目数 == 当前应该显示的条数（新建 / 删除章节会让它变）；
+  //   ② 当前章那一条的 chapter id == state.chapters[state.index].id（换书 / 重排会变）。
+  // 任一对不上、或当前章在折叠的卷里（列表里没有这一条）就退回整表重建，和旧行为一致。
+  function syncActiveChapterItem() {
+    const list = $('chapter-list');
+    if (!list) return;
+    const current = state.chapters[state.index];
+    const next = current ? list.querySelector(`.chapter-item[data-index="${state.index}"]`) : null;
+    const rendered = list.querySelectorAll('.chapter-item').length;
+    const expectedId = current ? String(current.id == null ? '' : current.id) : '';
+    if (!next || rendered !== visibleChapterCount() || next.dataset.chapterId !== expectedId) {
+      renderChapterList();
+      return;
+    }
+    const previous = list.querySelector('.chapter-item.active');
+    if (previous && previous !== next) previous.classList.remove('active', 'dirty');
+    next.classList.add('active');
+    next.classList.toggle('dirty', Boolean(state.dirty));
+    next.scrollIntoView({ block: 'nearest' });
   }
 
   function renderEditorHeader() {
@@ -3959,7 +4005,9 @@
       }
       // 切章后正在念的已经不是眼前这一章了，立刻停
       stopTtsForChapterChange();
-      renderChapterList();
+      // 只挪「当前章」高亮（v0.9 A-2）：千章书每切一章都整表重建 1000 条纯属浪费；
+      // 章节列表和 state.chapters 对不上时 syncActiveChapterItem 会自己退回整表重建。
+      syncActiveChapterItem();
       renderEditorHeader();
       updateStatus();
       renderSelectionStats();

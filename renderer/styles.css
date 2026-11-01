@@ -604,6 +604,8 @@ body.resizing .editor {
   display: flex;
   align-items: baseline;
   gap: 5px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 38px;
   padding: 8px 10px;
   margin-bottom: 2px;
   border-radius: 7px;

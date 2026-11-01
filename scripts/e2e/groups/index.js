@@ -9,7 +9,8 @@
 const groups = [
   require('./60-log-redaction'),
   require('./61-ipc-limits'),
-  require('./62-common-tools')
+  require('./62-common-tools'),
+  require('./63-chapter-list-perf')
 ];
 
 module.exports = groups;

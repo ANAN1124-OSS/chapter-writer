@@ -156,7 +156,7 @@ test('静态闸门：场景里不许再定义第二份 harness 工具，必须�
   assert.match(SCENARIO_SOURCE, /const \{ checks, check, waitFor, logDir, logNamePattern, readLogs, waitForLog, deleteBookWithRetry \} = harness;/);
   assert.match(SCENARIO_SOURCE, /const e2eGroups = require\('\.\/e2e\/groups'\);/);
   assert.match(SCENARIO_SOURCE, /for \(const group of e2eGroups\) \{/);
-  // 顺序：先拆出的组（60–62），再跑多窗口（55）——与原文件执行顺序一致
+  // 顺序：先拆出的组（60–63），再跑多窗口（55）——与原文件执行顺序一致
   const groupLoop = SCENARIO_SOURCE.indexOf('for (const group of e2eGroups)');
   const multiWindow = SCENARIO_SOURCE.indexOf('// 55. 多窗口');
   assert.ok(groupLoop > 0 && multiWindow > groupLoop, '组循环必须在多窗口组之前');
@@ -191,8 +191,8 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），顺序
   for (const name of required) {
     assert.ok(fs.existsSync(path.join(GROUPS_DIR, `${name}.js`)), `组文件不存在：${name}.js`);
   }
-  // 顺序就是原场景里的执行顺序（60 → 61 → 62），以后加组也按组号往后排
-  assert.deepEqual(required, ['60-log-redaction', '61-ipc-limits', '62-common-tools']);
+  // 顺序就是原场景里的执行顺序（60 → 61 → 62 → 63），以后加组也按组号往后排
+  assert.deepEqual(required, ['60-log-redaction', '61-ipc-limits', '62-common-tools', '63-chapter-list-perf']);
 });
 
 test('静态闸门：harness 与组文件只 require node 内建，不牵出产品代码 / electron', () => {
