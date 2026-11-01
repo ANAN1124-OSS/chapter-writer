@@ -109,6 +109,27 @@ test('字体解码：空数据返回 0 字节（不抛错，交给 FontFace 判�
   assert.equal(emptyFallback.bytes.length, 0);
 });
 
+test('字体读取重试：只有「读回来的不是要的那份」才重读（大小写 / 斜杠不敏感）', () => {
+  // 同一个路径的不同写法都算同一份
+  assert.equal(fontLogic.sameFontPath('C:\\Windows\\Fonts\\consola.ttf', 'c:/windows/fonts/CONSOLA.TTF'), true);
+  assert.equal(fontLogic.sameFontPath('D:\\fonts\\A.ttf', 'D:\\fonts\\b.ttf'), false);
+  assert.equal(fontLogic.sameFontPath('', ''), false);
+  assert.equal(fontLogic.sameFontPath(null, undefined), false);
+  // 主进程把「刚选的」路径抢先返回了（不是我们要的配置字体）→ 建议重读一次
+  assert.equal(
+    fontLogic.shouldRetryFontRead('D:\\fonts\\book.ttf', { path: 'D:\\fonts\\picked.ttf', name: 'picked.ttf' }),
+    true
+  );
+  // 读回的就是要的那份 / 没带路径信息 / 没有结果：不重读（不浪费一趟 IPC）
+  assert.equal(
+    fontLogic.shouldRetryFontRead('D:\\fonts\\book.ttf', { path: 'd:/fonts/BOOK.ttf', name: 'book.ttf' }),
+    false
+  );
+  assert.equal(fontLogic.shouldRetryFontRead('D:\\fonts\\book.ttf', { name: 'book.ttf' }), false);
+  assert.equal(fontLogic.shouldRetryFontRead('D:\\fonts\\book.ttf', null), false);
+  assert.equal(fontLogic.shouldRetryFontRead('D:\\fonts\\book.ttf', undefined), false);
+});
+
 test('UMD：Node require 与浏览器 window.CWFontLogic 是同一套 API', async () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'font-logic.js'), 'utf8');
   const sandbox = {};

@@ -1153,6 +1153,7 @@ function registerIpc() {
       name: path.basename(resolved),
       size: stat.size,
       base64: buffer.toString('base64'),
+      path: resolved,
       source: source.source
     };
   });

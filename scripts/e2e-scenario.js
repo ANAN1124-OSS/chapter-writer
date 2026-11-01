@@ -1007,6 +1007,16 @@ module.exports = async function runScenario(ctx) {
       source: bookFontRead.data && bookFontRead.data.source
     }
   );
+  // 「刚选的」路径只留一趟：如果渲染层缓存命中、那一趟没被消费，下一次读别的字体不能拿它顶替
+  await exec('window.__cwTest.resetLoadedFont()');
+  await exec(`window.api.testPickFont(${JSON.stringify(otherFontPath)})`);
+  const healedLoad = await exec(`window.__cwTest.loadCustomFont(${JSON.stringify(testFontPath)})`);
+  const healedState = await exec('window.__cwTest.customFontLoaded()');
+  check(
+    '字体读取：没被消费的「刚选的」字体不会顶替这本书的字体（渲染层发现读回来的不是要的那份会再读一次）',
+    healedLoad === true && healedState.ok === true && healedState.name === 'consola.ttf',
+    healedState
+  );
 
   const themeBookId = await exec('window.__cwTest.bookId()');
   await exec('window.__cwTest.openSettings()');

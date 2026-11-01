@@ -22,6 +22,21 @@
 
   const FONT_DATA_URL_PREFIX = 'data:font/ttf;base64,';
 
+  // 主进程返回的字体路径和渲染层请求的是不是同一份（Windows 路径大小写 / 斜杠写法不敏感）。
+  function sameFontPath(a, b) {
+    const norm = (value) => String(value == null ? '' : value).trim().replace(/\//g, '\\').toLowerCase();
+    const left = norm(a);
+    return Boolean(left) && left === norm(b);
+  }
+
+  // 主进程只保留「刚在对话框里选的」字体路径一趟（预览用）。万一渲染层的缓存命中了、
+  // 那一趟没被消费掉，下一次读别的字体时就会先拿回「刚选的」那份——这里让调用方发现
+  // 「读回来的不是我要的那份」时再读一次：第二次就按本书 / 全局设置解析了。
+  function shouldRetryFontRead(wantedPath, result) {
+    if (!result || !result.path) return false;
+    return !sameFontPath(result.path, wantedPath);
+  }
+
   async function decodeFontBase64(base64, options) {
     const opts = options || {};
     const raw = base64 == null ? '' : String(base64);
@@ -47,5 +62,5 @@
     return { bytes, mode: 'atob' };
   }
 
-  return { FONT_DATA_URL_PREFIX, decodeFontBase64 };
+  return { FONT_DATA_URL_PREFIX, sameFontPath, shouldRetryFontRead, decodeFontBase64 };
 });

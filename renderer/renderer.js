@@ -477,7 +477,11 @@
     if (!wanted) return false;
     if (loadedCustomFont.path === wanted && loadedCustomFont.ok) return true;
     try {
-      const res = await call(api.readFont);
+      let res = await call(api.readFont);
+      // 代码审计 F1：主进程只把「刚在对话框里选的」字体路径留一趟（预览用）。万一那条记录
+      // 没被消费掉（例如再次选了同一个字体、渲染层缓存命中没去读），下一次请求别的字体就会
+      // 先拿回它——发现读回来的不是要的那份就再读一次，第二次按本书 / 全局设置解析。
+      if (fontLogic.shouldRetryFontRead(wanted, res)) res = await call(api.readFont);
       const decoded = await fontLogic.decodeFontBase64(res.base64);
       lastFontDecodeMode = decoded.mode;
       const face = new FontFace('cw-custom-font', decoded.bytes.buffer);
@@ -10564,6 +10568,13 @@
       customFontLoaded: () => ({ ...loadedCustomFont }),
       // 最近一次字体解码走的是原生 fetch（data: URL）还是 atob 回退——F11 的自检断言用
       fontDecodeMode: () => lastFontDecodeMode,
+      // 清掉「已加载字体」的渲染层缓存（只给自检用：模拟重新加载页面后第一次读字体）
+      resetLoadedFont() {
+        loadedCustomFont.path = '';
+        loadedCustomFont.name = '';
+        loadedCustomFont.ok = false;
+        return true;
+      },
       // 测试用：等价于「设置里选好字体文件 + 保存设置」的落库路径
       async setCustomFont(fontPath, name) {
         const ok = await loadCustomFont(fontPath, { silent: true });
