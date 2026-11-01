@@ -1,6 +1,6 @@
 // E2E 工具与组拆分（v0.9 B-7，测试可维护性）：
 // scripts/e2e-scenario.js 原来是「一个函数 1.2 万行」，第 60–62 组先搬出去（086153f），
-// 第 52 组日志与错误 / 第 53 组正文搜索索引随后搬（2026-11-02），公共工具（check / waitFor / 删书重试 / 读日志 / 文件存在）
+// 第 52 组日志与错误 / 第 53 组正文搜索索引 / 第 54 组检查更新随后搬（2026-11-02），公共工具（check / waitFor / 删书重试 / 读日志 / 文件存在）
 // 收在 scripts/e2e/harness.js。这里锁四件事：
 //   1. harness 的每个工具行为与拆分前一致（等待 / 重试 / 读日志 / 抛错文案 / 文件存在）；
 //   2. 组索引能单独 require（不依赖 Electron），组号唯一有序、按参数顺序派发；
@@ -169,20 +169,24 @@ test('静态闸门：场景里不许再定义第二份 harness 工具，必须�
     /const \{ checks, check, waitFor, logDir, logNamePattern, readLogs, waitForLog, deleteBookWithRetry, fileExists \} =\s*\n\s*harness;/
   );
   assert.match(SCENARIO_SOURCE, /const e2eGroups = require\('\.\/e2e\/groups'\);/);
-  // 组按「在哪一段」两处跑：第 52 / 53 组在原位，60 起的那批在原 60–62 的循环位置
+  // 组按「在哪一段」两处跑：第 52 / 53 / 54 组在原位，60 起的那批在原 60–62 的循环位置
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[52\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[53\]\);/);
+  assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[54\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), e2eGroups\.idsFrom\(60\)\);/);
-  // 顺序：52 组原位 → 53 组 → … → 60 起那批 → 多窗口（55）——与拆分前的执行顺序一致
+  // 顺序：52 组原位 → 53 组 → 54 组 → … → 60 起那批 → 多窗口（55）——与拆分前的执行顺序一致
   const groupContext = SCENARIO_SOURCE.indexOf('const groupContext = () => ({');
   const run52 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [52]);');
   const group53 = SCENARIO_SOURCE.indexOf('// 53. 正文全文搜索索引');
   const run53 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [53]);');
+  const group54 = SCENARIO_SOURCE.indexOf('// 54. 检查更新');
+  const run54 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [54]);');
   const run60 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), e2eGroups.idsFrom(60));');
   const multiWindow = SCENARIO_SOURCE.indexOf('// 55. 多窗口');
   assert.ok(groupContext > 0 && groupContext < run52, 'groupContext 要先定义再交出去');
   assert.ok(run52 > 0 && group53 > run52, '52 组的调用点必须在 53 组之前（顺序不变）');
-  assert.ok(run53 > group53 && run60 > run53, '53 组要在 60 起那批之前跑（顺序不变）');
+  assert.ok(run53 > group53 && group54 > run53, '53 组要在 54 组之前跑（顺序不变）');
+  assert.ok(run54 > group54 && run60 > run54, '54 组要在 60 起那批之前跑（顺序不变）');
   assert.ok(run60 > group53 && multiWindow > run60, '60 起那批要在 55 多窗口之前跑完');
 });
 
@@ -190,6 +194,7 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
   const movedBeyond = [
     '// 52. 崩溃与错误日志（提案 7.4）',
     '// 53. 正文全文搜索索引（提案 7.3）：书架搜索升级成能搜正文。',
+    '// 54. 检查更新（提案 7.1）：手动检查 GitHub Release',
     '// 60. 日志与错误脱敏',
     '// 61. IPC 参数边界与 DoS',
     '// 62. 公共小工具收编'
@@ -198,7 +203,7 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
     assert.equal(SCENARIO_SOURCE.includes(marker), false, `场景里还留着 ${marker}`);
   }
   const groupFiles = fs.readdirSync(GROUPS_DIR).filter((name) => name.endsWith('.js') && name !== 'index.js');
-  assert.ok(groupFiles.length >= 5, '至少应有 52 / 53 / 60 / 61 / 62 五个组文件');
+  assert.ok(groupFiles.length >= 6, '至少应有 52 / 53 / 54 / 60 / 61 / 62 六个组文件');
   const joined = groupFiles.map((name) => fs.readFileSync(path.join(GROUPS_DIR, name), 'utf8')).join('\n');
   for (const marker of movedBeyond) {
     assert.equal(joined.includes(marker), true, `groups 下找不到 ${marker}`);
@@ -212,7 +217,10 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
     '公共小工具：渲染层真的加载了 core/common.js',
     '正文搜索：索引里只有哈希位图和文件指纹，不存正文（正文句子不在索引文件里）',
     '正文搜索：搜索过程只读（config.json / 书目.json / 章节 txt 一个字节都没变）',
-    '正文搜索：结果分页显示（先 8 条，「显示更多」展开剩下的）'
+    '正文搜索：结果分页显示（先 8 条，「显示更多」展开剩下的）',
+    '检查更新：发现新版本时显示「新版本 + 当前版本」，并出现「打开下载页」',
+    '检查更新：配置不新增任何更新字段（检查只存在内存里，不需要作者配置）',
+    '标题统一：打开书 / 切章只改书目的 lastOpenChapterId——书目录文件列表与四章 txt 逐字节不变'
   ]) {
     assert.equal(SCENARIO_SOURCE.includes(needle), false, `场景里还留着断言「${needle}」`);
     assert.equal(joined.includes(needle), true, `组文件里找不到断言「${needle}」`);
@@ -236,10 +244,11 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），组号
   for (const name of required) {
     assert.ok(fs.existsSync(path.join(GROUPS_DIR, `${name}.js`)), `组文件不存在：${name}.js`);
   }
-  // 顺序就是原场景里的执行顺序（52 → 53 → 60 → 61 → … → 71），以后加组也按组号往后排
+  // 顺序就是原场景里的执行顺序（52 → 53 → 54 → 60 → 61 → … → 71），以后加组也按组号往后排
   assert.deepEqual(required, [
     '52-crash-logs',
     '53-search-index',
+    '54-check-update',
     '60-log-redaction',
     '61-ipc-limits',
     '62-common-tools',
@@ -253,9 +262,10 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），组号
     '70-a11y-keyboard',
     '71-menu-keyboard'
   ]);
-  assert.deepEqual(ids, [52, 53, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]);
-  // 场景尾部那一批：idsFrom(60) = 60 → 71（52 / 53 组在原位单独跑，不在这里重复）
-  assert.deepEqual(registry.idsFrom(60), ids.slice(2));
+  assert.deepEqual(ids, [52, 53, 54, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]);
+  // 场景尾部那一批：idsFrom(60) = 60 → 71（52 / 53 / 54 组在原位单独跑，不在这里重复）
+  assert.deepEqual(registry.idsFrom(60), ids.slice(3));
+  assert.deepEqual(registry.idsFrom(54), ids.slice(2));
   assert.deepEqual(registry.idsFrom(53), ids.slice(1));
   assert.deepEqual(registry.idsFrom(52), ids);
 
