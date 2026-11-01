@@ -9,6 +9,9 @@
  *
  * 口径和 core/format.js（真正改正文的纯逻辑，主进程里跑）保持一致：
  * 这里**只生成文案**，不改正文、不写盘、不产生任何文件。
+ *
+ * v0.9 A-6b（文案梳理）：三处「没得改 / 没内容」的提示原来各写一句，现在统一从
+ * NO_CHANGE_TEXT / EMPTY_TEXT 生成（toast 不带句号、面板带句号），renderer.js 不许再自己拼。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -90,9 +93,28 @@
     return `已整理本章（${describeRules(options)}）：${statsText(stats)} · 仍在编辑区，Ctrl+S 保存 / Ctrl+Z 撤销`;
   }
 
-  // 一字未改的提示：说清楚用的是哪套规则，并强调没有改动（不塞撤销栈）
+  // 「没得改 / 没内容」这两句在三个地方出现（快速整理的 toast、对话框的 toast、对话框预览面板），
+  // 以前各写一句（「没有需要整理的地方」/「本章已经是整理后的格式，没有改动」/「没有可改的地方」），
+  // 同一件事三种说法。v0.9 A-6b 收成这里一份：toast 与面板只差句末标点。
+  const NO_CHANGE_TEXT = '本章已经是整理后的格式，没有可改的地方';
+  const EMPTY_TEXT = '本章还没有内容，没什么可整理的';
+
+  // 一字未改的提示：说清楚为什么（已经是整理后的格式）+ 用的是哪套规则（不塞撤销栈）
   function noChangeToast(options) {
-    return `没有需要整理的地方（规则：${describeRules(options)}）`;
+    return `${NO_CHANGE_TEXT}（规则：${describeRules(options)}）`;
+  }
+
+  // 对话框里的实时预览面板：规则就在上面几行控件里，这里只留一句结论（带句号）
+  function noChangePanelText() {
+    return `${NO_CHANGE_TEXT}。`;
+  }
+
+  function emptyToast() {
+    return EMPTY_TEXT;
+  }
+
+  function emptyPanelText() {
+    return `${EMPTY_TEXT}。`;
   }
 
   // 选择卡里「撤销上次整理」的文案：0 步时不给括号里的数字
@@ -103,11 +125,16 @@
 
   return {
     DEFAULT_OPTIONS,
+    NO_CHANGE_TEXT,
+    EMPTY_TEXT,
     mergeOptions,
     describeRules,
     statsText,
     successToast,
     noChangeToast,
+    noChangePanelText,
+    emptyToast,
+    emptyPanelText,
     undoLabel
   };
 });

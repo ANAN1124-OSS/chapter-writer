@@ -8991,15 +8991,16 @@ module.exports = async function runScenario(ctx) {
       (await exec('window.__cwTest.chapterTextAt(0)')) === r1Messy
   );
 
-  // 再整理一次 → 已经很干净时再点：只提示「没有需要整理的地方」，不往撤销栈里塞东西
+  // 再整理一次 → 已经很干净时再点：只提示「本章已经是整理后的格式，没有可改的地方」，不往撤销栈里塞东西
   await exec("document.getElementById('btn-format').click()");
   await waitFor('window.__cwTest.formatUndoSteps() === 1');
   await exec("document.getElementById('btn-format').click()");
   await sleep(300);
   const r1NoChangeToast = await exec("document.getElementById('toast-area').textContent");
   check(
-    '整理交互：无改动时提示「没有需要整理的地方」，不动正文、撤销步数不增加',
-    r1NoChangeToast.includes('没有需要整理的地方') &&
+    '整理交互：无改动时提示「本章已经是整理后的格式，没有可改的地方」，不动正文、撤销步数不增加',
+    r1NoChangeToast.includes('本章已经是整理后的格式，没有可改的地方') &&
+      r1NoChangeToast.includes('规则：') &&
       (await exec('window.__cwTest.text()')) === r1Formatted &&
       (await exec('window.__cwTest.formatUndoSteps()')) === 1 &&
       (await exec('window.__cwTest.formatUndoDepth()')) === r1DepthAfterClick,

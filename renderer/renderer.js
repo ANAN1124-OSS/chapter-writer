@@ -7604,14 +7604,14 @@
 
   function renderFormatPreview(res, raw) {
     if (!String(raw == null ? '' : raw).trim()) {
-      $('fmt-summary').textContent = '本章还没有内容，没什么可整理的。';
+      $('fmt-summary').textContent = formatUi.emptyPanelText();
       $('fmt-preview').textContent = '';
       $('btn-format-apply').disabled = true;
       return;
     }
     $('fmt-summary').textContent = res.changed
       ? formatUi.statsText(res.stats)
-      : '本章已经是整理后的格式，没有可改的地方。';
+      : formatUi.noChangePanelText();
     $('btn-format-apply').disabled = !res.changed;
     const preview = res.text.length > 700 ? `${res.text.slice(0, 700)}\n…` : res.text;
     $('fmt-preview').textContent = preview || '（整理后为空）';
@@ -7633,7 +7633,7 @@
     hideFormatMenu();
     hideDisplayMenu();
     if (!state.bookPath || state.index < 0) {
-      toast('先打开一本书的章节再排版', 'warn');
+      toast('先打开一本书的章节再整理', 'warn');
       return;
     }
     writeFormatOptions(state.config && state.config.formatOptions);
@@ -7754,7 +7754,7 @@
     const before = editorEl.value;
     const beforeCaret = editorEl.selectionStart || 0;
     if (!String(before == null ? '' : before).trim()) {
-      toast('本章还没有内容', 'warn');
+      toast(formatUi.emptyToast(), 'warn');
       return { ok: false, reason: 'empty' };
     }
     const options = formatUi.mergeOptions(state.config && state.config.formatOptions);
@@ -7797,7 +7797,7 @@
     const before = editorEl.value;
     const beforeCaret = editorEl.selectionStart || 0;
     if (!String(before == null ? '' : before).trim()) {
-      toast('本章还没有内容', 'warn');
+      toast(formatUi.emptyToast(), 'warn');
       return;
     }
     const options = readFormatOptions();
@@ -7810,12 +7810,13 @@
       } catch { /* 记不住规则不影响整理 */ }
       closeFormatDialog();
       if (!res.changed) {
-        toast('本章已经是整理后的格式，没有改动');
+        // 和点「整理」走同一句（哪套规则 + 没有可改的地方），别在这里写第二种说法
+        toast(formatUi.noChangeToast(options));
         return;
       }
       insertFormattedText(res.text, { text: before, pos: beforeCaret });
       pushFormatUndo(before, res.text);
-      toast(`已整理本章：${res.stats.paragraphs} 段 · Ctrl+S 保存 · Ctrl+Z 撤销`);
+      toast(formatUi.successToast(options, res.stats));
     } catch (err) {
       toast(`整理失败：${err.message}`, 'error');
     } finally {

@@ -108,13 +108,44 @@ test('成功提示：带规则摘要 + 改动统计 + 「仍在编辑区」的�
   assert.equal(custom.includes('删行尾空白'), false);
 });
 
-test('无改动提示：明确说「没有需要整理的地方」并带这次用的规则', () => {
+test('无改动提示：说清「已经是整理后的格式，没有可改的地方」并带这次用的规则', () => {
   const toast = formatUi.noChangeToast({ indent: '0', blankLines: 'single' });
   assert.equal(
     toast,
-    '没有需要整理的地方（规则：段首缩进 0 字符 · 段间空一行 · 删行尾空白 · 中文旁标点转全角）'
+    '本章已经是整理后的格式，没有可改的地方（规则：段首缩进 0 字符 · 段间空一行 · 删行尾空白 · 中文旁标点转全角）'
   );
-  assert.equal(formatUi.noChangeToast(), '没有需要整理的地方（规则：' + formatUi.describeRules() + '）');
+  assert.equal(
+    formatUi.noChangeToast(),
+    '本章已经是整理后的格式，没有可改的地方（规则：' + formatUi.describeRules() + '）'
+  );
+  // 对话框里的预览面板和 toast 用同一句结论，只差句末标点（以前是两种说法）
+  assert.equal(formatUi.noChangePanelText(), '本章已经是整理后的格式，没有可改的地方。');
+  assert.equal(formatUi.noChangePanelText(), formatUi.NO_CHANGE_TEXT + '。');
+  assert.equal(formatUi.noChangeToast({}).startsWith(formatUi.NO_CHANGE_TEXT), true);
+});
+
+test('空章提示：toast 与预览面板同一句，只有面板带句号', () => {
+  assert.equal(formatUi.EMPTY_TEXT, '本章还没有内容，没什么可整理的');
+  assert.equal(formatUi.emptyToast(), formatUi.EMPTY_TEXT);
+  assert.equal(formatUi.emptyPanelText(), formatUi.EMPTY_TEXT + '。');
+  // 空章和无改动是两件事，别又写成同一句（作者靠这句判断「要不要再点一次整理」）
+  assert.notEqual(formatUi.emptyToast(), formatUi.NO_CHANGE_TEXT);
+});
+
+test('文案闸门：renderer.js 不许再自己拼这两句（只能从 format-ui.js 拿）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const rendererJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
+  // 「本章还没有内容」「本章已经是整理后的格式」只允许出现在 format-ui.js 里
+  assert.equal(rendererJs.includes('本章还没有内容'), false);
+  assert.equal(rendererJs.includes('本章已经是整理后的格式'), false);
+  // 三个调用点都要走模块（快速整理 / 对话框套用 / 对话框预览）
+  assert.equal(rendererJs.includes('formatUi.emptyToast()'), true);
+  assert.equal(rendererJs.includes('formatUi.emptyPanelText()'), true);
+  assert.equal(rendererJs.includes('formatUi.noChangePanelText()'), true);
+  assert.equal((rendererJs.match(/formatUi\.noChangeToast\(/g) || []).length, 2);
+  // 对话框「套用到本章」和点「整理」用同一句成功提示（规则 + 统计 + 仍在编辑区）
+  assert.equal((rendererJs.match(/formatUi\.successToast\(/g) || []).length, 2);
 });
 
 test('「撤销上次整理」文案：0 步不带数字，正数带「可撤销 N 步」，坏值按 0', () => {
