@@ -191,14 +191,15 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），顺序
   for (const name of required) {
     assert.ok(fs.existsSync(path.join(GROUPS_DIR, `${name}.js`)), `组文件不存在：${name}.js`);
   }
-  // 顺序就是原场景里的执行顺序（60 → 61 → 62 → 63 → 64 → 65），以后加组也按组号往后排
+  // 顺序就是原场景里的执行顺序（60 → 61 → 62 → 63 → 64 → 65 → 66），以后加组也按组号往后排
   assert.deepEqual(required, [
     '60-log-redaction',
     '61-ipc-limits',
     '62-common-tools',
     '63-chapter-list-perf',
     '64-data-safety',
-    '65-marks-lazy-spans'
+    '65-marks-lazy-spans',
+    '66-destructive-recovery'
   ]);
 });
 

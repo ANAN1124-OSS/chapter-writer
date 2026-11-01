@@ -12,7 +12,8 @@ const groups = [
   require('./62-common-tools'),
   require('./63-chapter-list-perf'),
   require('./64-data-safety'),
-  require('./65-marks-lazy-spans')
+  require('./65-marks-lazy-spans'),
+  require('./66-destructive-recovery')
 ];
 
 module.exports = groups;

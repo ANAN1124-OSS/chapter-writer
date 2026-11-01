@@ -33,6 +33,22 @@ class StorageError extends Error {
   }
 }
 
+// 批次破坏性操作（整本整理 / 整本替换 / 还原到替换前）中途失败时的统一报错。
+// 半成品本身不是灾难 —— 每一章都是原子写、改之前都先把原件复制进 _trash；
+// 真正危险的是作者不知道「书现在是什么状态、原件在哪里」，所以错误信息必须带上
+// 「已经动了多少章」和「备份目录名」（只给 _trash 下的名字，绝不含本机路径）。
+function batchFailure(err, { code, action, notes = [] }) {
+  const reason = errorText.describeForUi(err).message;
+  const parts = [`${action}中途停下：${reason}`];
+  for (const note of notes) if (note) parts.push(note);
+  return new StorageError(code, parts.join('；'));
+}
+
+// 备份目录 → 界面上可以显示的相对位置（形如 `_trash/整理备份-2026-11-01-223000`）
+function trashDirLabel(dir) {
+  return dir ? `${TRASH_DIR}/${path.basename(dir)}` : '';
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -706,7 +722,34 @@ async function deleteChapter(bookPath, chapterId) {
     };
     updated = { ...updated, fileSeq: seq, chapters: [newChapter] };
   }
-  const saved = await writeBookMeta(bookPath, updated);
+  const saved = await writeBookMeta(bookPath, updated).catch(async (err) => {
+    // 书目没写成功 = 这次删除没有发生。把刚移走的章节文件放回原处（「不留半成品」）：
+    // 不然书目里还有这一章、书文件夹里却没有它，点开就是缺章，作者只能去修书。
+    // 「删到空自动补一章」时刚建的那张空章也要先挪走，否则它会占着与原章节同名的位置。
+    if (newChapter) {
+      try {
+        await fs.rename(
+          path.join(bookPath, newChapter.file),
+          path.join(path.dirname(trashPath), `${timestampForFile()}-${newChapter.file}`)
+        );
+      } catch { /* 挪不走就算了：它是本书目写完才会登记的空章，不会覆盖正文 */ }
+    }
+    let rolledBack = false;
+    try {
+      await fs.rename(trashPath, path.join(bookPath, target.file));
+      rolledBack = true;
+    } catch { /* 放不回去就按下面的「文件在 _trash」报错 */ }
+    throw batchFailure(err, {
+      code: 'DELETE_FAILED',
+      action: '删除本章',
+      notes: rolledBack
+        ? [`「${target.file}」已经放回原处`, '书还是删除前的样子']
+        : [
+            `「${target.file}」现在在 ${trashDirLabel(path.dirname(trashPath))} 里`,
+            '可以用本书历史的「删除章节」那条把它放回书文件夹'
+          ]
+    });
+  });
   return {
     meta: saved,
     trashPath,
@@ -783,23 +826,37 @@ async function replaceInBook(bookPath, options = {}) {
   let chaptersChanged = 0;
   let occurrences = 0;
   let backupCreated = false;
-  for (const chapter of meta.chapters) {
-    const loaded = await loadTextOrSkip(bookPath, chapter);
-    if (!loaded) continue;
-    const res = findLib.replaceAllLiteral(loaded.text, query, replacement, { caseSensitive });
-    if (!res.count) continue;
-    if (!backupCreated) {
-      backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), REPLACE_BACKUP_PREFIX);
-      await ensureDir(backupDir);
-      backupCreated = true;
+  try {
+    for (const chapter of meta.chapters) {
+      const loaded = await loadTextOrSkip(bookPath, chapter);
+      if (!loaded) continue;
+      const res = findLib.replaceAllLiteral(loaded.text, query, replacement, { caseSensitive });
+      if (!res.count) continue;
+      if (!backupCreated) {
+        backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), REPLACE_BACKUP_PREFIX);
+        await ensureDir(backupDir);
+        backupCreated = true;
+      }
+      await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
+      await saveChapterText(bookPath, chapter.file, res.text);
+      chapter.chars = chaptersLib.countChars(res.text);
+      chaptersChanged += 1;
+      occurrences += res.count;
     }
-    await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
-    await saveChapterText(bookPath, chapter.file, res.text);
-    chapter.chars = chaptersLib.countChars(res.text);
-    chaptersChanged += 1;
-    occurrences += res.count;
+    if (chaptersChanged) await writeBookMeta(bookPath, meta);
+  } catch (err) {
+    // 中途失败（磁盘满 / 杀软占住 / 某个章节文件只读）：已经替换掉的章不能"当没发生过"，
+    // 报错要说清改了几章、原件备份在哪里，作者才有办法自己退回去（见 batchFailure）。
+    throw batchFailure(err, {
+      code: 'REPLACE_FAILED',
+      action: '整本替换',
+      notes: [
+        chaptersChanged ? `已经替换 ${chaptersChanged} 章` : '',
+        trashDirLabel(backupDir) ? `替换前的原文都在 ${trashDirLabel(backupDir)}` : '',
+        chaptersChanged ? '可以先从那里把原文拷回来，再重试' : '书里的正文一个字节都没改'
+      ]
+    });
   }
-  if (chaptersChanged) await writeBookMeta(bookPath, meta);
   return {
     chaptersChanged,
     occurrences,
@@ -863,30 +920,44 @@ async function formatBook(bookPath, options = {}, onProgress) {
   const changed = [];
   let backupDir = null;
   let backupCreated = false;
-  for (let i = 0; i < meta.chapters.length; i += 1) {
-    const chapter = meta.chapters[i];
-    if (typeof onProgress === 'function') {
-      try {
-        onProgress({ done: i + 1, total, index: i, name: chapter.name || '' });
-      } catch { /* 进度回调出错不影响整理 */ }
+  try {
+    for (let i = 0; i < meta.chapters.length; i += 1) {
+      const chapter = meta.chapters[i];
+      if (typeof onProgress === 'function') {
+        try {
+          onProgress({ done: i + 1, total, index: i, name: chapter.name || '' });
+        } catch { /* 进度回调出错不影响整理 */ }
+      }
+      const loaded = await loadTextOrSkip(bookPath, chapter);
+      if (!loaded) continue;
+      const res = formatLib.formatText(loaded.text, options);
+      if (!res.changed) continue;
+      if (!backupCreated) {
+        backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), FORMAT_BACKUP_PREFIX);
+        await ensureDir(backupDir);
+        backupCreated = true;
+      }
+      // 先备份原文再写盘：整理也是「改正文」的显式动作，必须留退路
+      await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
+      await saveChapterText(bookPath, chapter.file, res.text);
+      chapter.chars = chaptersLib.countChars(res.text);
+      addFormatStats(stats, res.stats);
+      changed.push({ index: i, file: chapter.file, name: chapter.name || '' });
     }
-    const loaded = await loadTextOrSkip(bookPath, chapter);
-    if (!loaded) continue;
-    const res = formatLib.formatText(loaded.text, options);
-    if (!res.changed) continue;
-    if (!backupCreated) {
-      backupDir = await uniqueTrashDir(path.join(bookPath, TRASH_DIR), FORMAT_BACKUP_PREFIX);
-      await ensureDir(backupDir);
-      backupCreated = true;
-    }
-    // 先备份原文再写盘：整理也是「改正文」的显式动作，必须留退路
-    await fs.copyFile(assertInside(bookPath, chapter.file), path.join(backupDir, chapter.file));
-    await saveChapterText(bookPath, chapter.file, res.text);
-    chapter.chars = chaptersLib.countChars(res.text);
-    addFormatStats(stats, res.stats);
-    changed.push({ index: i, file: chapter.file, name: chapter.name || '' });
+    if (changed.length) await writeBookMeta(bookPath, meta);
+  } catch (err) {
+    // 半途失败：已经整理好的章节是真写进去了（每章原子写、改前有备份），
+    // 必须把「改了几章 + 原件在哪」告诉作者，别让界面只剩一句「失败」（见 batchFailure）。
+    throw batchFailure(err, {
+      code: 'FORMAT_FAILED',
+      action: '整本整理',
+      notes: [
+        changed.length ? `已经整理好 ${changed.length} 章` : '',
+        trashDirLabel(backupDir) ? `整理前的原文都在 ${trashDirLabel(backupDir)}` : '',
+        changed.length ? '可以先从那里把原文拷回来，再重试' : '书里的正文一个字节都没改'
+      ]
+    });
   }
-  if (changed.length) await writeBookMeta(bookPath, meta);
   return {
     bookTitle: meta.title,
     chapterCount: total,
@@ -988,26 +1059,42 @@ async function restoreReplaceBackup(bookPath, backupName) {
   const restoreDir = await uniqueTrashDir(trashDir, RESTORE_BACKUP_PREFIX);
   let restored = 0;
   let skipped = 0;
-  for (const entry of fileEntries) {
-    if (!currentFiles.has(entry.name)) {
-      skipped += 1; // 章节可能已经删掉了，别偷偷复活
-      continue;
+  let safetyCopied = false;
+  try {
+    for (const entry of fileEntries) {
+      if (!currentFiles.has(entry.name)) {
+        skipped += 1; // 章节可能已经删掉了，别偷偷复活
+        continue;
+      }
+      const target = assertInside(bookPath, entry.name);
+      if (await exists(target)) {
+        await ensureDir(restoreDir);
+        await fs.copyFile(target, path.join(restoreDir, entry.name));
+        safetyCopied = true;
+      }
+      const buffer = await fs.readFile(path.join(backupDir, entry.name));
+      await atomicWriteFile(target, buffer);
+      restored += 1;
     }
-    const target = assertInside(bookPath, entry.name);
-    if (await exists(target)) {
-      await ensureDir(restoreDir);
-      await fs.copyFile(target, path.join(restoreDir, entry.name));
-    }
-    const buffer = await fs.readFile(path.join(backupDir, entry.name));
-    await atomicWriteFile(target, buffer);
-    restored += 1;
-  }
 
-  // 正文被覆盖了，字数缓存要重算（复用历史还原的 refreshChapterChars）；
-  // 书目改动走 writeBookMeta（写前留 .bak）
-  if (restored) {
-    await refreshChapterChars(bookPath, meta, meta.chapters.map((chapter) => chapter.file));
-    await writeBookMeta(bookPath, meta);
+    // 正文被覆盖了，字数缓存要重算（复用历史还原的 refreshChapterChars）；
+    // 书目改动走 writeBookMeta（写前留 .bak）
+    if (restored) {
+      await refreshChapterChars(bookPath, meta, meta.chapters.map((chapter) => chapter.file));
+      await writeBookMeta(bookPath, meta);
+    }
+  } catch (err) {
+    // 还原到一半失败：说清还原了几章、还原前的正文备份在哪。替换备份本身不会被消耗，
+    // 作者再点一次「还原」就能把剩下的补上（幂等）。
+    throw batchFailure(err, {
+      code: 'RESTORE_FAILED',
+      action: '还原到替换前',
+      notes: [
+        restored ? `已经还原 ${restored} 章` : '',
+        safetyCopied ? `还原前的正文备份在 ${trashDirLabel(restoreDir)}` : '',
+        restored ? '再点一次「还原」可以把剩下的章节补上' : '书里的正文一个字节都没改'
+      ]
+    });
   }
 
   return {

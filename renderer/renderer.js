@@ -4569,6 +4569,26 @@
   async function deleteChapterAt(index, skipConfirm = false) {
     const chapter = state.chapters[index];
     if (!chapter) return;
+    const wasCurrent = index === state.index;
+    const currentId = wasCurrent ? null : (state.chapters[state.index] || {}).id;
+    // 删的是「当前章」且还有没保存的字：先拦一下（和切章 / 关窗 / 整本整理 / 整本替换一个规矩）。
+    // 磁盘上的版本会进 _trash，但编辑区里没写盘的那部分不在那儿 —— 静默丢掉就真找不回来了。
+    // skipConfirm 只给自动化钩子用（测试里本来就不弹框），正常入口一律走这段。
+    if (!skipConfirm && wasCurrent && state.dirty) {
+      const action = await askUnsaved({
+        title: '删除前先处理未保存的修改',
+        message:
+          `「${currentChapterLabel()}」还有未保存的修改。\n` +
+          '删除会把磁盘上的这一章移到本书的 _trash，编辑区里还没保存的字不会跟着进去。',
+        saveLabel: '保存后删除',
+        discardLabel: '不保存，直接删除'
+      });
+      if (action === 'cancel') return;
+      if (action === 'save') {
+        const saved = await saveCurrent();
+        if (!saved.ok) return;
+      }
+    }
     if (!skipConfirm) {
       const res = await openModal({
         title: '删除章节',
@@ -4581,8 +4601,6 @@
       });
       if (res.action !== 'delete') return;
     }
-    const wasCurrent = index === state.index;
-    const currentId = wasCurrent ? null : (state.chapters[state.index] || {}).id;
     try {
       const data = await call(api.deleteChapter, state.bookPath, chapter.id);
       state.meta = data.meta;
@@ -5516,6 +5534,7 @@
       return { ok: true, data };
     } catch (err) {
       toast(`还原失败：${err.message}`, 'error');
+      await reloadAfterPartialFailure(state.bookPath); // 可能已经还原了几章，界面回到磁盘的真相
       return { ok: false, message: err.message };
     }
   }
@@ -5544,6 +5563,22 @@
     await applyBookDisplay(opened.meta.id);
     updateWindowTitle();
     return opened;
+  }
+
+  // 批次破坏性操作（整本整理 / 整本替换 / 还原到替换前 / 还原历史备份）失败后：
+  // 磁盘上可能已经改了一部分章节，而编辑区还停着操作开始前的那份正文。界面必须回到磁盘的真相，
+  // 否则下一次保存会把改过的章又写回旧内容（看起来像「替换没生效」）。
+  // 有未保存的修改就什么都不动——宁可界面旧一点，也不吞掉作者刚打的字。
+  // bookPath 给了就只在「那本书正是当前打开的这本」时重载（历史弹层也能看别的书的备份）。
+  async function reloadAfterPartialFailure(bookPath = null) {
+    if (state.dirty || !state.bookPath) return false;
+    if (bookPath && !sameBookPath(state.bookPath, bookPath)) return false;
+    try {
+      await reloadOpenBookFromDisk();
+      return true;
+    } catch {
+      return false; // 重载失败不影响上面的错误提示（提示里已经写清现场）
+    }
   }
 
   // ---------- 本书历史（统一查看 / 还原 _trash 备份） ----------
@@ -5842,6 +5877,7 @@
       return { ok: true, data };
     } catch (err) {
       toast(`还原失败：${err.message}`, 'error');
+      await reloadAfterPartialFailure(current.path); // 可能已经还原了几章，界面回到磁盘的真相
       return { ok: false, message: err.message };
     }
   }
@@ -6062,6 +6098,7 @@
       );
     } catch (err) {
       toast(`整本替换失败：${err.message}`, 'error');
+      await reloadAfterPartialFailure(); // 可能已经替换了好几章，别让编辑区停在旧正文上
     }
   }
 
@@ -7872,6 +7909,7 @@
       return { ok: true, changed: result.chaptersChanged, data: result };
     } catch (err) {
       toast(`整理本书失败：${err.message}`, 'error');
+      await reloadAfterPartialFailure(); // 可能已经整理了好几章，别让编辑区停在旧正文上
       return { ok: false, message: err.message };
     } finally {
       state.formatBookRunning = false;
