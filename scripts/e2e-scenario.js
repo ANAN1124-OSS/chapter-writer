@@ -2,6 +2,7 @@
 // 再回到主进程侧直接检查磁盘文件，验证「保存整本、编号重排、未保存拦截」确实生效。
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const chaptersLib = require('../core/chapters');
 const exporter = require('../core/exporter');
 const statsLib = require('../core/stats');
@@ -10826,6 +10827,176 @@ module.exports = async function runScenario(ctx) {
   );
   await exec('window.__cwTest.backToShelf()');
   await waitFor("window.__cwTest.view() === 'shelf'");
+
+  // 56. Electron 安全开关与窗口行为（v0.9 C-1）：
+  //     在真实 Electron 里复核窗口 webPreferences（sandbox / contextIsolation / nodeIntegration / webSecurity…）、
+  //     渲染层确实拿不到 Node、window.open / 外部导航 / <webview> 都被拦、浏览器权限一律拒绝
+  //     （含「被拒请求的日志字段不含本机路径」）、单实例锁生效（再启动一个进程不多开窗口）。
+  //     期望值只有一处来源：core/security-policy.js（单测断言同一份常量）。
+  //     放在多窗口组之前：那一组最后会关掉最后一个窗口让应用退出。
+  const securityPolicy = require('../core/security-policy');
+  const liveWindowCount = () => ctx.windowsInfo().filter((item) => !item.destroyed).length;
+  const secInfo = ctx.securityInfo();
+  // Electron 回读 webPreferences 时少 preload / spellcheck（见 PREFERENCES_NOT_READ_BACK），
+  // 所以对账口径走 policy.preferenceDiff()：preload 另用「渲染层真的能用到 window.api」证明。
+  const prefDiff = securityPolicy.preferenceDiff(secInfo.webPreferences);
+  check(
+    '安全开关：真实窗口的 webPreferences 与 core/security-policy 逐项一致',
+    prefDiff.length === 0,
+    { prefDiff, readBack: secInfo.webPreferences, notReadBack: securityPolicy.PREFERENCES_NOT_READ_BACK }
+  );
+  const bridgeProbe = JSON.parse(
+    await exec(
+      `JSON.stringify({ api: typeof window.api, readFont: typeof window.api.readFont, getConfig: typeof window.api.getConfig })`
+    )
+  );
+  check(
+    '安全开关：preload 桥接就位（Electron 不回读 preload，用 window.api 实测）',
+    bridgeProbe.api === 'object' &&
+      bridgeProbe.readFont === 'function' &&
+      bridgeProbe.getConfig === 'function',
+    bridgeProbe
+  );
+  check('安全开关：单实例锁已拿到', secInfo.singleInstanceLock === true);
+  check('安全开关：权限请求 / 检查两个处理器都已注册', secInfo.sessionHandlers === true);
+  check(
+    '安全开关：进程里只有窗口这一类 webContents（没有隐藏的 webview / 后台页）',
+    Array.isArray(secInfo.contentTypes) &&
+      secInfo.contentTypes.length === liveWindowCount() &&
+      secInfo.contentTypes.every((type) => type === 'window'),
+    secInfo.contentTypes
+  );
+  const nodeGlobals = JSON.parse(
+    await exec(
+      `JSON.stringify({ require: typeof require, module: typeof module, api: typeof window.api, process: typeof process })`
+    )
+  );
+  check(
+    '安全开关：渲染层拿不到 Node（require / module / process 都不存在），只能走 preload 的 window.api',
+    nodeGlobals.require === 'undefined' &&
+      nodeGlobals.module === 'undefined' &&
+      nodeGlobals.process === 'undefined' &&
+      nodeGlobals.api === 'object',
+    nodeGlobals
+  );
+  const windowsBeforeOpen = liveWindowCount();
+  const openProbe = JSON.parse(
+    await exec(
+      `(() => { try { const opened = window.open('https://example.com/cw-window-open'); return JSON.stringify({ returned: opened === null ? 'null' : typeof opened }); } catch (err) { return JSON.stringify({ error: String(err && err.name) }); } })()`
+    )
+  );
+  check('安全开关：window.open 被拒绝（返回 null，不开新窗口）', openProbe.returned === 'null', openProbe);
+  await sleep(300);
+  check(
+    '安全开关：window.open 之后没有多出窗口 / webContents',
+    liveWindowCount() === windowsBeforeOpen &&
+      ctx.securityInfo().contentTypes.every((type) => type === 'window')
+  );
+  const navProbe = JSON.parse(
+    await exec(
+      `(async () => { const before = location.href; try { location.href = 'https://example.com/cw-nav-blocked'; } catch (err) { /* 拦下时可能抛 */ } await new Promise((resolve) => setTimeout(resolve, 500)); return JSON.stringify({ before, after: location.href, app: typeof window.__cwTest }); })()`
+    )
+  );
+  check(
+    '安全开关：外部导航被拦在本页（location 没变，应用还在）',
+    navProbe.before === navProbe.after && navProbe.app === 'object',
+    navProbe
+  );
+  const webviewProbe = JSON.parse(
+    await exec(
+      `(() => { const el = document.createElement('webview'); return JSON.stringify({ tag: String(el.tagName), loadURL: typeof el.loadURL }); })()`
+    )
+  );
+  check(
+    '安全开关：渲染层没有 <webview> 能力（webviewTag 关闭）',
+    webviewProbe.loadURL === 'undefined',
+    webviewProbe
+  );
+  const secProbe = ctx.securityProbe();
+  check(
+    '安全开关：权限请求处理器一律 callback(false)',
+    secProbe.request.callbackCalled === true && secProbe.request.granted === false,
+    secProbe.request
+  );
+  check('安全开关：权限检查处理器一律返回 false', secProbe.check === false, secProbe.check);
+  const denialText = JSON.stringify(secProbe.lastDenial || null);
+  check(
+    '安全开关：被拒权限的日志字段不含本机路径（来源只剩 file://）',
+    Boolean(secProbe.lastDenial) &&
+      secProbe.lastDenial.permission === 'geolocation' &&
+      secProbe.lastDenial.origin === 'file://' &&
+      secProbe.lastDenial.denied === true &&
+      !denialText.includes('fake') &&
+      !denialText.includes('C:'),
+    secProbe.lastDenial
+  );
+  const permQuery = JSON.parse(
+    await exec(
+      `(async () => { try { const status = await navigator.permissions.query({ name: 'geolocation' }); return JSON.stringify({ ok: true, state: status.state }); } catch (err) { return JSON.stringify({ ok: false, error: String(err && err.name) }); } })()`
+    )
+  );
+  check(
+    '安全开关：Chromium 的权限查询也是 denied（Permissions API 走同一套处理器）',
+    permQuery.ok === true && permQuery.state === 'denied',
+    permQuery
+  );
+  // 单实例锁：用同一份 userData 再启动一个进程 —— 它拿不到锁、立刻退出，本进程不多开窗口。
+  // 万一锁失效，子进程会走 --screenshot 流程并打印「[screenshot]」，用它兜底判定（不会真的把
+  // 第二个 E2E 场景跑起来，也就不会两边抢同一个临时书库）。
+  const appRoot = path.join(__dirname, '..');
+  const childEnv = { ...process.env };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  delete childEnv.ELECTRON_NO_ATTACH_CONSOLE;
+  const secondInstance = spawn(
+    process.execPath,
+    [
+      appRoot,
+      `--user-data=${userData}`,
+      `--books-root=${booksRoot}`,
+      `--screenshot=${path.join(userData, 'single-instance-probe.png')}`
+    ],
+    { cwd: appRoot, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+  );
+  let secondStdout = '';
+  secondInstance.stdout.on('data', (chunk) => {
+    secondStdout += chunk.toString();
+  });
+  const secondExit = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        secondInstance.kill();
+      } catch {
+        /* 已经退了 */
+      }
+      finish({ timedOut: true, code: null, stdout: secondStdout });
+    }, 30000);
+    secondInstance.on('close', (code) => finish({ timedOut: false, code, stdout: secondStdout }));
+    secondInstance.on('error', (err) =>
+      finish({ error: String(err && err.message), stdout: secondStdout })
+    );
+  });
+  check(
+    '安全开关：再启动一个实例会立刻退出（单实例锁生效，没有真的再开一个窗口）',
+    secondExit.timedOut === false &&
+      secondExit.code === 0 &&
+      !secondExit.error &&
+      !secondStdout.includes('[screenshot]') &&
+      !secondStdout.includes('E2E_RESULT'),
+    { ...secondExit, stdout: secondStdout.slice(0, 200) }
+  );
+  check(
+    '安全开关：第二个实例没有多开窗口 / 没有动窗口登记',
+    liveWindowCount() === windowsBeforeOpen && registryCounts().windows === windowsBeforeOpen,
+    { windows: registryCounts() }
+  );
+  await ensureWindowFocus();
 
   // 55. 多窗口（提案 7.2，作者 2026-11-01 03:45 拍板）：
   //     书卡右键「在新窗口打开」/ 禁止同书双开 / 跨窗口删改拦截 / 各自编辑保存 /

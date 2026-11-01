@@ -4,7 +4,21 @@ const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, screen, net } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  ipcMain,
+  dialog,
+  shell,
+  clipboard,
+  screen,
+  net,
+  // 注意：Electron 的 session 模块与「每个窗口一个会话」的 session 同名，这里别名导入，
+  // 避免 main.js 里到处用的窗口 session 变量被遮蔽（createWindow 里就有 const session = ...）
+  session: electronSession,
+  webContents
+} = require('electron');
 
 // ---------- 启动参数（自动化/隔离用，正常用户启动不受影响） ----------
 function argValue(name) {
@@ -52,6 +66,7 @@ const searchIndexLib = require('./core/search-index');
 const updateLib = require('./core/update');
 const openBooksLib = require('./core/open-books');
 const fontPolicy = require('./core/font-policy');
+const securityPolicy = require('./core/security-policy');
 
 // ---------- 多窗口会话 ----------
 // 每个 BrowserWindow 一个会话：独立的 bookPath（登记在 storage 的打开登记表里）、
@@ -1821,6 +1836,83 @@ function registerIpc() {
   }
 }
 
+// ---------- Electron 安全加固（v0.9 C-1） ----------
+// 窗口级（每个 webContents）：
+//   · 不允许开新窗口（window.open / target=_blank 一律 deny）；
+//   · 不允许导航离开本页（点外链、被注入的 location 赋值都拦在本页内）；
+//   · 不允许挂 <webview>（真挂了就先抹掉 preload / Node 能力再拦下）。
+// 会话级：浏览器权限（摄像头 / 麦克风 / 通知 / 定位 / 剪贴板读取 / 全屏 / 传感器…）一律拒绝 ——
+//   注意 Electron 的默认行为是「没有权限处理器就一律允许」，所以必须显式拒绝。
+// 这些约束统一挂在 app 的 web-contents-created / session-created 上兜底：以后谁再加窗口或
+// 自定义 partition，也自动带上同样的开关，不会再出现「新窗口忘写 setWindowOpenHandler」这种缺口。
+// 期望值来自 core/security-policy.js（单测断言同一份常量，E2E 在真实 Electron 里复核）。
+const hardenedContents = new WeakSet();
+const hardenedSessions = new WeakSet();
+// 实际注册给 Electron 的处理器留个引用：自检要直接调它们，证明「真的拒绝」而不是「以为拒绝了」
+const permissionHandlers = { request: null, check: null };
+let lastPermissionDenial = null; // 只留最近一条（不含本机路径），自检断言用
+
+function hardenWebContents(contents) {
+  if (!contents || contents.isDestroyed() || hardenedContents.has(contents)) return;
+  hardenedContents.add(contents);
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event) => event.preventDefault());
+  contents.on('will-attach-webview', (event, webPreferences) => {
+    // 双保险：就算哪天误开了 webviewTag，也不让被挂的 webview 带上 preload / Node 能力
+    if (webPreferences && typeof webPreferences === 'object') {
+      delete webPreferences.preload;
+      webPreferences.nodeIntegration = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.sandbox = true;
+    }
+    event.preventDefault();
+  });
+}
+
+function hardenSession(ses) {
+  if (!ses || hardenedSessions.has(ses)) return;
+  hardenedSessions.add(ses);
+  permissionHandlers.request = (contents, permission, callback, details) => {
+    try {
+      lastPermissionDenial = securityPolicy.permissionLogRecord(
+        permission,
+        details && details.requestingOrigin
+      );
+      logError(
+        'permission-denied',
+        {
+          code: 'PERMISSION_DENIED',
+          message: `拒绝权限请求：${lastPermissionDenial.permission}（来源 ${lastPermissionDenial.origin}）`
+        },
+        { level: 'info' }
+      );
+    } catch {
+      /* 记日志失败也必须照样拒绝 */
+    }
+    callback(false);
+  };
+  // 权限「检查」（Permissions API / 页面初始化时查询）同样一律 false
+  permissionHandlers.check = () => securityPolicy.deniesPermission();
+  try {
+    ses.setPermissionRequestHandler(permissionHandlers.request);
+  } catch (err) {
+    logError('permission-handler', err, { level: 'warn' });
+  }
+  try {
+    ses.setPermissionCheckHandler(permissionHandlers.check);
+  } catch (err) {
+    logError('permission-handler', err, { level: 'warn' });
+  }
+  // 设备权限（串口 / HID / USB / 蓝牙）走另一条通道，Electron 的 request 处理器管不到它
+  if (typeof ses.setDevicePermissionHandler === 'function') {
+    try {
+      ses.setDevicePermissionHandler(() => false);
+    } catch (err) {
+      logError('permission-handler', err, { level: 'warn' });
+    }
+  }
+}
+
 // ---------- 窗口 ----------
 // 每个窗口一个会话；可选直接在第二窗口打开某本书（书卡右键「在新窗口打开」）。
 // 新窗口的书在 BrowserWindow 创建后立刻登记（同步），再加载页面 —— 连点两次也只会开一个。
@@ -1855,13 +1947,9 @@ async function createWindow({ bookPath = null, cascade = false, runAutomationFlo
     backgroundColor: '#f6f4ef',
     show: false,
     autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      spellcheck: false
-    }
+    // 安全开关（sandbox / contextIsolation / webSecurity / nodeIntegration…）的唯一来源：
+    // core/security-policy.js。这里不另写一份，避免以后两边改歪。
+    webPreferences: securityPolicy.windowPreferences(path.join(__dirname, 'preload.js'))
   });
   const session = createSession(browserWin);
   const webContentsId = browserWin.webContents.id;
@@ -1884,8 +1972,9 @@ async function createWindow({ bookPath = null, cascade = false, runAutomationFlo
   browserWin.once('ready-to-show', () => {
     if (!browserWin.isDestroyed()) browserWin.show();
   });
-  browserWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  browserWin.webContents.on('will-navigate', (event) => event.preventDefault());
+  // 开新窗口 / 导航 / webview / 权限的约束来自上面的安全加固：app 的 web-contents-created 已经
+  // 给每个新建的 webContents 挂过一次，这里再显式加固一次（hardenWebContents 幂等，不会重复挂）。
+  hardenWebContents(browserWin.webContents);
   // 能填文字的地方（正文 / 章节名 / 书名 / 搜索框 / 查找替换输入框）右键出中文菜单：剪切 / 复制 / 粘贴 / 全选
   // 章节列表、书架卡片有自带的 HTML 右键菜单，这里只认 isEditable，不会冲突
   browserWin.webContents.on('context-menu', (_event, params) => {
@@ -2532,6 +2621,48 @@ async function runAutomation() {
           } else {
             e2eCloseReadyByWindow.delete(String(windowId));
           }
+        },
+        // ---------- Electron 安全开关（v0.9 C-1）自检辅助 ----------
+        // securityInfo：真实窗口的 webPreferences / 单实例锁 / 所有 webContents 的类型，
+        //   交给 E2E 和 core/security-policy.js 逐项对账（只读）。
+        securityInfo: () => {
+          const contents =
+            automationWin && !automationWin.isDestroyed() ? automationWin.webContents : null;
+          const prefs =
+            contents && !contents.isDestroyed() ? contents.getLastWebPreferences() || {} : {};
+          return {
+            webPreferences: prefs,
+            singleInstanceLock: app.hasSingleInstanceLock(),
+            sessionHandlers: Boolean(permissionHandlers.request && permissionHandlers.check),
+            contentTypes: webContents.getAllWebContents().map((item) => item.getType())
+          };
+        },
+        // securityProbe：直接调用「真的注册给 Electron 的那两个处理器」，证明它们确实一律拒绝；
+        //   顺带带回被拒绝请求的日志字段（真的写进日志的那份，不含本机路径）。
+        securityProbe: () => {
+          let granted = null;
+          let callbackCalled = false;
+          if (permissionHandlers.request) {
+            permissionHandlers.request(
+              {},
+              'geolocation',
+              (value) => {
+                callbackCalled = true;
+                granted = value;
+              },
+              {
+                requestingOrigin: 'file:///C:/Users/fake/Desktop/%E7%A7%81%E4%BA%BA%E4%B9%A6%E7%9B%AE/ch1.txt',
+                isMainFrame: true
+              }
+            );
+          }
+          return {
+            request: { callbackCalled, granted },
+            check: permissionHandlers.check
+              ? permissionHandlers.check({}, 'geolocation', 'file:///C:/Users/fake/Desktop/ch1.txt', {})
+              : null,
+            lastDenial: lastPermissionDenial
+          };
         }
       });
       console.log(
@@ -2553,6 +2684,10 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // 安全加固兜底（v0.9 C-1）：之后新建的任何 webContents / session 都自动带上同一套约束
+  app.on('web-contents-created', (_event, contents) => hardenWebContents(contents));
+  app.on('session-created', (ses) => hardenSession(ses));
+
   app.on('second-instance', () => {
     const session = mostRecentSession();
     if (session) {
@@ -2567,6 +2702,8 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     setupCloseIpc();
     registerIpc();
+    // 默认 session 在第一次建窗时才真正被用到，这里先加固一次（session-created 还会兜一次）
+    hardenSession(electronSession.defaultSession);
     try {
       await getConfig();
     } catch (err) {
