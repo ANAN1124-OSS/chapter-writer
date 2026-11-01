@@ -17,6 +17,7 @@ const groups = [
   { id: 56, run: require('./56-security-switches') },
   { id: 57, run: require('./57-ipc-paths') },
   { id: 58, run: require('./58-config-gate') },
+  { id: 59, run: require('./59-import-export') },
   { id: 60, run: require('./60-log-redaction') },
   { id: 61, run: require('./61-ipc-limits') },
   { id: 62, run: require('./62-common-tools') },

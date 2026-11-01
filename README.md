@@ -393,6 +393,8 @@ pnpm run dist:dir   # 只打免安装目录 → dist\win-unpacked\章节写作�
 
 
 
+66. **第 59 组（导入 / 导出边界）搬出场景，`groupContext()` 首次交「场景本地导出工具」（v0.9 B-7 续，测试可维护性 B7）**：这一刀搬的是 **204 行组体 / 14 条断言**（敌意书名 / 卷名 / 章名能建书且原文照旧进书目；EPUB 导出成功、zip 条目名全是白名单形状、敌意名字只出现在正文页面；另存为默认文件名与导出预览给的三个默认名都不含路径分隔符；DOCX 条目名只有固定七部位、正文 XML 仍是合法文档；导入侧超大 / 二进制 txt 分别被拒且不中断整批、被拒的文件没建书也没留临时导入目录；收尾把演练书移入书架 `_trash` 并确认书架数量回到演练前）。做法照旧**先逐行对出依赖再拆**：真正要从场景拿的只有 **15 样**（`exec` / `check` / `waitFor` / `sleep` / `storage` / `booksRoot` / `deleteBookWithRetry` / `waitForFile` / `withSavePath` / `restoreSaveDialog` / `saveOptions` / `readZip` / `assertWellFormedXml` / `entryNameProblem` / `importer`），`fs` / `path` 由组文件自己 `require('node:…')`；组体从场景**原样剪出来**并逐行比对 **204/204 行、`diffCount=0`**（唯一的接线改写是 2 行里的 4 处 `lastSaveOptions` → 上下文里的 `saveOptions()`，因为它是场景函数里的 `let`，组文件拿不到变量本身），新增 `scripts/e2e/groups/59-import-export.js`（235 行 = 30 行头 + 204 行组体 + 1 行收尾），场景原位换成注释 + `await e2eGroups.runGroups(groupContext(), [59]);`（`scripts/e2e-scenario.js` 10594 → **10403 行，净 −191**；`groupContext()` 新增 `waitForFile` / `withSavePath` / `restoreSaveDialog` / `saveOptions` / `readZip` / `assertWellFormedXml` / `entryNameProblem` / `importer` 八个键，都是复用场景里早就有的那一份，不为组文件另写一套）。`scripts/e2e/groups/index.js` 在 58 与 60 之间插 `{ id: 59, … }`（数组顺序 = 执行顺序，`idsFrom(60)` 自动变成 `slice(7)`）。测试：单测 **931 → 931**（**不新增用例**，只升级 `tests/e2e-harness.test.js` 静态闸门：索引快照加 `59-import-export` / 组号 59，`idsFrom(59)` 与 `idsFrom(60)` 期望跟着挪，新增「58 → 59 → 60 起那批」两段顺序断言，第 59 组原组注释与 3 条独占断言名进「搬走的组不许在场景里留副本」清单）；E2E **1495 → 1495**（**不加新组**：纯搬迁，改后全量 PASS 名字与顺序跟基线日志用 `Compare-Object -SyncWindow 0` 比过、逐行一致）。版本号仍 0.8.6，未打包 / 未发 Release / 未覆盖安装。
+
 ## 开发与自检
 
 
@@ -574,9 +576,9 @@ chapter-writer/
 │  ├─ run-e2e.js            # pnpm run e2e
 │  ├─ bench.js              # 前端基准（v0.9 A-1）：在临时书库里造「书架 N 本 + 千章大书」，真实 Electron 量「书架刷新 / 书架搜索 / 打开书 / 切章 / 章节栏渲染」耗时；零依赖、只读、不删文件，结果落 shots/bench-<时间>.json
 │  ├─ bench-driver.js       # 基准驱动（v0.9 A-1）：只在 --bench 时由 main.js 懒加载，把测量脚本注入渲染层；不进安装包
-│  ├─ e2e-scenario.js       # 端到端自检场景（第 55 组为多窗口；52 / 53 / 54 / 56 / 57 / 58 组与 60–71 组已拆到 e2e/groups/）
+│  ├─ e2e-scenario.js       # 端到端自检场景（第 55 组为多窗口；52 / 53 / 54 / 56 / 57 / 58 / 59 组与 60–71 组已拆到 e2e/groups/）
 │  ├─ e2e/harness.js        # E2E 公共工具（v0.9 B-7）：check / waitFor / 删书重试 / 读日志 / 文件存在，场景与各组共用一份
-│  ├─ e2e/groups/           # 按组拆开的 E2E 场景（v0.9 B-7）：index.js 按组号派发（runGroups / idsFrom），已搬入 52 组（崩溃与错误日志，断言原样）+ 53 组（正文全文搜索索引，断言原样）+ 54 组（检查更新与章节标题统一，断言原样）+ 56 组（Electron 安全开关与窗口行为，断言原样）+ 57 组（IPC 路径入口审计，断言原样）+ 58 组（`config:set` 路径来源校验，断言原样）+ 60–62 组（断言原样）+ 63 组（章节栏渲染，v0.9 A-2 新增）+ 64 组（数据安全回归，v0.9 C-7 新增）+ 65 组（标记层惰性 span，v0.9 A-3 新增）+ 66 组（破坏性操作可恢复性，v0.9 C-8 新增）+ 67 组（主题对比度与状态可见性，v0.9 A-4 新增）+ 68 组（弹层焦点管理与减少动效，v0.9 A-5 新增）+ 69–71 组（动效 / 无障碍名称 / 菜单键盘可达）
+│  ├─ e2e/groups/           # 按组拆开的 E2E 场景（v0.9 B-7）：index.js 按组号派发（runGroups / idsFrom），已搬入 52 组（崩溃与错误日志，断言原样）+ 53 组（正文全文搜索索引，断言原样）+ 54 组（检查更新与章节标题统一，断言原样）+ 56 组（Electron 安全开关与窗口行为，断言原样）+ 57 组（IPC 路径入口审计，断言原样）+ 58 组（`config:set` 路径来源校验，断言原样）+ 59 组（导入 / 导出边界，断言原样）+ 60–62 组（断言原样）+ 63 组（章节栏渲染，v0.9 A-2 新增）+ 64 组（数据安全回归，v0.9 C-7 新增）+ 65 组（标记层惰性 span，v0.9 A-3 新增）+ 66 组（破坏性操作可恢复性，v0.9 C-8 新增）+ 67 组（主题对比度与状态可见性，v0.9 A-4 新增）+ 68 组（弹层焦点管理与减少动效，v0.9 A-5 新增）+ 69–71 组（动效 / 无障碍名称 / 菜单键盘可达）
 │  ├─ contrast.js           # 对比度审计（v0.9 A-4，只读）：系统临时目录里造演练书库 + 真实 Electron，6 套主题逐一切换后读实际颜色、按 WCAG 2.1 打表并落 shots/contrast-<时间>.json
 │  ├─ contrast-driver.js    # 对比度采样驱动（v0.9 A-4）：只在 --contrast 时由 main.js 懒加载，把采样脚本注入渲染层（切主题 / 读计算色 / 关过渡），不进安装包
 │  ├─ contrast-color.js     # 颜色与 WCAG 公式（v0.9 A-4，纯逻辑）：解析浏览器计算值（含 color(srgb …)）、半透明叠加、相对亮度与对比度

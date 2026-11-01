@@ -1,6 +1,6 @@
 // E2E 工具与组拆分（v0.9 B-7，测试可维护性）：
 // scripts/e2e-scenario.js 原来是「一个函数 1.2 万行」，第 60–62 组先搬出去（086153f），
-// 第 52 组日志与错误 / 第 53 组正文搜索索引 / 第 54 组检查更新 / 第 56 组安全开关 / 第 57 组路径审计 / 第 58 组配置来源校验
+// 第 52 组日志与错误 / 第 53 组正文搜索索引 / 第 54 组检查更新 / 第 56 组安全开关 / 第 57 组路径审计 / 第 58 组配置来源校验 / 第 59 组导入导出边界
 // 随后搬（2026-11-02），公共工具（check / waitFor / 删书重试 / 读日志 / 文件存在）
 // 收在 scripts/e2e/harness.js。这里锁四件事：
 //   1. harness 的每个工具行为与拆分前一致（等待 / 重试 / 读日志 / 抛错文案 / 文件存在）；
@@ -170,15 +170,16 @@ test('静态闸门：场景里不许再定义第二份 harness 工具，必须�
     /const \{ checks, check, waitFor, logDir, logNamePattern, readLogs, waitForLog, deleteBookWithRetry, fileExists \} =\s*\n\s*harness;/
   );
   assert.match(SCENARIO_SOURCE, /const e2eGroups = require\('\.\/e2e\/groups'\);/);
-  // 组按「在哪一段」两处跑：第 52 / 53 / 54 / 56 / 57 / 58 组在原位，60 起的那批在原 60–62 的循环位置
+  // 组按「在哪一段」两处跑：第 52 / 53 / 54 / 56 / 57 / 58 / 59 组在原位，60 起的那批在原 60–62 的循环位置
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[52\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[53\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[54\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[56\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[57\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[58\]\);/);
+  assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), \[59\]\);/);
   assert.match(SCENARIO_SOURCE, /await e2eGroups\.runGroups\(groupContext\(\), e2eGroups\.idsFrom\(60\)\);/);
-  // 顺序：52 → 53 → 54 → 56 → 57 → 58 → … → 60 起那批 → 多窗口（55）——与拆分前的执行顺序一致
+  // 顺序：52 → 53 → 54 → 56 → 57 → 58 → 59 → … → 60 起那批 → 多窗口（55）——与拆分前的执行顺序一致
   const groupContext = SCENARIO_SOURCE.indexOf('const groupContext = () => ({');
   const run52 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [52]);');
   const group53 = SCENARIO_SOURCE.indexOf('// 53. 正文全文搜索索引');
@@ -191,6 +192,8 @@ test('静态闸门：场景里不许再定义第二份 harness 工具，必须�
   const run57 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [57]);');
   const group58 = SCENARIO_SOURCE.indexOf('// 58. 配置来源校验');
   const run58 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [58]);');
+  const group59 = SCENARIO_SOURCE.indexOf('// 59. 导入 / 导出边界');
+  const run59 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), [59]);');
   const run60 = SCENARIO_SOURCE.indexOf('await e2eGroups.runGroups(groupContext(), e2eGroups.idsFrom(60));');
   const multiWindow = SCENARIO_SOURCE.indexOf('// 55. 多窗口');
   assert.ok(groupContext > 0 && groupContext < run52, 'groupContext 要先定义再交出去');
@@ -199,7 +202,8 @@ test('静态闸门：场景里不许再定义第二份 harness 工具，必须�
   assert.ok(run54 > group54 && group56 > run54, '54 组要在 56 组之前跑（顺序不变）');
   assert.ok(run56 > group56 && group57 > run56, '56 组要在 57 组之前跑（顺序不变）');
   assert.ok(run57 > group57 && run58 > run57, '57 组要在 58 组之前跑（顺序不变）');
-  assert.ok(run58 > group58 && run60 > run58, '58 组要在 60 起那批之前跑（顺序不变）');
+  assert.ok(run58 > group58 && run59 > run58, '58 组要在 59 组之前跑（顺序不变）');
+  assert.ok(run59 > group59 && run60 > run59, '59 组要在 60 起那批之前跑（顺序不变）');
   assert.ok(run60 > group53 && multiWindow > run60, '60 起那批要在 55 多窗口之前跑完');
 });
 
@@ -211,6 +215,7 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
     '// 56. Electron 安全开关与窗口行为（v0.9 C-1）：',
     '// 57. IPC 路径入口审计（v0.9 C-2）：',
     '// 58. 配置来源校验（v0.9 C-2b，安全审计 C1 的延伸）：',
+    '// 59. 导入 / 导出边界（v0.9 C-3，安全审计 C6）：',
     '// 60. 日志与错误脱敏',
     '// 61. IPC 参数边界与 DoS',
     '// 62. 公共小工具收编'
@@ -219,7 +224,7 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
     assert.equal(SCENARIO_SOURCE.includes(marker), false, `场景里还留着 ${marker}`);
   }
   const groupFiles = fs.readdirSync(GROUPS_DIR).filter((name) => name.endsWith('.js') && name !== 'index.js');
-  assert.ok(groupFiles.length >= 9, '至少应有 52 / 53 / 54 / 56 / 57 / 58 / 60 / 61 / 62 九个组文件');
+  assert.ok(groupFiles.length >= 10, '至少应有 52 / 53 / 54 / 56 / 57 / 58 / 59 / 60 / 61 / 62 十个组文件');
   const joined = groupFiles.map((name) => fs.readFileSync(path.join(GROUPS_DIR, name), 'utf8')).join('\n');
   for (const marker of movedBeyond) {
     assert.equal(joined.includes(marker), true, `groups 下找不到 ${marker}`);
@@ -245,7 +250,10 @@ test('静态闸门：搬走的组不许在场景里留副本（文案只在 grou
     '路径审计：被拒的调用没有改书目 / 章节文件（逐字节一致）',
     '配置来源：伪造的书架目录没有被创建（主进程没往那儿 mkdir / 写文件）',
     '配置来源：别的窗口没选过 → A 窗口选过的路径在 B 窗口不生效（按窗口记账）',
-    '配置来源：演练结束后敏感词表与每日目标恢复原样（没有改动前面的测试状态）'
+    '配置来源：演练结束后敏感词表与每日目标恢复原样（没有改动前面的测试状态）',
+    '导入导出边界：EPUB zip 条目名全是白名单形状，不含书名 / 卷名 / 章名与路径片段',
+    '导入导出边界：DOCX zip 条目名只有固定七部位（不含书名 / 章名）',
+    '导入边界：被拒的文件没有建书、没有留下临时导入目录（正常书建了且只有一本）'
   ]) {
     assert.equal(SCENARIO_SOURCE.includes(needle), false, `场景里还留着断言「${needle}」`);
     assert.equal(joined.includes(needle), true, `组文件里找不到断言「${needle}」`);
@@ -269,7 +277,7 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），组号
   for (const name of required) {
     assert.ok(fs.existsSync(path.join(GROUPS_DIR, `${name}.js`)), `组文件不存在：${name}.js`);
   }
-  // 顺序就是原场景里的执行顺序（52 → 53 → 54 → 56 → 57 → 58 → 60 → 61 → … → 71），以后加组也按组号往后排
+  // 顺序就是原场景里的执行顺序（52 → 53 → 54 → 56 → 57 → 58 → 59 → 60 → 61 → … → 71），以后加组也按组号往后排
   assert.deepEqual(required, [
     '52-crash-logs',
     '53-search-index',
@@ -277,6 +285,7 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），组号
     '56-security-switches',
     '57-ipc-paths',
     '58-config-gate',
+    '59-import-export',
     '60-log-redaction',
     '61-ipc-limits',
     '62-common-tools',
@@ -290,9 +299,10 @@ test('静态闸门：组索引能单独 require（不依赖 Electron），组号
     '70-a11y-keyboard',
     '71-menu-keyboard'
   ]);
-  assert.deepEqual(ids, [52, 53, 54, 56, 57, 58, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]);
-  // 场景尾部那一批：idsFrom(60) = 60 → 71（52 / 53 / 54 / 56 / 57 / 58 组在原位单独跑，不在这里重复）
-  assert.deepEqual(registry.idsFrom(60), ids.slice(6));
+  assert.deepEqual(ids, [52, 53, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]);
+  // 场景尾部那一批：idsFrom(60) = 60 → 71（52 / 53 / 54 / 56 / 57 / 58 / 59 组在原位单独跑，不在这里重复）
+  assert.deepEqual(registry.idsFrom(60), ids.slice(7));
+  assert.deepEqual(registry.idsFrom(59), ids.slice(6));
   assert.deepEqual(registry.idsFrom(58), ids.slice(5));
   assert.deepEqual(registry.idsFrom(57), ids.slice(4));
   assert.deepEqual(registry.idsFrom(56), ids.slice(3));
