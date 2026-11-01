@@ -142,6 +142,49 @@
     return null;
   }
 
+  // 光标所在自然段（v0.8-10，提案 N10）：本编辑器里一个非空行 = 一段，和 paragraphRanges 同口径。
+  // 返回：
+  //   index     —— 行下标（0 基，含空行）
+  //   line      —— 行号（1 基，和界面上「第 N 行」一致）
+  //   blank     —— 光标落在空行（只有空白也算空行）
+  //   start/end —— 这段去掉首尾空白后的字符区间（空行时是整行的 [start, end)）
+  //   paragraph —— 第几段（1 基；空行 = 0）
+  //   text      —— 这一段去掉首尾空白后的文字（只读，给测试 / 提示用）
+  // 光标正好在一行末尾（换行符之前）算这一行；在换行符之后就是下一行，不会同时属于两行。
+  function caretParagraph(text, position) {
+    const source = toText(text);
+    const pos = clampIndex(source.length, position);
+    const lines = lineRanges(source);
+    let index = lines.length - 1;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (pos <= lines[i].end) {
+        index = i;
+        break;
+      }
+    }
+    const line = lines[index];
+    let start = line.start;
+    let end = line.end;
+    while (start < end && /\s/.test(source[start])) start += 1;
+    while (end > start && /\s/.test(source[end - 1])) end -= 1;
+    const blank = line.blank;
+    let paragraph = 0;
+    if (!blank) {
+      for (let i = 0; i <= index; i += 1) {
+        if (!lines[i].blank) paragraph += 1;
+      }
+    }
+    return {
+      index,
+      line: line.line,
+      blank,
+      paragraph,
+      start,
+      end,
+      text: source.slice(start, end)
+    };
+  }
+
   function sanitizeThreshold(value) {
     return clampInt(value, LONG_PARAGRAPH_DEFAULT, LONG_PARAGRAPH_LIMITS);
   }
@@ -316,6 +359,7 @@
     paragraphRanges,
     selectionStats,
     paragraphJumpTarget,
+    caretParagraph,
     sanitizeThreshold,
     longParagraphs,
     invisibleMarks,

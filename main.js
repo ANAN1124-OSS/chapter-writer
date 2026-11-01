@@ -2211,6 +2211,36 @@ async function runAutomation() {
           await automationWin.webContents.executeJavaScript('window.__cwTest.selectRange(0, 42);', true);
         }
         await sleep(500);
+      } else if (screenshotDialog === 'marks-caret') {
+        // 开发截图用：当前段落高亮（v0.8-10，提案 N10）——打开开关，把光标放进一段较长的正文里
+        // （只读显示层，不写盘、不写配置）
+        await automationWin.webContents.executeJavaScript(
+          "window.__cwTest.setMarksToggle('caretParagraph', true);",
+          true
+        );
+        await sleep(400);
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+             const text = window.__cwTest.text();
+             const lines = text.split('\\n');
+             let offset = 0;
+             let line = 0;
+             let target = 0;
+             for (let i = 0; i < lines.length; i += 1) {
+               if (lines[i].trim().length > 20) {
+                 line = i;
+                 target = offset + Math.min(lines[i].length - 1, 20);
+                 break;
+               }
+               offset += lines[i].length + 1;
+             }
+             window.__cwTest.setCaret(target);
+             const height = parseFloat(getComputedStyle(document.getElementById('editor')).lineHeight) || 32;
+             window.__cwTest.setEditorScroll(Math.max(0, (line - 2) * height));
+           })()`,
+          true
+        );
+        await sleep(500);
       } else if (screenshotDialog === 'focus') {
         // 开发截图用：专注模式 + 打字机模式（隐藏左栏 / 顶栏，只改显示，不写盘、不写配置）
         await automationWin.webContents.executeJavaScript(

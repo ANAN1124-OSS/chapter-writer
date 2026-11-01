@@ -339,3 +339,90 @@ test('写作时长秒表：m:ss / h:mm:ss，小时不补前导 0', () => {
   assert.equal(logic.formatStopwatch(-5), '0:00');
   assert.equal(logic.formatStopwatch('bad'), '0:00');
 });
+
+// ---------- 当前段落高亮（v0.8-10，提案 N10） ----------
+// 光标所在自然段：一个非空行 = 一段（和 paragraphRanges / 朗读同一口径），
+// 只给显示层用：返回行号 / 段落号 / 去首尾空白的区间，不改正文、不写盘。
+test('当前段落：光标在段中间 / 段首缩进 / 行尾都算同一段', () => {
+  const text = `${FW}${FW}第一段。\n\n${FW}${FW}第二段长一点。\n  \n第三段！`;
+  const p1 = text.indexOf('第一段');
+  const p2 = text.indexOf('第二段');
+  const p3 = text.indexOf('第三段');
+  const mid = logic.caretParagraph(text, p1 + 1);
+  assert.deepEqual(
+    { line: mid.line, paragraph: mid.paragraph, blank: mid.blank, start: mid.start, end: mid.end, text: mid.text },
+    { line: 1, paragraph: 1, blank: false, start: p1, end: p1 + 4, text: '第一段。' }
+  );
+  // 光标在段首两个全角缩进里：还是第一段（高亮整段，不是只高亮缩进）
+  const indent = logic.caretParagraph(text, p1 - 2);
+  assert.equal(indent.line, 1);
+  assert.equal(indent.paragraph, 1);
+  assert.equal(indent.start, p1);
+  // 光标正好在第一行末尾（换行符之前）算第一行
+  const lineEnd = logic.caretParagraph(text, p1 + 4);
+  assert.equal(lineEnd.line, 1);
+  assert.equal(lineEnd.paragraph, 1);
+  // 第二段中间
+  const second = logic.caretParagraph(text, p2 + 3);
+  assert.equal(second.line, 3);
+  assert.equal(second.paragraph, 2);
+  assert.equal(second.start, p2);
+  assert.equal(second.end, p2 + 7);
+  assert.equal(second.text, '第二段长一点。');
+  // 最后一段末尾（没有换行）
+  const last = logic.caretParagraph(text, text.length);
+  assert.equal(last.line, 5);
+  assert.equal(last.paragraph, 3);
+  assert.equal(last.text, '第三段！');
+  assert.ok(p3 > 0);
+});
+
+test('当前段落：空行 / 空文本 / 越界位置都给「没有段落」，不会报错', () => {
+  const text = `${FW}${FW}第一段。\n\n${FW}${FW}第二段。`;
+  const blankPos = text.indexOf('\n\n') + 1;
+  const blank = logic.caretParagraph(text, blankPos);
+  assert.equal(blank.blank, true);
+  assert.equal(blank.paragraph, 0);
+  assert.equal(blank.line, 2);
+  assert.equal(blank.text, '');
+  // 只有空白（两个半角空格）的行也是空行
+  const spaced = logic.caretParagraph(`第一段。\n  \n第三段。`, 5);
+  assert.equal(spaced.blank, true);
+  assert.equal(spaced.paragraph, 0);
+  assert.equal(spaced.line, 2);
+  // 空文本 = 第 1 行空行
+  const empty = logic.caretParagraph('', 0);
+  assert.deepEqual(
+    { line: empty.line, index: empty.index, blank: empty.blank, paragraph: empty.paragraph },
+    { line: 1, index: 0, blank: true, paragraph: 0 }
+  );
+  // 越界 / 坏位置夹回正文范围
+  const negative = logic.caretParagraph(text, -99);
+  assert.equal(negative.line, 1);
+  assert.equal(negative.paragraph, 1);
+  const huge = logic.caretParagraph(text, 999999);
+  assert.equal(huge.line, 3);
+  assert.equal(huge.paragraph, 2);
+  assert.equal(logic.caretParagraph(null, 0).blank, true);
+  assert.equal(logic.caretParagraph(text, 'abc').line, 1);
+});
+
+test('当前段落：和 paragraphRanges 完全对齐（段号 / 区间 / 行号）', () => {
+  const text = `${FW}${FW}第一段。\n\n${FW}${FW}第二段，长一点。\n  \n${FW}${FW}第三段！\n`;
+  const paragraphs = logic.paragraphRanges(text);
+  assert.equal(paragraphs.length, 3);
+  for (const range of paragraphs) {
+    const hit = logic.caretParagraph(text, range.start);
+    assert.equal(hit.line, range.line);
+    assert.equal(hit.paragraph, range.paragraph);
+    assert.equal(hit.start, range.start);
+    assert.equal(hit.end, range.end);
+    assert.equal(hit.blank, false);
+    assert.equal(hit.text, text.slice(range.start, range.end));
+  }
+  // 结尾换行之后（文本末尾）是最后一行的空行，不属于任何段落
+  const tail = logic.caretParagraph(text, text.length);
+  assert.equal(tail.blank, true);
+  assert.equal(tail.paragraph, 0);
+  assert.equal(tail.line, 6);
+});

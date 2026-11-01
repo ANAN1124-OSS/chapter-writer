@@ -229,6 +229,9 @@
     marks: {
       invisibles: false, // 显示不可见字符（全角空格 ␣ / 行尾空白）
       longParagraphs: false, // 超长段落提示（>500 字左侧淡黄竖线）
+      caretParagraph: false, // 当前段落高亮（v0.8-10，提案 N10）：光标所在段淡色底 + 左侧细线
+      caretLine: 0, // 当前高亮的行号（1 基；0 = 没有高亮）
+      caretTooLarge: false, // 正文超过 30 万字：暂不画段落高亮（和不可见字符同一上限）
       composing: false, // 中文输入法拼字中：先不重画标记层，免得闪
       timer: null, // 重画防抖
       longItems: [], // 本章超长段落（给状态栏小标签用；只读缓存）
@@ -1776,9 +1779,21 @@
   // 全部只读、可开关：选中字数 / 超长段落提示 / 不可见字符 / Alt+↑↓ 段落导航 / 章节列表字数对比。
   // 「超长段落」和「不可见字符」画在一层绝对定位的影子层（#editor-marks）上：字体、行高、字距、宽高都从
   // 编辑区实测值同步，文字本身透明，只画底色和 ␣ / · 标记 —— 正文一个字节都不动，也不写盘。
-  // 两个开关都关时这一层一直是 hidden，没有任何额外开销。
+  // 三个开关都关时这一层一直是 hidden，没有任何额外开销。
   function marksEnabled() {
-    return Boolean(state.marks.invisibles || state.marks.longParagraphs);
+    return Boolean(state.marks.invisibles || state.marks.longParagraphs || state.marks.caretParagraph);
+  }
+
+  // 当前段落高亮（v0.8-10，提案 N10）：只算「光标落在哪一段」给显示层用。
+  // 和不可见字符同一上限：正文超过 30 万字先不高亮（把整章塞进影子层太重），菜单里会提示一次。
+  function currentCaretParagraph() {
+    if (!state.marks.caretParagraph) return null;
+    if (editorEl.value.length > editorLogic.MAX_MARK_CHARS) {
+      state.marks.caretTooLarge = true;
+      return null;
+    }
+    state.marks.caretTooLarge = false;
+    return editorLogic.caretParagraph(editorEl.value, editorEl.selectionStart || 0);
   }
 
   function scheduleMarksRender(delay = 80) {
@@ -1802,6 +1817,7 @@
     state.marks.longItems = [];
     state.marks.longCount = 0;
     state.marks.markCounts = { fullwidth: 0, trailing: 0 };
+    state.marks.caretLine = 0;
     renderLongParaChip();
   }
 
@@ -1920,6 +1936,9 @@
     state.marks.markCounts = invisibleResult.counts;
     state.marks.markTruncated = invisibleResult.truncated;
     state.marks.marksTooLarge = Boolean(invisibleResult.tooLarge);
+    // 当前段落高亮：整段（一个非空行，含折行）画淡色底 + 左侧细线；空行 / 超长正文不高亮。
+    const caret = currentCaretParagraph();
+    state.marks.caretLine = caret && !caret.blank ? caret.line : 0;
 
     overlay.classList.remove('hidden');
     syncMarksLayout();
@@ -1936,7 +1955,9 @@
       if (raw.length) {
         const lineEl = document.createElement('span');
         lineEl.className = 'marks-line';
+        lineEl.dataset.line = String(i + 1);
         if (longLines.has(i + 1)) lineEl.classList.add('long-para');
+        if (state.marks.caretLine === i + 1) lineEl.classList.add('caret-para');
         let cursor = lineStart;
         while (cursor < lineEnd) {
           while (markIndex < marks.length && marks[markIndex].end <= cursor) markIndex += 1;
@@ -1979,6 +2000,23 @@
     syncMarksScroll();
     renderLongParagraphBars();
     renderLongParaChip();
+  }
+
+  // 光标移动时只改 class（不重画整层）：把上一段的高亮摘掉、给新段落加上。
+  // 空行（只有空白）不高亮；正文超过 30 万字时整层本来就没建，直接跳过。
+  function updateCaretParagraph() {
+    const overlay = $('editor-marks');
+    if (!overlay || overlay.classList.contains('hidden') || !state.marks.caretParagraph) return;
+    if (state.view !== 'editor' || !state.bookPath || state.index < 0) return;
+    const caret = currentCaretParagraph();
+    const line = caret && !caret.blank ? caret.line : 0;
+    if (line === state.marks.caretLine) return;
+    const previous = overlay.querySelector('.caret-para');
+    if (previous) previous.classList.remove('caret-para');
+    state.marks.caretLine = line;
+    if (!line) return;
+    const next = overlay.querySelector(`.marks-line[data-line="${line}"]`);
+    if (next) next.classList.add('caret-para');
   }
 
   function longParagraphsTitle() {
@@ -2040,6 +2078,7 @@
   function renderMarksMenu() {
     const invisibles = $('format-invisibles');
     const long = $('format-long-para');
+    const caret = $('format-caret-para');
     if (invisibles) {
       invisibles.textContent = `${state.marks.invisibles ? '✓ ' : ''}显示不可见字符（␣ / 行尾空白）`;
       invisibles.dataset.on = state.marks.invisibles ? '1' : '0';
@@ -2051,15 +2090,24 @@
       long.dataset.on = state.marks.longParagraphs ? '1' : '0';
       long.title = `超过 ${LONG_PARAGRAPH_THRESHOLD} 字的段落，左侧画一条淡黄竖线（为手机阅读排版着想）。只显示，不改正文。`;
     }
+    if (caret) {
+      caret.textContent = `${state.marks.caretParagraph ? '✓ ' : ''}当前段落高亮（光标所在段）`;
+      caret.dataset.on = state.marks.caretParagraph ? '1' : '0';
+      caret.title =
+        '光标所在的那一段（含折行）画一层淡色底 + 左侧细线，颜色跟着背景主题走。只显示，不改正文、不写盘、不写配置。';
+    }
   }
 
   function setMarksToggle(name, on) {
-    if (name !== 'invisibles' && name !== 'longParagraphs') return false;
+    if (name !== 'invisibles' && name !== 'longParagraphs' && name !== 'caretParagraph') return false;
     state.marks[name] = Boolean(on);
     renderMarksMenu();
     renderEditorMarks();
     if (name === 'invisibles' && state.marks.invisibles && state.marks.marksTooLarge) {
       toast('正文超过 30 万字，暂时不逐字标不可见字符（超长段落提示仍然可用）', 'warn');
+    }
+    if (name === 'caretParagraph' && state.marks.caretParagraph && state.marks.caretTooLarge) {
+      toast('正文超过 30 万字，暂时不显示当前段落高亮（其它标记仍可用）', 'warn');
     }
     return state.marks[name];
   }
@@ -2080,12 +2128,16 @@
     for (const type of ['keyup', 'mouseup', 'select']) {
       editorEl.addEventListener(type, () => {
         renderSelectionStats();
+        updateCaretParagraph();
         syncMarksScroll();
         // 键盘 / 鼠标移动光标后，打字机模式跟着把光标行放回 1/3 处
         if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(20);
       });
     }
-    document.addEventListener('selectionchange', () => renderSelectionStats());
+    document.addEventListener('selectionchange', () => {
+      renderSelectionStats();
+      updateCaretParagraph();
+    });
     if (typeof ResizeObserver === 'function') {
       state.marks.resizeObserver = new ResizeObserver(() => scheduleMarksRender(40));
       state.marks.resizeObserver.observe(editorEl);
@@ -7828,6 +7880,7 @@
       else if (action === 'preset-loose') await setDisplayPreset('loose');
       else if (action === 'toggle-invisibles') toggleMarks('invisibles');
       else if (action === 'toggle-long-para') toggleMarks('longParagraphs');
+      else if (action === 'toggle-caret-para') toggleMarks('caretParagraph');
       else if (action === 'display-settings') openSettings();
     });
 
@@ -8557,6 +8610,7 @@
         editorEl.focus();
         const at = Math.max(0, Number(pos) || 0);
         editorEl.setSelectionRange(at, at);
+        updateCaretParagraph();
       },
       // 排版
       openFormatMenu: () => toggleFormatMenu(),
@@ -8800,7 +8854,11 @@
         editorEl.value.slice(editorEl.selectionStart || 0, editorEl.selectionEnd || 0),
       // 编辑器小件（v0.7-4，提案 4.1）：选中字数 / 超长段落 / 不可见字符 / 段落导航 / 章节字数对比。
       // 全部只读，开关只影响显示层（#editor-marks），不碰正文、不写盘。
-      marksFlags: () => ({ invisibles: state.marks.invisibles, longParagraphs: state.marks.longParagraphs }),
+      marksFlags: () => ({
+        invisibles: state.marks.invisibles,
+        longParagraphs: state.marks.longParagraphs,
+        caretParagraph: state.marks.caretParagraph
+      }),
       setMarksToggle: (name, on) => setMarksToggle(name, on),
       toggleMarks: (name) => toggleMarks(name),
       marksOverlayVisible: () => !$('editor-marks').classList.contains('hidden'),
@@ -8808,6 +8866,29 @@
       marksLongParaCount: () => $('editor-marks').querySelectorAll('.long-para').length,
       marksFullwidthCount: () => $('editor-marks').querySelectorAll('.mark-fw').length,
       marksTrailingCount: () => $('editor-marks').querySelectorAll('.mark-trail').length,
+      // 当前段落高亮（v0.8-10，提案 N10）：只读测量，供 E2E 校验「高亮的是光标那一段」
+      marksCaretEnabled: () => Boolean(state.marks.caretParagraph),
+      marksCaretLine: () => state.marks.caretLine || 0,
+      marksCaretTooLarge: () => Boolean(state.marks.caretTooLarge),
+      marksCaretParaCount: () => $('editor-marks').querySelectorAll('.caret-para').length,
+      marksCaretParaInfo() {
+        const el = $('editor-marks').querySelector('.caret-para');
+        if (!el) return null;
+        const styles = getComputedStyle(el);
+        return {
+          line: Number(el.dataset.line) || 0,
+          text: el.textContent,
+          background: styles.backgroundColor,
+          boxShadow: styles.boxShadow,
+          rects: Array.from(el.getClientRects()).map((rect) => ({
+            top: Math.round(rect.top * 100) / 100,
+            left: Math.round(rect.left * 100) / 100,
+            width: Math.round(rect.width * 100) / 100,
+            height: Math.round(rect.height * 100) / 100
+          }))
+        };
+      },
+      editorCaretColor: () => getComputedStyle(editorEl).caretColor,
       marksText: () => $('editor-marks').textContent,
       marksPayload: () => ({
         longItems: state.marks.longItems.map((item) => ({ ...item })),
@@ -8893,6 +8974,7 @@
         const to = Math.max(0, Math.min(Number(end) || 0, length));
         editorEl.setSelectionRange(from, to);
         renderSelectionStats();
+        updateCaretParagraph();
         return { start: editorEl.selectionStart, end: editorEl.selectionEnd };
       },
       charCountText: () => $('char-count').textContent,

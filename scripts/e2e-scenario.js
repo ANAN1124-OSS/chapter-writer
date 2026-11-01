@@ -7308,6 +7308,255 @@ module.exports = async function runScenario(ctx) {
     "window.__cwTest.setMarksToggle('invisibles', false); window.__cwTest.setMarksToggle('longParagraphs', false);"
   );
 
+  // 50j. 当前段落高亮（v0.8-10，提案 N10）：光标所在那一段在影子层上画淡色底 + 左侧细线；
+  // 颜色跟着背景主题走；纯只读显示层——不改正文、不写盘、不写配置，开关和「不可见字符」一样只记在本次会话。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('段落高亮测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const caretBookPath = await exec('window.__cwTest.bookPathValue()');
+  const caretMetaPath = path.join(caretBookPath, '书目.json');
+  const caretConfigPath = path.join(userData, 'config.json');
+  await exec("window.__cwTest.renameChapterAt(0, '雨夜')");
+  const caretSentence = '他把伞收起来，靠在门边，听雨点落在铁皮棚顶上，一下一下，像有人在很远的地方敲门。';
+  const caretLonger = `${caretSentence}${caretSentence}`;
+  const caretParagraphs = [];
+  for (let i = 1; i <= 20; i += 1) {
+    caretParagraphs.push(i % 5 === 0 ? `　　${caretLonger}` : `　　第${i}段：${caretSentence}`);
+  }
+  const caretHlText = caretParagraphs.join('\n\n');
+  const caretStarts = [];
+  {
+    let offset = 0;
+    for (const paragraph of caretParagraphs) {
+      caretStarts.push(offset);
+      offset += paragraph.length + 2; // 段落之间空一行
+    }
+  }
+  // 影子层里的行文本包含段首缩进（和编辑区逐字对齐），所以这里也带缩进比较
+  const caretParaText = (index) => caretParagraphs[index - 1];
+  await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  const caretChapterFile = JSON.parse(await fs.readFile(caretMetaPath, 'utf8')).chapters[0].file;
+  const caretTxtPath = path.join(caretBookPath, caretChapterFile);
+  const caretTxtBefore = await fs.stat(caretTxtPath);
+  const caretMetaBefore = await fs.readFile(caretMetaPath, 'utf8');
+  const caretConfigBefore = await fs.readFile(caretConfigPath, 'utf8');
+  const caretDirBefore = (await fs.readdir(caretBookPath)).sort().join('|');
+
+  check(
+    '当前段落高亮：默认关，标记层不显示（和不可见字符一样只记在本次会话）',
+    (await exec('window.__cwTest.marksFlags()')).caretParagraph === false &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
+      (await exec('window.__cwTest.marksOverlayVisible()')) === false
+  );
+  await exec('window.__cwTest.openFormatMenu()');
+  const caretMenuTexts = await exec(
+    "Array.from(document.querySelectorAll('#format-menu button')).map((el) => el.textContent)"
+  );
+  check(
+    '当前段落高亮：「排版 ▾」菜单里多了一个默认不打勾的开关',
+    caretMenuTexts.some((text) => text.includes('当前段落高亮')) &&
+      (await exec("document.getElementById('format-caret-para').dataset.on")) === '0'
+  );
+  await exec(
+    'document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()'
+  );
+  await waitFor('window.__cwTest.marksFlags().caretParagraph === true');
+  check(
+    '当前段落高亮：打开开关后标记层显示，菜单里打勾',
+    (await exec('window.__cwTest.marksOverlayVisible()')) === true &&
+      (await exec("document.getElementById('format-caret-para').dataset.on")) === '1' &&
+      (await exec("document.getElementById('format-caret-para').textContent")).startsWith('✓') &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 50j-1. 光标在哪一段，高亮就在哪一段（段首缩进里也算这一段；空行不高亮）
+  await exec(`window.__cwTest.setCaret(${caretStarts[0] + 3})`);
+  const caretFirst = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '当前段落高亮：光标所在的第一段整段画上淡色底 + 左侧细线（只一处）',
+    Boolean(caretFirst) &&
+      caretFirst.line === 1 &&
+      caretFirst.text === caretParaText(1) &&
+      caretFirst.background !== 'rgba(0, 0, 0, 0)' &&
+      caretFirst.background !== 'transparent' &&
+      caretFirst.boxShadow.includes('inset') &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 1
+  );
+  await exec(`window.__cwTest.setCaret(${caretStarts[0] + 1})`);
+  const caretIndent = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '当前段落高亮：光标在段首缩进里也算这一段（不是只高亮缩进）',
+    Boolean(caretIndent) && caretIndent.line === 1 && caretIndent.text === caretParaText(1)
+  );
+  await exec(`window.__cwTest.setCaret(${caretStarts[1] - 1})`);
+  check(
+    '当前段落高亮：光标停在空行时不高亮（也不会报错）',
+    (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
+      (await exec('window.__cwTest.marksCaretLine()')) === 0 &&
+      (await exec('window.__cwTest.marksFlags()')).caretParagraph === true
+  );
+  await exec(`window.__cwTest.setCaret(${caretStarts[1] + 5})`);
+  const caretSecond = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '当前段落高亮：光标移到第二段，高亮跟着换（同一时间只有一处）',
+    Boolean(caretSecond) &&
+      caretSecond.line === 3 &&
+      caretSecond.text === caretParaText(2) &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 1
+  );
+  await exec(`window.__cwTest.setCaret(${caretStarts[4] + 10})`);
+  const caretWrapped = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '当前段落高亮：折成好几行的长段落整段都高亮（按行框画，不是只画第一行）',
+    Boolean(caretWrapped) &&
+      caretWrapped.line === 9 &&
+      caretWrapped.text === caretParaText(5) &&
+      caretWrapped.rects.length >= 2
+  );
+
+  // 50j-2. 和不可见字符叠着用；滚动时高亮跟着正文走
+  await exec("window.__cwTest.setMarksToggle('invisibles', true)");
+  await waitFor('window.__cwTest.marksFullwidthCount() > 0');
+  check(
+    '当前段落高亮：和「不可见字符」可以同时开（两种标记互不覆盖）',
+    (await exec('window.__cwTest.marksFullwidthCount()')) === 40 &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 1 &&
+      (await exec('window.__cwTest.marksOverlayVisible()')) === true
+  );
+  await exec("window.__cwTest.setMarksToggle('invisibles', false)");
+  await exec(`window.__cwTest.setCaret(${caretStarts[14] + 8})`);
+  await exec('window.__cwTest.setEditorScroll(0)');
+  const caretTopBefore = (await exec('window.__cwTest.marksCaretParaInfo()')).rects[0].top;
+  const caretScrolled = await exec('window.__cwTest.setEditorScroll(180)');
+  const caretScrollMetrics = await exec('window.__cwTest.marksMetrics()');
+  const caretTopAfter = (await exec('window.__cwTest.marksCaretParaInfo()')).rects[0].top;
+  check(
+    '当前段落高亮：滚动时高亮跟着正文走（影子层和编辑区滚动同步）',
+    caretScrolled > 0 &&
+      caretScrollMetrics.scrollLocked === true &&
+      Math.abs(caretTopBefore - caretScrolled - caretTopAfter) <= 1.5,
+    { caretScrolled, caretTopBefore, caretTopAfter }
+  );
+  await exec('window.__cwTest.setEditorScroll(0)');
+
+  // 50j-3. 主题色细化：高亮底色 / 光标颜色跟着背景主题走，切换主题不写配置
+  const caretPaperInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretPaperColor = await exec('window.__cwTest.editorCaretColor()');
+  await exec('window.__cwTest.openSettings()');
+  check(
+    '当前段落高亮：写作页打开的是按这本书的显示设置',
+    (await exec('window.__cwTest.settingsScope()')) === 'book'
+  );
+  await exec("window.__cwTest.setSelect('settings-paper', 'night')");
+  await waitFor("window.__cwTest.displayStyle().paperClass.includes('theme-night')");
+  const caretNightInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretNightColor = await exec('window.__cwTest.editorCaretColor()');
+  check(
+    '当前段落高亮：夜间主题有一套单独的高亮色 / 光标色，不会刺眼',
+    Boolean(caretNightInfo) &&
+      caretNightInfo.line === caretPaperInfo.line &&
+      caretNightInfo.background !== caretPaperInfo.background &&
+      caretNightColor !== caretPaperColor
+  );
+  await exec("window.__cwTest.setSelect('settings-paper', 'kraft')");
+  await waitFor("window.__cwTest.displayStyle().paperClass.includes('theme-kraft')");
+  const caretKraftInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretKraftColor = await exec('window.__cwTest.editorCaretColor()');
+  check(
+    '当前段落高亮：牛皮纸主题也有自己的高亮色（6 套主题分别调过色）',
+    Boolean(caretKraftInfo) &&
+      caretKraftInfo.background !== caretPaperInfo.background &&
+      caretKraftInfo.background !== caretNightInfo.background &&
+      caretKraftColor !== caretPaperColor
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor("!window.__cwTest.displayStyle().paperClass.includes('theme-kraft')");
+  check(
+    '当前段落高亮：切换主题只是预览，取消设置后主题恢复、config.json 一个字节没写',
+    (await fs.readFile(caretConfigPath, 'utf8')) === caretConfigBefore
+  );
+
+  // 50j-4. 没保存的新段落也高亮；超长正文跳过；关掉开关就收起
+  await exec(
+    `window.__cwTest.setText(${JSON.stringify(`${caretHlText}\n\n　　临时加的一段，还没有保存。`)})`
+  );
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  const caretUnsaved = await exec('window.__cwTest.marksCaretParaInfo()');
+  check(
+    '当前段落高亮：编辑区里没保存的新段落也会高亮（只改显示层，不写盘）',
+    (await exec('window.__cwTest.dirty()')) === true &&
+      Boolean(caretUnsaved) &&
+      caretUnsaved.text.trim() === '临时加的一段，还没有保存。'
+  );
+  await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec("window.__cwTest.setText('长'.repeat(300001))");
+  await sleep(250);
+  check(
+    '当前段落高亮：正文超过 30 万字时暂不高亮（和不可见字符同一上限，不卡界面）',
+    (await exec('window.__cwTest.marksCaretTooLarge()')) === true &&
+      (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
+      (await exec('window.__cwTest.marksFlags()')).caretParagraph === true
+  );
+  await exec(`window.__cwTest.setText(${JSON.stringify(caretHlText)})`);
+  await waitFor('window.__cwTest.marksCaretParaCount() === 1');
+  await exec('window.__cwTest.openFormatMenu()');
+  await exec(
+    'document.querySelector(\'#format-menu button[data-action="toggle-caret-para"]\').click()'
+  );
+  await waitFor('window.__cwTest.marksFlags().caretParagraph === false');
+  check(
+    '当前段落高亮：关掉开关后标记层收起、菜单恢复不打勾，正文一个字不变',
+    (await exec('window.__cwTest.marksCaretParaCount()')) === 0 &&
+      (await exec('window.__cwTest.marksOverlayVisible()')) === false &&
+      (await exec("document.getElementById('format-caret-para').dataset.on")) === '0' &&
+      (await exec('window.__cwTest.text()')) === caretHlText &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+
+  // 50j-5. 全程只读；配置不新增字段；v0.4.1 旧书照常高亮
+  const caretTxtAfter = await fs.stat(caretTxtPath);
+  const caretMetaAfter = await fs.readFile(caretMetaPath, 'utf8');
+  const caretConfigAfter = await fs.readFile(caretConfigPath, 'utf8');
+  const caretDirAfter = (await fs.readdir(caretBookPath)).sort().join('|');
+  check(
+    '当前段落高亮：全程只读（txt 大小+mtime、书目、配置、书内文件都没变，无 _trash / 临时文件）',
+    caretTxtAfter.size === caretTxtBefore.size &&
+      caretTxtAfter.mtimeMs === caretTxtBefore.mtimeMs &&
+      caretMetaAfter === caretMetaBefore &&
+      caretConfigAfter === caretConfigBefore &&
+      caretDirAfter === caretDirBefore &&
+      !caretDirAfter.includes('_trash') &&
+      !caretDirAfter.includes('.tmp-')
+  );
+  const caretConfigJson = JSON.parse(caretConfigAfter);
+  check(
+    '当前段落高亮：配置没有新增字段（和不可见字符一样，开关只在本次会话有效）',
+    ['caretParagraph', 'marksCaret', 'editorCaret', 'caretLine', 'caretHighlight'].every(
+      (key) => !(key in caretConfigJson)
+    )
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const caretLegacyMetaBefore = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(fragLegacyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec("window.__cwTest.setMarksToggle('caretParagraph', true); window.__cwTest.setCaret(0);");
+  const caretLegacyInfo = await exec('window.__cwTest.marksCaretParaInfo()');
+  const caretLegacyMetaAfter = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  check(
+    '当前段落高亮：没有 schemaVersion 的旧书照常高亮，书目不被补字段',
+    Boolean(caretLegacyInfo) &&
+      caretLegacyInfo.line === 1 &&
+      caretLegacyInfo.text === '旧书正文。' &&
+      caretLegacyMetaAfter === caretLegacyMetaBefore &&
+      caretLegacyMetaAfter.includes('"schemaVersion"') === false
+  );
+  await exec("window.__cwTest.setMarksToggle('caretParagraph', false)");
+
   // 51. 专注模式（提案 3.5）：隐藏左栏与顶栏、F11 / 按钮进出、Esc 退出、打字机模式。
   // 全部只改显示（DOM class + textarea.scrollTop）：不改正文、不写盘、不写配置、不碰书目。
   await exec('window.__cwTest.backToShelf()');

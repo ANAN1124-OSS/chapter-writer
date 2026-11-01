@@ -22,6 +22,10 @@
   --editor-max-width: none;
   --editor-padding-x: 56px;
   --editor-bg-image: none;
+  /* 当前段落高亮（v0.8-10，提案 N10）：跟着背景主题调色；只作用于影子层 */
+  --caret-para-tint: rgba(138, 90, 59, .055);
+  --caret-para-edge: rgba(138, 90, 59, .34);
+  --editor-caret: #6d3f24;
 }
 
 /* 背景主题：只换纸色/纹理（书架、章节栏、正文一起变），正文墨色默认不动 */
@@ -29,16 +33,25 @@ body.theme-cream {
   --paper: #f7efdc;
   --paper-soft: #fbf6ea;
   --paper-deep: #efe3cc;
+  --caret-para-tint: rgba(166, 116, 52, .06);
+  --caret-para-edge: rgba(166, 116, 52, .35);
+  --editor-caret: #7a4a22;
 }
 body.theme-green {
   --paper: #e8efe2;
   --paper-soft: #f0f5ec;
   --paper-deep: #dde7d6;
+  --caret-para-tint: rgba(74, 112, 76, .07);
+  --caret-para-edge: rgba(74, 112, 76, .32);
+  --editor-caret: #3f6b48;
 }
 body.theme-kraft {
   --paper: #f0e6d2;
   --paper-soft: #f6eedd;
   --paper-deep: #e5d8bf;
+  --caret-para-tint: rgba(122, 92, 46, .06);
+  --caret-para-edge: rgba(122, 92, 46, .33);
+  --editor-caret: #5e4322;
   /* 牛皮纸的细纤维纹理：纯 CSS，不用图片文件 */
   --editor-bg-image:
     repeating-linear-gradient(0deg, rgba(122, 92, 46, .045) 0 1px, transparent 1px 3px),
@@ -48,6 +61,9 @@ body.theme-grid {
   --paper: #f4f7f6;
   --paper-soft: #fafcfb;
   --paper-deep: #e7edeb;
+  --caret-para-tint: rgba(72, 106, 122, .07);
+  --caret-para-edge: rgba(72, 106, 122, .32);
+  --editor-caret: #3f5f6b;
   /* 网格纸：24px 方格 */
   --editor-bg-image:
     linear-gradient(rgba(96, 122, 138, .10) 1px, transparent 1px),
@@ -70,6 +86,9 @@ body.theme-night {
   --warn: #d0a04a;
   --input-bg: #2b2e32;
   --hover-tint: rgba(255, 255, 255, .07);
+  --caret-para-tint: rgba(255, 244, 226, .055);
+  --caret-para-edge: rgba(220, 178, 128, .38);
+  --editor-caret: #e6bb87;
 }
 
 * { box-sizing: border-box; }
@@ -687,6 +706,7 @@ body.resizing .editor {
   background-image: var(--editor-bg-image);
   background-size: var(--editor-bg-size, auto);
   color: var(--ink);
+  caret-color: var(--editor-caret);
   font-family: var(--editor-font-family);
   font-size: var(--editor-font-size);
   line-height: var(--editor-line-height);
@@ -720,13 +740,22 @@ body.resizing .editor {
 }
 .editor-marks .long-para,
 .editor-marks .mark-fw,
-.editor-marks .mark-trail {
+.editor-marks .mark-trail,
+.editor-marks .caret-para {
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 /* 超长段落：段落本身只作为定位标记（背景在跨行行内元素上不可靠），
    每一行的左侧黄线由 #editor-marks-gutter 按实测行位置画在左边距里 */
 .editor-marks .long-para { background: none; }
+/* 当前段落高亮（v0.8-10，提案 N10）：光标所在那一段（含折行）画一层淡色底 + 左侧细线。
+   颜色由背景主题的 --caret-para-tint / --caret-para-edge 决定；纵向 padding 让底色铺满行高，
+   不参与排版 / 换行计算。只画在影子层上：不动正文，也不写盘。 */
+.editor-marks .caret-para {
+  padding: 7px 0;
+  background: var(--caret-para-tint);
+  box-shadow: inset 3px 0 0 var(--caret-para-edge);
+}
 /* 全角空格：黄底 + 居中的 ␣（绝对定位，不改字宽） */
 .editor-marks .mark-fw {
   position: relative;
