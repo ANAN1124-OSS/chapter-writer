@@ -273,6 +273,26 @@ test('verifyBook 报告缺失的章节文件', async () => {
   assert.deepEqual(report.missing, [meta.chapters[1].file]);
 });
 
+test('verifyBook 纯读：字数缓存缺失时只算不写，不偷偷改书目.json', async () => {
+  const root = await mkTmp();
+  const { path: bookPath } = await storage.createBook(root, '校验只读');
+  const metaFile = path.join(bookPath, '书目.json');
+  // createBook 写的书目里没有 chars 缓存；先写好正文，再校验
+  await fs.writeFile(path.join(bookPath, '001-未命名.txt'), '你好世界', 'utf8');
+  const metaBefore = await fs.readFile(metaFile);
+  const report = await storage.verifyBook(bookPath);
+  assert.equal(report.chapterCount, 1);
+  assert.equal(report.totalChars, 4);
+  assert.deepEqual(report.missing, []);
+  // 保存后的后台校验是纯读：书目的字节一个都没变（没有补 chars 缓存）
+  assert.deepEqual(await fs.readFile(metaFile), metaBefore);
+  // 回填缓存的能力没删：书架扫描 / 打开书照旧把 chars 写回
+  const opened = await storage.openBook(bookPath);
+  assert.equal(opened.totalChars, 4);
+  const cached = JSON.parse(await fs.readFile(metaFile, 'utf8'));
+  assert.equal(cached.chapters[0].chars, 4);
+});
+
 test('原子写：目标被目录占用时抛错且不残留临时文件', async () => {
   const root = await mkTmp();
   const target = path.join(root, 'x.txt');

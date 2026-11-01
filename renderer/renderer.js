@@ -32,6 +32,9 @@
   // 当前段落高亮的颜色（v0.8-10b，提案 N10b）：core/caret-color.js 里、Node 单测覆盖。
   // 只负责把配置里的 #rrggbb 换成 CSS 的 rgba，并做清洗；不写盘、不碰正文。
   const caretColorLib = window.CWCaretColor;
+  // 保存热路径（代码审计 F2）：保存提示文案 + 后台全书校验的结论，save-logic.js 里、
+  // Node 单测覆盖；这里只负责「先出提示、后台再校验」的时序。
+  const saveLogic = window.CWSaveLogic;
   // 书架正文搜索：输入停顿多久后才查（避免每敲一个字都查一次）；正文最少 2 个字
   const CONTENT_SEARCH_DEBOUNCE = 320;
   const CONTENT_SEARCH_MIN_CHARS = 2;
@@ -302,6 +305,7 @@
     settingsFontDraft: { path: '', name: '' }, // 设置里刚选的自定义字体（点保存才落配置）
     settingsCaretColorDraft: '', // 设置里刚选的高亮颜色（'' = 跟随主题；点保存才落配置）
     suppressChapterClick: 0, // 拖拽结束后短暂屏蔽 click，避免误切章
+    toastLog: [], // 只在 ?test=1 里记最近几条提示（E2E 验证「保存提示先出、缺章警告后到」）
     testMode: new URLSearchParams(location.search).has('test')
   };
 
@@ -312,6 +316,11 @@
     el.className = `toast ${kind === 'warn' ? 'warn' : kind === 'error' ? 'error' : ''}`.trim();
     el.textContent = message;
     area.appendChild(el);
+    // E2E 只在测试模式下读这份记录（生产里 state.toastLog 一直是空数组，不增长）
+    if (state.testMode) {
+      state.toastLog.push({ message: String(message), kind });
+      if (state.toastLog.length > 60) state.toastLog.shift();
+    }
     setTimeout(() => {
       el.style.opacity = '0';
       el.style.transition = 'opacity .25s ease';
@@ -3986,6 +3995,27 @@
     }
   }
 
+  // 保存后的全书校验（审计 F2）：挪到后台跑，不 await、不阻塞保存热路径。
+  // - 发现缺章才 warn，文案与以前完全一致（save-logic.js 里单测锁住）；
+  // - 校验失败（书被挪走 / 权限 / 临时读失败）只记日志：保存本身已经成功，
+  //   以前那句「已保存当前章（全书校验失败）」会误报，现在不再打扰作者。
+  // 测试模式（?test=1）可以用 __cwTest.setTestVerifyBook 替换这一趟，E2E 靠它验证
+  // 「保存不等校验」「后台失败不提示」两个时序。
+  let testVerifyBook = null;
+
+  function verifyBookInBackground(bookPath) {
+    void (async () => {
+      try {
+        const verify = testVerifyBook || ((target) => call(api.verifyBook, target));
+        const report = await verify(bookPath);
+        const warn = saveLogic.verifyWarnText(report);
+        if (warn) toast(warn, 'warn');
+      } catch (err) {
+        console.warn('保存后的全书校验失败（已忽略，不影响保存结果）', err);
+      }
+    })();
+  }
+
   async function saveCurrent({ silent = false } = {}) {
     if (!state.bookPath || state.index < 0) {
       return { ok: false, code: 'NO_CHAPTER', message: '当前没有可保存的章节' };
@@ -4029,19 +4059,22 @@
       if (state.find.total === 0 || state.find.fromBookmark) {
         await restoreFindBookmarkForCurrentChapter();
       }
-      // 「保存整本」语义：保存后顺带校验全书章节文件是否齐全
-      try {
-        const report = await call(api.verifyBook, state.bookPath);
-        if (report.missing && report.missing.length) {
-          toast(`已保存当前章，但全书有 ${report.missing.length} 个章节文件缺失`, 'warn');
-        }
-        if (!silent) {
-          const snapshotNote = data.snapshot && data.snapshot.taken ? ' · 今日快照已留' : '';
-          toast(`已保存：${report.chapterCount} 章 · 本章 ${formatChars(data.chars)}${snapshotNote}`);
-        }
-      } catch {
-        if (!silent) toast('已保存当前章（全书校验失败）', 'warn');
+      // 保存热路径（代码审计 F2）：保存一成功就先出「已保存」提示——章数直接用书目里的
+      // 章节数（保存不会增减章节，和以前 report.chapterCount 是同一个值），不再为了拿这个
+      // 数字去等一趟全书校验（读书目 + 每章 stat，千章书每次 Ctrl+S 都在付这份成本）。
+      // 不采纳审计里「chars 没变就跳过 writeBookMeta」那条：那会冻结书目 updatedAt。
+      if (!silent) {
+        toast(
+          saveLogic.savedToastText({
+            chapterCount: state.chapters.length,
+            charsText: formatChars(data.chars),
+            snapshotTaken: Boolean(data.snapshot && data.snapshot.taken)
+          })
+        );
       }
+      // 全书校验挪到后台：发现缺章才 warn（文案不变），校验本身失败只记日志，
+      // 不阻塞保存热路径、也不再误报「已保存当前章（全书校验失败）」。
+      verifyBookInBackground(state.bookPath);
       return { ok: true, data };
     } catch (err) {
       state.saveError = err.message;
@@ -9197,6 +9230,19 @@
       text: () => editorEl.value,
       async save() {
         return saveCurrent({ silent: true });
+      },
+      // 保存热路径（审计 F2）：非 silent 保存 = 真的会出提示，E2E 用它验证提示时序
+      async saveVisible() {
+        return saveCurrent({ silent: false });
+      },
+      // 最近几条提示（只在 ?test=1 里记录）：E2E 用它断言「已保存先出、缺章警告后到」
+      toasts: () => state.toastLog.map((item) => ({ message: item.message, kind: item.kind })),
+      clearToasts() {
+        state.toastLog.length = 0;
+      },
+      // 替换后台全会校验（E2E 验证「保存不等校验」「后台失败不误报」）
+      setTestVerifyBook(fn) {
+        testVerifyBook = typeof fn === 'function' ? fn : null;
       },
       chapterTitles: () => state.chapters.map((c, i) => chapterTitle(i, c.name)),
       chapterNames: () => state.chapters.map((c) => c.name),

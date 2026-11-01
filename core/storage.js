@@ -193,7 +193,9 @@ function mergeCharsCache(freshMeta, cachedChapters) {
 
 // 书架扫描用的统计：字数走 书目.json 缓存，不再每次重读整本书；
 // 缓存缺失时只读缺的那几章并把缓存写回（老书首次扫描慢一点，之后秒开）。
-async function bookStats(bookPath, meta) {
+// writeCache=false 时只算不写（保存后的后台全书校验用：那一趟必须是纯读，
+// 否则会悄悄改 书目.json —— 复制 / 导出等「只读」操作会看到书被改写）。
+async function bookStats(bookPath, meta, { writeCache = true } = {}) {
   let totalChars = 0;
   const needRead = [];
   for (const chapter of meta.chapters) {
@@ -212,7 +214,7 @@ async function bookStats(bookPath, meta) {
         if (err.code !== 'ENOENT') throw err;
       }
     }
-    if (changed) {
+    if (changed && writeCache) {
       // 写缓存必须走书锁，而且要锁内重读 meta 再合并：
       // 否则「扫描读到的旧 meta + 补字数」会覆盖掉同时发生的建章/改名/删除（真实丢操作路径）。
       try {
@@ -373,11 +375,13 @@ async function openBook(bookPath) {
   return { meta, missing, totalChars: stats.totalChars };
 }
 
+// 保存后的全书校验（代码审计 F2：渲染层把它挪到了后台）：只读，不写字数缓存。
+// 缓存回填是书架扫描 / 打开书的事，校验只负责「有几章、共多少字、缺哪些文件」。
 async function verifyBook(bookPath) {
   const meta = await readBookMeta(bookPath);
   const [missing, stats] = await Promise.all([
     findMissingChapters(bookPath, meta),
-    bookStats(bookPath, meta)
+    bookStats(bookPath, meta, { writeCache: false })
   ]);
   return { chapterCount: meta.chapters.length, totalChars: stats.totalChars, missing };
 }
