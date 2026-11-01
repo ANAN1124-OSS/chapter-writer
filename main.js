@@ -1358,17 +1358,26 @@ function registerIpc() {
     };
   }
 
-  // 导出范围预览（只读）：对话框里实时显示「选中几章 / 多少字 / 默认文件名」
+  // 导出范围预览（只读）：对话框里实时显示「选中几章 / 多少字 / 默认文件名」。
+  // 字数优先用书目里的 chars 缓存求和（审计 F3）；缓存缺失 / 坏值才读盘现算，
+  // 编辑区里当前章的未保存内容（override）永远现算。正式导出仍读全文，不受这里影响。
   handleBook('book:export-plan', async (bookPath, override, range) => {
     const meta = await storage.readBookMeta(bookPath);
     const plan = exporter.resolveExportRange(meta, range);
     const overrideIndex = exporter.chapterIndexOf(meta, override);
     let chars = 0;
     for (const index of plan.indexes) {
-      const text =
-        index === overrideIndex
-          ? override.text
-          : (await storage.loadChapterText(bookPath, meta.chapters[index].file)).text;
+      if (index === overrideIndex) {
+        chars += chaptersLib.countChars(override.text);
+        continue;
+      }
+      const chapter = meta.chapters[index];
+      const cached = exporter.cachedCharsOf(chapter);
+      if (cached != null) {
+        chars += cached;
+        continue;
+      }
+      const text = (await storage.loadChapterText(bookPath, chapter.file)).text;
       chars += chaptersLib.countChars(text);
     }
     return {

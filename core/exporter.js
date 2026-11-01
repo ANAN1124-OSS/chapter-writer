@@ -27,6 +27,16 @@ function toInt(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// 导出范围预览用的字数缓存：书目里 chapters[].chars 是保存时按同一口径
+// （countChars：去掉空白/换行）算好的。合法的非负有限数直接用；缺失 / 坏值返回 null，
+// 调用方再读盘现算。编辑区里有未保存内容的覆盖章必须用 override.text 现算，不能读这个缓存。
+function cachedCharsOf(chapter) {
+  if (!chapter || typeof chapter !== 'object') return null;
+  const value = chapter.chars;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.round(value);
+}
+
 // 解析导出范围（只读，不改 meta）：
 //   null / { mode: 'all' }                          → 全书
 //   { mode: 'volume', volumeId }                    → 某一卷（volumeId 为 null = 未分卷）
@@ -214,6 +224,7 @@ module.exports = {
   exportFileName,
   exportBuffer,
   exportBufferFromText,
+  cachedCharsOf,
   chapterIndexOf,
   chapterRefIndex,
   PLATFORM_FORMAT_OPTIONS,

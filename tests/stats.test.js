@@ -173,6 +173,100 @@ test('每日统计：summary 给出今天/目标/完成度/近 30 天', () => {
   assert.equal(met.goalMet, true);
 });
 
+// 旧实现（审计 F4 之前）：recentDays 逐天调 dayTotal，dayTotal 每次都 sanitize 整份统计。
+// 这里按旧口径独立算一遍，用来证明新实现结果完全一致。
+function legacyRecentDays(rawStats, now, count) {
+  const anchor = statsLib.localDayKey(now);
+  const out = [];
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    const key = statsLib.shiftDayKey(anchor, -offset);
+    out.push({ day: key, chars: statsLib.dayTotal(rawStats, key) });
+  }
+  return out;
+}
+
+test('每日统计：recentDays 与旧实现逐项一致（缺日补 0 / 坏数据清洗 / 多书求和）', () => {
+  const raw = statsWith({
+    '2026-10-31': { books: { bookA: 120, bookB: 80 }, seconds: 90 },
+    '2026-10-30': '坏条目',
+    '2026-10-29': { books: { bookA: 30, bad: -5, zero: 0 } },
+    '2026-10-25': { seconds: 300 }, // 只有时长、没有字数
+    '2026-10-24': { books: { bookA: 7 } },
+    '2026-02-30': { books: { ghost: 1 } }, // 不存在的日期
+    不是日期: { books: { ghost: 1 } }
+  });
+  const now = new Date(2026, 9, 31, 12);
+  for (const count of [1, 7, 30]) {
+    assert.deepEqual(
+      statsLib.recentDays(raw, now, count),
+      legacyRecentDays(raw, now, count),
+      `近 ${count} 天应与旧实现逐项一致`
+    );
+  }
+  const week = statsLib.recentDays(raw, now, 7);
+  assert.deepEqual(
+    week.find((item) => item.day === '2026-10-29'),
+    { day: '2026-10-29', chars: 30 }
+  );
+  assert.equal(week.find((item) => item.day === '2026-10-28').chars, 0);
+  assert.equal(week.find((item) => item.day === '2026-10-25').chars, 0, '只有时长的日子字数仍是 0');
+});
+
+test('每日统计：summary 与旧实现逐字段一致（含今日 / 目标 / 近 N 天 / 时长）', () => {
+  const raw = statsWith({
+    '2026-10-31': { books: { bookA: 500, bookB: 500 }, seconds: 90 },
+    '2026-10-30': { books: { bookA: 200 }, seconds: 600 },
+    '2026-10-29': { seconds: 30 },
+    '2026-09-01': { books: { bookA: 7 }, seconds: 9999 }
+  });
+  const now = new Date(2026, 9, 31, 12);
+  const recent = legacyRecentDays(raw, now, 7);
+  const todayChars = statsLib.dayTotal(raw, '2026-10-31');
+  const todaySeconds = statsLib.daySeconds(raw, '2026-10-31');
+  const recentTotal = recent.reduce((sum, item) => sum + item.chars, 0);
+  const recentSeconds = recent.reduce((sum, item) => sum + statsLib.daySeconds(raw, item.day), 0);
+  assert.deepEqual(statsLib.summary(raw, { now, goal: 2000, days: 7 }), {
+    day: '2026-10-31',
+    todayChars,
+    todaySeconds,
+    goal: 2000,
+    goalPercent: 50,
+    goalMet: false,
+    recentTotal,
+    recentSeconds,
+    days: recent
+  });
+
+  // days 参数同样走 clamp：0 → 1 天，和旧实现一致
+  assert.deepEqual(statsLib.summary(raw, { now, days: 0 }).days, legacyRecentDays(raw, now, 1));
+});
+
+test('每日统计：recentDays / summary 只清洗一次统计（不再逐天 dayTotal）', () => {
+  const days = {};
+  for (let offset = 0; offset < 30; offset += 1) {
+    days[statsLib.shiftDayKey('2026-10-31', -offset)] = { books: { a: offset + 1 }, seconds: 5 };
+  }
+  let reads = 0;
+  const raw = {
+    version: 1,
+    get days() {
+      reads += 1;
+      return days;
+    }
+  };
+  reads = 0;
+  const recent = statsLib.recentDays(raw, new Date(2026, 9, 31, 12), 30);
+  assert.equal(recent.length, 30);
+  assert.equal(recent[29].chars, 1);
+  assert.ok(reads <= 10, `recentDays 应只读一次 days（实际 ${reads} 次；旧实现约 120 次）`);
+
+  reads = 0;
+  const result = statsLib.summary(raw, { now: new Date(2026, 9, 31, 12), days: 30 });
+  assert.equal(result.todayChars, 1);
+  assert.equal(result.recentTotal, 465); // 1 + 2 + … + 30
+  assert.ok(reads <= 10, `summary 应只读一次 days（实际 ${reads} 次；旧实现约 120 次）`);
+});
+
 test('每日统计：存储缺文件 = 空统计，记录后原子落盘并可跨实例读回', async () => {
   const dir = await mkTmp();
   const store = statsLib.createStatsStore(dir);

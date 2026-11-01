@@ -8,6 +8,7 @@ const {
   exportBufferFromText,
   chapterIndexOf,
   chapterRefIndex,
+  cachedCharsOf,
   platformChapterText,
   PLATFORM_FORMAT_OPTIONS,
   resolveExportDir,
@@ -366,4 +367,19 @@ test('默认文件名：EPUB 复用同一套范围规则，只换后缀（v0.8 P
   assert.equal(exportFileName(meta, null, ''), '测试书.txt');
   assert.equal(exportFileName(meta, null, '  '), '测试书.txt');
   assert.equal(exportFileName(meta, null, '.txt'), '测试书.txt');
+});
+
+test('导出预览字数缓存：合法非负数直接用，缺失 / 坏值返回 null（F3）', () => {
+  assert.equal(cachedCharsOf({ chars: 0 }), 0, '0 字是合法缓存（空章）');
+  assert.equal(cachedCharsOf({ chars: 123 }), 123);
+  assert.equal(cachedCharsOf({ chars: 12.6 }), 13, '坏精度收成整数');
+  assert.equal(cachedCharsOf({ chars: 5e6 }), 5000000);
+  for (const bad of [{}, { chars: null }, { chars: undefined }, { chars: '' }, { chars: '123' }, { chars: true }]) {
+    assert.equal(cachedCharsOf(bad), null);
+  }
+  assert.equal(cachedCharsOf({ chars: -1 }), null);
+  assert.equal(cachedCharsOf({ chars: Number.NaN }), null);
+  assert.equal(cachedCharsOf({ chars: Infinity }), null);
+  assert.equal(cachedCharsOf(null), null);
+  assert.equal(cachedCharsOf('章'), null);
 });

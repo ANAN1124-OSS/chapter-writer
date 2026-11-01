@@ -2264,6 +2264,64 @@ module.exports = async function runScenario(ctx) {
       JSON.stringify(exportMetaAfter.chapters) === JSON.stringify(exportMeta.chapters)
   );
 
+  // 39j. 导出预览字数优先用书目 chars 缓存（v0.8.6 R2 / 审计 F3）：
+  // 故意把第 2 章缓存改成 777、删掉第 3 章缓存 —— 预览应 = 其余章缓存 + 777 + 第 3 章读盘现算；
+  // 同时证明算预览只读：改完书目后打开对话框，全程不再写书目。
+  const exportMetaPath = path.join(exportBookPath, '书目.json');
+  const exportMetaBytes = await fs.readFile(exportMetaPath, 'utf8');
+  const beforeCache = exportMeta.chapters.map((chapter) => chapter.chars);
+  check(
+    '范围导出：四章都有字数缓存（预览可以直接用缓存）',
+    beforeCache.every((chars) => Number.isFinite(chars) && chars >= 0),
+    beforeCache
+  );
+  const cacheMeta = JSON.parse(exportMetaBytes);
+  cacheMeta.chapters[1].chars = 777;
+  delete cacheMeta.chapters[2].chars;
+  await fs.writeFile(exportMetaPath, JSON.stringify(cacheMeta, null, 2), 'utf8');
+  const cachedBytes = await fs.readFile(exportMetaPath, 'utf8');
+  const fallbackChars = chaptersLib.countChars(exportDiskTexts[2]);
+  const expectedCachedChars = beforeCache[0] + 777 + fallbackChars + beforeCache[3];
+  try {
+    await openExportDialogFromMenu();
+    const cachedSummary = await waitForSummary(`${expectedCachedChars} 字`);
+    check(
+      '范围导出：预览字数用书目缓存求和，缓存缺失的章才读盘现算',
+      cachedSummary.includes(`将导出 4 章 · ${expectedCachedChars} 字`),
+      cachedSummary
+    );
+    check(
+      '范围导出：算预览不写书目（字数缓存只是读）',
+      (await fs.readFile(exportMetaPath, 'utf8')) === cachedBytes
+    );
+
+    // 当前章有未保存内容时，覆盖章必须按编辑区现算，不能读缓存
+    await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+    await exec("window.__cwTest.switchTo(2, 'discard')");
+    const unsavedPreviewText = '未保存的预览字数测试。';
+    await exec(`window.__cwTest.setText(${JSON.stringify(unsavedPreviewText)})`);
+    await openExportDialogFromMenu();
+    const overrideChars = chaptersLib.countChars(unsavedPreviewText);
+    const overrideTotal = beforeCache[0] + 777 + overrideChars + beforeCache[3];
+    const overrideSummary = await waitForSummary(`${overrideTotal} 字`);
+    check(
+      '范围导出：当前章未保存时预览按编辑区现算（覆盖章不读缓存）',
+      overrideSummary.includes(`将导出 4 章 · ${overrideTotal} 字`) &&
+        overrideSummary.includes('含当前章未保存内容'),
+      overrideSummary
+    );
+    await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+  } finally {
+    await exec("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
+    await fs.writeFile(exportMetaPath, exportMetaBytes, 'utf8');
+  }
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  const exportMetaRestored = await storage.readBookMeta(exportBookPath);
+  check(
+    '范围导出：收尾还原字数缓存（后续断言仍从原始书目出发）',
+    JSON.stringify(exportMetaRestored.chapters) === JSON.stringify(exportMeta.chapters)
+  );
+
   // 40. 继续上次写作 + Ctrl+G 跳章（v0.5-4）
   await exec("window.__cwTest.newBook('继续写作测试书')");
   await waitFor("window.__cwTest.view() === 'editor'");

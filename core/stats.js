@@ -159,6 +159,17 @@ function totalOfEntry(entry) {
   return total;
 }
 
+// 内部用：已经 sanitize 过的统计，按天连续取近 N 天（缺的天补 0）。
+// 只做 entry 级读取，不再对整份统计逐天调 dayTotal / sanitizeStats。
+function recentDaysFromSanitized(stats, anchor, days) {
+  const out = [];
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const key = shiftDayKey(anchor, -offset);
+    out.push({ day: key, chars: totalOfEntry(stats.days[key]) });
+  }
+  return out;
+}
+
 // 年月归一：非法 / 越界一律退回 now 所在的本地年月（渲染层传坏值也不会让日历空掉）。
 function normalizeMonth(year, month, now = new Date()) {
   const anchor = parseDayKey(localDayKey(now));
@@ -349,16 +360,12 @@ function recordDuration(rawStats, { day, seconds } = {}) {
 }
 
 // 近 N 天：从最早到今天，缺的天补 0，方便渲染层直接画柱子。
+// 整份统计只清洗一次，之后按 entry 取数（dayTotal 对外 API 保留，内部不再用）。
 function recentDays(rawStats, now = new Date(), count = DEFAULT_RECENT_DAYS) {
   const stats = sanitizeStats(rawStats);
   const days = clampRecentDays(count);
   const anchor = localDayKey(now);
-  const out = [];
-  for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const key = shiftDayKey(anchor, -offset);
-    out.push({ day: key, chars: dayTotal(stats, key) });
-  }
-  return out;
+  return recentDaysFromSanitized(stats, anchor, days);
 }
 
 // 给渲染层的最小摘要：今天多少字、目标多少、完成百分比、近 N 天（含今天）。
@@ -366,9 +373,10 @@ function recentDays(rawStats, now = new Date(), count = DEFAULT_RECENT_DAYS) {
 function summary(rawStats, { now = new Date(), goal = DEFAULT_GOAL, days = DEFAULT_RECENT_DAYS } = {}) {
   const stats = sanitizeStats(rawStats);
   const anchor = localDayKey(now);
-  const recent = recentDays(stats, anchor, days);
-  const todayChars = dayTotal(stats, anchor);
-  const todaySeconds = daySeconds(stats, anchor);
+  const recent = recentDaysFromSanitized(stats, anchor, clampRecentDays(days));
+  const todayEntry = stats.days[anchor];
+  const todayChars = totalOfEntry(todayEntry);
+  const todaySeconds = secondsOfEntry(todayEntry);
   const recentSeconds = recent.reduce((sum, item) => sum + secondsOfEntry(stats.days[item.day]), 0);
   const dailyGoal = normalizeGoal(goal);
   const goalPercent = dailyGoal > 0 ? Math.min(100, Math.floor((todayChars / dailyGoal) * 100)) : 0;

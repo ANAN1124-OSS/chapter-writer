@@ -376,16 +376,11 @@ async function buildBookEntry(bookPath, folder, old, options, onProgress) {
       continue;
     }
     const previous = oldChapters.get(chapter.file);
-    if (
-      !previous ||
-      previous.mtimeMs !== stat.mtimeMs ||
-      previous.size !== stat.size ||
-      previous.index !== i
-    ) {
-      if (!previous || previous.mtimeMs !== stat.mtimeMs || previous.size !== stat.size) {
-        textChanged = true;
-      }
-    }    chapters.push({
+    // 只有「新章 / 正文指纹变了」才需要重算位图；章节序号 / 章名变化由下面的元数据更新覆盖。
+    if (!previous || previous.mtimeMs !== stat.mtimeMs || previous.size !== stat.size) {
+      textChanged = true;
+    }
+    chapters.push({
       id: typeof chapter.id === 'string' ? chapter.id : '',
       name: typeof chapter.name === 'string' ? chapter.name : '',
       file: chapter.file,

@@ -290,6 +290,65 @@ test('正文索引：改章名只更新元数据（不重读正文、不重建�
   assert.equal(bloomAfter, bloomBefore, '正文没变时位图不应该重建');
 });
 
+test('正文索引：重建判定只看正文指纹（序号 / 章名变化不重建，mtime / size 变化才重建）', async () => {
+  const base = await mkTmp();
+  const booksRoot = path.join(base, 'books');
+  await fs.mkdir(booksRoot);
+  const { bookPath } = await makeBook(booksRoot, '测试书', '测试书', [
+    { name: '甲', text: '青柠色的雨伞。' },
+    { name: '乙', text: '旧车站的钟。' }
+  ]);
+  const first = await search.buildBookEntry(bookPath, '测试书', null, {});
+  assert.equal(first.rebuilt, true);
+  assert.equal((await search.buildBookEntry(bookPath, '测试书', first.entry, {})).rebuilt, false);
+
+  // 只交换章节顺序（txt / 指纹都不变）：序号 previous.index 参与不了判定，位图原样复用；
+  // chapters.index 跟着新顺序更新（这正是审计 F8 清掉的死条件，行为保持不变）。
+  const meta = await readMeta(bookPath);
+  meta.chapters = [meta.chapters[1], meta.chapters[0]];
+  await writeMeta(bookPath, meta);
+  const reordered = await search.buildBookEntry(bookPath, '测试书', first.entry, {});
+  assert.equal(reordered.rebuilt, false, '只改顺序不重建位图');
+  assert.deepEqual(
+    reordered.entry.chapters.map((chapter) => chapter.index),
+    [0, 1]
+  );
+  assert.deepEqual(
+    reordered.entry.chapters.map((chapter) => chapter.file),
+    [meta.chapters[0].file, meta.chapters[1].file]
+  );
+  assert.equal(reordered.entry.bloom, first.entry.bloom);
+
+  // 只改章名：仍复用位图，只更新元数据
+  meta.chapters[0].name = '新名字';
+  await writeMeta(bookPath, meta);
+  const renamed = await search.buildBookEntry(bookPath, '测试书', reordered.entry, {});
+  assert.equal(renamed.rebuilt, false);
+  assert.equal(renamed.entry.chapters[0].name, '新名字');
+
+  // mtime 变了、size 没变：必须重算位图（整数秒，避免文件系统时间精度抖动）
+  const target = path.join(bookPath, meta.chapters[0].file);
+  const later = new Date(Math.floor((Date.now() + 5000) / 1000) * 1000);
+  await fs.utimes(target, later, later);
+  const touched = await search.buildBookEntry(bookPath, '测试书', renamed.entry, {});
+  assert.equal(touched.rebuilt, true, 'mtime 变化必须重建');
+
+  // size 变了、mtime 调回同一时刻：也必须重算位图
+  await fs.writeFile(target, '青柠色的雨伞。多写一句。', 'utf8');
+  await fs.utimes(target, later, later);
+  const grown = await search.buildBookEntry(bookPath, '测试书', touched.entry, {});
+  assert.equal(grown.rebuilt, true, 'size 变化必须重建');
+
+  // old 里没有的新章：同样算正文变化
+  const added = await search.buildBookEntry(
+    bookPath,
+    '测试书',
+    { ...grown.entry, chapters: grown.entry.chapters.slice(1) },
+    {}
+  );
+  assert.equal(added.rebuilt, true, '出现 old 里没有的章必须重建');
+});
+
 test('正文索引：外部改 txt（mtime / size 变了）会被发现并更新索引', async () => {
   const base = await mkTmp();
   const userData = path.join(base, 'userdata');
