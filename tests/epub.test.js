@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const epub = require('../core/epub');
+const { entryNameProblem } = require('../core/zip');
 const { readZip, crc32: checkCrc32, assertWellFormedXml } = require('../scripts/export-check');
 
 const FIXED = '2026-10-31T12:00:00Z';
@@ -423,4 +424,45 @@ test('自检工具能发现没转义的 & 和没闭合的标签', () => {
   assert.throws(() => assertWellFormedXml('<p><b>x</p></b>', 't'), /不匹配/);
   assert.throws(() => assertWellFormedXml('<p>x', 't'), /没有闭合/);
   assert.doesNotThrow(() => assertWellFormedXml('<p>a &amp; b <br/></p>', 't'));
+});
+
+// v0.9 C-3（安全审计 C6）：书可能来自别处（导入的文件夹里 书目.json 是别人的），
+// 书名 / 卷名 / 章名可以是 `../`、反斜杠、盘符、控制字符。它们只该进正文，
+// 一个字节都不该进 zip 条目名（否则解压时会写到包外面）。
+test('敌意书名 / 卷名 / 章名只进正文，进不了 zip 条目名（zip-slip 回归）', () => {
+  const meta = {
+    title: '../../逃逸:书名<>',
+    id: 'b_evil',
+    titleTemplate: '第{num}章：{name}',
+    volumes: [{ id: 'v1', name: '..\\..\\邪卷' }],
+    chapters: [
+      { id: 'c1', file: '001.txt', name: '..\\..\\邪章' },
+      { id: 'c2', file: '002.txt', name: '../../卷内章', volumeId: 'v1' }
+    ]
+  };
+  const { buffer } = epub.buildEpub({ meta, texts: ['正文一', '正文二'], modified: FIXED });
+  const zip = readZip(buffer);
+  for (const name of zip.names) {
+    assert.equal(entryNameProblem(name), '', `条目名不合法：${name}`);
+    assert.ok(!name.includes('..') && !name.includes('\\') && !name.includes(':'), `条目名里混进路径片段：${name}`);
+    assert.ok(!name.includes('逃逸') && !name.includes('邪'), `作者输入混进条目名：${name}`);
+  }
+  // 条目名形状固定：只有这一点点部位
+  assert.ok(
+    zip.names.every((name) => /^(mimetype|META-INF\/container\.xml|OEBPS\/(content\.opf|nav\.xhtml|toc\.ncx|style\.css|cover\.xhtml|text\/(volume|chapter)-\d{4}\.xhtml))$/.test(name)),
+    zip.names.join(', ')
+  );
+  const byName = new Map(zip.entries.map((entry) => [entry.name, entry]));
+  const text = (name) => byName.get(name).data.toString('utf8');
+  // 敌意内容照旧原样出现在正文里（只做 XML 转义，不改字）
+  assert.ok(text('OEBPS/cover.xhtml').includes('<h1 class="cover-title">../../逃逸:书名&lt;&gt;</h1>'));
+  assert.ok(text('OEBPS/text/volume-0001.xhtml').includes('..\\..\\邪卷'));
+  assert.ok(text('OEBPS/text/chapter-0001.xhtml').includes('第1章：..\\..\\邪章'));
+  // 默认文件名：路径分隔符 / 非法字符在 safeName 就清掉了，另存为对话框只在当前目录落文件
+  assert.equal(epub.epubFileName(meta), '逃逸书名.epub');
+  assert.equal(epub.epubFileName(meta, { mode: 'volume', volumeId: 'v1' }), '逃逸书名-邪卷.epub');
+  for (const name of [epub.epubFileName(meta), epub.epubFileName(meta, { mode: 'volume', volumeId: 'v1' })]) {
+    assert.ok(!/[\\/:*?"<>|]/.test(name), `默认文件名里还有非法字符：${name}`);
+    assert.ok(!name.startsWith('.'), `默认文件名不该以点开头：${name}`);
+  }
 });

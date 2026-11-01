@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const docx = require('../core/docx');
+const { entryNameProblem } = require('../core/zip');
 const { readZip, assertWellFormedXml } = require('../scripts/export-check');
 
 const FIXED = '2026-11-01T08:00:00Z';
@@ -258,4 +259,29 @@ test('DOCX 未分卷 / 空正文 / 原文标题章名：只写该章标题，缺
   assert.ok(document.includes('>未分卷 · 共 2 章</w:t>'));
   assert.ok(!document.includes('>未分卷</w:t>'), '未分卷不生成卷标题');
   assert.equal((document.match(/<w:pStyle w:val="BodyText"\/>/g) || []).length, 1);
+});
+
+// v0.9 C-3（安全审计 C6）：书名 / 章名可以是 `../`、反斜杠、盘符（书可能来自别处），
+// 它们只该进 document.xml 的正文，zip 条目名必须是固定的七个部位。
+test('敌意书名 / 章名只进 document.xml，进不了条目名（zip-slip 回归）', () => {
+  const meta = {
+    title: '../../逃逸:书名<>',
+    id: 'b_evil',
+    chapters: [{ id: 'c1', file: '001.txt', name: '..\\..\\邪章' }]
+  };
+  const { buffer } = docx.buildDocx({ meta, texts: ['正文一'], modified: FIXED, zipDate: ZIP_DATE });
+  const zip = readZip(buffer);
+  assert.deepEqual(zip.names, REQUIRED_PARTS);
+  for (const name of zip.names) {
+    assert.equal(entryNameProblem(name), '', `条目名不合法：${name}`);
+    assert.ok(!name.includes('逃逸') && !name.includes('邪'), `作者输入混进条目名：${name}`);
+  }
+  const document = zip.entries.find((entry) => entry.name === 'word/document.xml').data.toString('utf8');
+  assert.ok(document.includes('../../逃逸:书名&lt;&gt;'), document.slice(0, 600));
+  assert.ok(document.includes('第1章：..\\..\\邪章'));
+  assertWellFormedXml(document, 'document.xml');
+  // 默认文件名：路径分隔符 / 非法字符在 safeName 就清掉了
+  assert.equal(docx.docxFileName(meta), '逃逸书名.docx');
+  assert.ok(!/[\\/:*?"<>|]/.test(docx.docxFileName(meta)));
+  assert.ok(!docx.docxFileName(meta).startsWith('.'));
 });

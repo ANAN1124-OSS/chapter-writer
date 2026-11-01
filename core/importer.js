@@ -135,13 +135,71 @@ async function importBookFolder(booksRoot, sourceDir, analysis) {
   }
 }
 
+// 导入边界（v0.9 C-3，安全审计 C6）：单本 txt 是「整个读进内存 → 解码 → 切章」，
+// 所以先按文件大小设一道闸门：1000 万字中文小说约 30 MB，128 MB 有三倍以上余量；
+// 再大的文件大概率不是小说，读进来会把主进程内存打爆（渲染层只发个 IPC，崩的是主进程）。
+const MAX_IMPORT_BYTES = 128 * 1024 * 1024;
+const SIZE_UNITS = ['B', 'KB', 'MB', 'GB'];
+
+// 给人看的体量（只用于提示，保留 1 位小数直到 10 以上）
+function formatImportSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '0 B';
+  let value = n;
+  let unit = 0;
+  while (value >= 1024 && unit < SIZE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  if (unit === 0) return `${Math.round(value)} B`;
+  const shown = value < 10 ? value.toFixed(1) : String(Math.round(value));
+  return `${shown} ${SIZE_UNITS[unit]}`;
+}
+
+// 大小闸门（纯逻辑）：超限回 { code, message }，没超回 null。
+// 提示里只有文件名（不含目录），也不把整条本机路径带给界面 / 日志。
+function importSizeProblem(bytes, baseName) {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size < 0) return null; // stat 拿不到（符号链接断开等）交给读盘报错
+  if (size <= MAX_IMPORT_BYTES) return null;
+  return {
+    code: 'FILE_TOO_LARGE',
+    message: `《${baseName}》有 ${formatImportSize(size)}，超过单本导入上限 ${formatImportSize(
+      MAX_IMPORT_BYTES
+    )}，已跳过`
+  };
+}
+
+function hasUtf16Bom(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 2) return false;
+  return (buffer[0] === 0xff && buffer[1] === 0xfe) || (buffer[0] === 0xfe && buffer[1] === 0xff);
+}
+
+// 编码闸门（纯逻辑）：纯文本里不该有 NUL 字节。带 BOM 的 UTF-16 本来就一半是 0，放过；
+// 其它含 0x00 的一律当二进制 / 坏编码，不去解码，免得导进来一本乱码书。
+function isProbablyBinary(buffer) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return false;
+  if (hasUtf16Bom(buffer)) return false;
+  return buffer.includes(0);
+}
+
 // 一个完整小说 txt → 一本书。
 // mode='chapters'（默认）：按原文标题行切章，章名照抄原文标题，正文原样保留（只切分、不改字）。
 // mode='raw'：整本作为一章「全文」；UTF-8 源文件按字节原样复制。
 // mode='split'：旧版自动分章（会重排编号），保留兼容。
 async function importNovelFile(booksRoot, filePath, { mode = 'chapters' } = {}) {
-  const buffer = await fs.readFile(filePath);
   const baseName = path.basename(filePath, path.extname(filePath)).trim() || '未命名小说';
+  // 先看大小，再读内容：超大文件连 Buffer 都不分配
+  const stat = await fs.stat(filePath).catch(() => null);
+  const sizeProblem = stat ? importSizeProblem(stat.size, baseName) : null;
+  if (sizeProblem) throw new storage.StorageError(sizeProblem.code, sizeProblem.message);
+  const buffer = await fs.readFile(filePath);
+  if (isProbablyBinary(buffer)) {
+    throw new storage.StorageError(
+      'NOT_TEXT',
+      `《${baseName}》看起来不是纯文本文件（含 0 字节），已跳过`
+    );
+  }
   const decoded = decodeBuffer(buffer);
   if (!normalizeText(decoded).trim()) {
     throw new storage.StorageError('EMPTY_FILE', `《${baseName}》是空文件，跳过`);
@@ -351,5 +409,10 @@ module.exports = {
   importNovelFile,
   analyzeSource,
   looksLikeChapterFile,
-  isInside
+  isInside,
+  MAX_IMPORT_BYTES,
+  formatImportSize,
+  importSizeProblem,
+  isProbablyBinary,
+  hasUtf16Bom
 };
