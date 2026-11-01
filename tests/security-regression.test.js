@@ -15,11 +15,13 @@
 //   跨窗口写锁（同一本书只开一个窗口）   tests/open-books.test.js               第 55 组
 //   外部篡改（外部改 / 删 txt / 冲突副本）tests/conflict.test.js + storage      第 55 / 64 组
 //   Electron 安全开关 / 权限一律拒绝     tests/security-policy.test.js          第 56 组
-//   CSP（指令集 / 内联脚本 / eval）      **本文件**                             第 56 组（运行时复核）
+//   CSP（指令集 / 内联 / eval / base） **本文件**                             第 56 组（运行时复核）
 //   preload 暴露面（不泄漏 Node / IPC）   **本文件**                             第 56 组（window.api 实测）
 //   主进程加固接线（新窗口 / 新 session） **本文件**                             第 56 组（行为实测）
 //
-// 这一轮**只补测试**：产品代码 / IPC / 数据格式 / 界面一行没改；版本号仍 0.8.6。
+// C-10 那一轮只补测试；v0.9 C-4 收尾把 CSP 再收紧到 object-src / base-uri / frame-src
+// 一律 'none'（产品只改了 index.html 那一行 meta），本文件同步锁死并补「页面不用这些元素」
+// 的闸门；版本号仍 0.8.6。
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -94,7 +96,7 @@ function mainChannels() {
 
 // ---------- CSP（C4） ----------
 
-test('CSP：index.html 的指令集锁死（只许 self，connect-src 只为字体多一个 data:）', () => {
+test('CSP：index.html 的指令集锁死（只许 self，connect-src 只为字体多一个 data:，其余一律 none）', () => {
   const meta = INDEX.match(/<meta http-equiv="Content-Security-Policy"\s+content="([^"]+)"/i);
   assert.ok(meta, 'index.html 必须带 Content-Security-Policy meta');
 
@@ -110,10 +112,24 @@ test('CSP：index.html 的指令集锁死（只许 self，connect-src 只为字�
     'script-src': ["'self'"],
     'style-src': ["'self'"],
     'img-src': ["'self'", 'data:'],
-    'connect-src': ["'self'", 'data:']
+    'connect-src': ["'self'", 'data:'],
+    // v0.9 C-4 收尾：default-src 的 'self' 会兜住 object-src / frame-src（同源仍可嵌），
+    // 而 base-uri 根本没有 fallback（不写就完全不限）。页面本来就不用这三样，收紧到 none。
+    'object-src': ["'none'"],
+    'base-uri': ["'none'"],
+    'frame-src': ["'none'"]
   });
   // 任何放宽都必须先改这里再改 meta：unsafe-* / 远程来源 / 通配符一律不许出现。
   assert.doesNotMatch(meta[1], /unsafe-|http:|https:|ws:|wss:|\*/i);
+});
+
+test('CSP：页面不用 base / iframe / object / embed（三条 none 指令不会误伤自己）', () => {
+  // 收紧到 'none' 的前提是页面真的不用这些元素；以后谁加了 <iframe> / <base>，这条会先红，
+  // 逼他回来重新想 CSP，而不是让新元素在运行时被默默拦掉。
+  for (const tag of ['base', 'iframe', 'object', 'embed']) {
+    const found = INDEX.match(new RegExp(`<${tag}\\b`, 'gi')) || [];
+    assert.deepEqual(found, [], `index.html 里出现了 <${tag}>，请先复核 CSP 的 ${tag === 'base' ? 'base-uri' : tag === 'iframe' ? 'frame-src' : 'object-src'} 'none'`);
+  }
 });
 
 test('CSP：index.html 没有内联脚本 / 内联事件处理器 / 远程资源', () => {

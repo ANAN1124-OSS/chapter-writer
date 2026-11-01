@@ -10609,7 +10609,8 @@ module.exports = async function runScenario(ctx) {
   //     在真实 Electron 里复核窗口 webPreferences（sandbox / contextIsolation / nodeIntegration / webSecurity…）、
   //     渲染层确实拿不到 Node、window.open / 外部导航 / <webview> 都被拦、浏览器权限一律拒绝
   //     （含「被拒请求的日志字段不含本机路径」）、单实例锁生效（再启动一个进程不多开窗口）、
-  //     页面 CSP 真的在拦（内联脚本不执行 + eval 被拒，v0.9 C-10 补）。
+  //     页面 CSP 真的在拦（内联脚本不执行 + eval 被拒，v0.9 C-10 补；object-src / base-uri /
+  //     frame-src 收紧到 none 且动态 <base> 改不了文档基地址，v0.9 C-4 收尾）。
   //     期望值只有一处来源：core/security-policy.js（单测断言同一份常量）。
   //     放在多窗口组之前：那一组最后会关掉最后一个窗口让应用退出。
   const securityPolicy = require('../core/security-policy');
@@ -10710,7 +10711,15 @@ module.exports = async function runScenario(ctx) {
         script.remove();
         let evalError = null;
         try { new Function('return 1')(); } catch (err) { evalError = err && err.name; }
-        return JSON.stringify({ meta: meta ? meta.getAttribute('content') : null, inlineRan: window.__cwCspInlineRan === true, violation, evalError });
+        // base-uri 'none'（v0.9 C-4 收尾）：动态插一个 <base> 改不了文档基地址——同步读、插完立刻摘掉，无副作用。
+        const baseBefore = document.baseURI;
+        const baseTag = document.createElement('base');
+        baseTag.href = 'https://example.invalid/csp-probe/';
+        document.head.appendChild(baseTag);
+        const baseAfter = document.baseURI;
+        baseTag.remove();
+        const baseRestored = document.baseURI === baseBefore;
+        return JSON.stringify({ meta: meta ? meta.getAttribute('content') : null, inlineRan: window.__cwCspInlineRan === true, violation, evalError, baseBefore, baseAfter, baseRestored });
       })()`
     )
   );
@@ -10734,6 +10743,19 @@ module.exports = async function runScenario(ctx) {
     '安全开关：CSP 拦下 eval / new Function（script-src 没有 unsafe-eval）',
     cspProbe.evalError === 'EvalError',
     cspProbe.evalError
+  );
+  check(
+    "安全开关：CSP 再收紧（object-src / base-uri / frame-src 一律 'none'）",
+    typeof cspProbe.meta === 'string' &&
+      cspProbe.meta.includes("object-src 'none'") &&
+      cspProbe.meta.includes("base-uri 'none'") &&
+      cspProbe.meta.includes("frame-src 'none'"),
+    cspProbe.meta
+  );
+  check(
+    '安全开关：base-uri 真的生效（动态插入 <base> 改不了文档基地址）',
+    cspProbe.baseRestored === true && cspProbe.baseAfter === cspProbe.baseBefore,
+    { before: cspProbe.baseBefore, after: cspProbe.baseAfter, restored: cspProbe.baseRestored }
   );
   const secProbe = ctx.securityProbe();
   check(
