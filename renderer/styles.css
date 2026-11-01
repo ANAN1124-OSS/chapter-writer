@@ -26,6 +26,10 @@
   --caret-para-tint: rgba(138, 90, 59, .055);
   --caret-para-edge: rgba(138, 90, 59, .34);
   --editor-caret: #6d3f24;
+  /* 查找高亮（v0.8-11，提案 N11）：命中底色 / 当前命中底色；5 套浅色纸共用琥珀色，夜间单独调亮 */
+  --find-hit-tint: rgba(214, 158, 40, .24);
+  --find-hit-current-tint: rgba(222, 138, 30, .46);
+  --find-hit-current-edge: rgba(150, 82, 16, .90);
 }
 
 /* 背景主题：只换纸色/纹理（书架、章节栏、正文一起变），正文墨色默认不动 */
@@ -89,6 +93,10 @@ body.theme-night {
   --caret-para-tint: rgba(255, 244, 226, .055);
   --caret-para-edge: rgba(220, 178, 128, .38);
   --editor-caret: #e6bb87;
+  /* 夜间：查找高亮提亮、降低饱和，暗底上不刺眼 */
+  --find-hit-tint: rgba(236, 182, 92, .20);
+  --find-hit-current-tint: rgba(240, 172, 80, .40);
+  --find-hit-current-edge: rgba(255, 208, 128, .85);
 }
 
 * { box-sizing: border-box; }
@@ -797,6 +805,21 @@ body.theme-night .editor-marks .mark-fw > i { color: #e2b75c; }
 body.theme-night .editor-marks .mark-trail { background: rgba(208, 106, 106, .22); }
 body.theme-night .editor-marks .mark-trail > i { color: #e08a84; }
 
+/* 查找结果高亮层（v0.8-11，提案 N11）：和标记层同一套影子层定位（renderer 里同步字体 / 宽高 / 滚动）。
+ * 当前章所有命中画淡琥珀底，正在看的那一处画更重的底色 + 底部细线；只读、不参与编辑与选择。 */
+.find-marks { z-index: 2; }
+.find-marks .find-hit {
+  padding: 7px 0;
+  border-radius: 2px;
+  background: var(--find-hit-tint);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.find-marks .find-hit.find-hit-current {
+  background: var(--find-hit-current-tint);
+  box-shadow: inset 0 -2px 0 var(--find-hit-current-edge);
+}
+
 /* 超长段落左侧黄线：位置由 renderer 按编辑区实测行框算，滚动时跟着走 */
 .editor-marks-gutter {
   position: absolute;
@@ -961,6 +984,21 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
   white-space: nowrap;
 }
 .status-long:hover { background: rgba(226, 186, 74, .32); }
+/* 查找高亮小标签（v0.8-11，提案 N11）：有查找会话时出现，点一下跳到下一处，Esc 清除高亮 */
+.status-find {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.status-find:hover { background: var(--paper-deep); }
 #char-count.count-short { color: var(--warn); }
 .kbd {
   padding: 1px 6px;
@@ -1664,6 +1702,29 @@ body.theme-night .long-para-bar { background: rgba(210, 162, 76, .85); }
 .find-row .text-input { flex: 1 1 auto; min-width: 0; }
 .find-row .field.inline { margin-top: 0; }
 .check-row.inline { margin-top: 0; white-space: nowrap; }
+/* 当前章逐处定位（v0.8-11，提案 N11）：两个按钮 + 第 X / 共 N 处 + 快捷键提示 */
+.find-nav-row {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+.find-nav-label { font-size: 12.5px; color: var(--ink-soft); }
+.find-nav-row .btn { flex: 0 0 auto; }
+.find-nav-count {
+  min-width: 64px;
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.find-nav-hint { font-size: 11.5px; }
 .find-summary {
   min-height: 18px;
   margin-top: 12px;

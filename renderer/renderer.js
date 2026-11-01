@@ -12,6 +12,9 @@
   // 在 editor-logic.js 里、Node 单测覆盖；这里只负责显示和事件。
   const editorLogic = window.CWEditorLogic;
   const LONG_PARAGRAPH_THRESHOLD = editorLogic.LONG_PARAGRAPH_DEFAULT;
+  // 查找增强（v0.8-11，提案 N11）的纯逻辑：上一处 / 下一处、高亮窗口、正文切片段、行号。
+  // 在 find-logic.js 里、Node 单测覆盖；这里只负责选中、滚动和影子层显示。
+  const findLogic = window.CWFindLogic;
   // 专注模式的纯逻辑（打字机滚动的换算），在 focus-logic.js 里、Node 单测覆盖
   const focusLogic = window.CWFocusLogic;
   // 阅读模式的纯逻辑（字号 / 行距档位、进度、当前章、接近底部、上一章 / 下一章），
@@ -190,6 +193,20 @@
     jumpToken: 0, // 丢弃过期的异步匹配结果
     jumpTimer: null, // 输入防抖
     formatBookRunning: false, // 「一键整理本书」进行中（防重复触发）
+    // 查找会话（v0.8-11，提案 N11）：当前章的「上一处 / 下一处 + 结果持续高亮」。
+    // 只记在内存里：不写配置、不写书库；改正文 / 切章 / 换书 / 离开写作页就结束。
+    find: {
+      query: '', // 这次查找的词（原始输入，不去空白；和主进程口径一致）
+      caseSensitive: false, // 区分大小写
+      matches: [], // 当前章全部命中：[{ index, length }]（来自 text:find-all）
+      index: -1, // 当前第几处（0 基；-1 = 没有）
+      total: 0, // 命中总数
+      windowKey: '', // 已渲染的高亮窗口标识（相同就只切换当前命中，不重画整层）
+      highlighted: 0, // 当前画进影子层的命中数（给测试 / 提示用）
+      windowStart: 0, // 影子层画的是全部命中里的哪一段（0 基）
+      windowEnd: 0,
+      truncated: false // 命中太多、只画了一屏窗口
+    },
     proofread: null, // 校对结果：{ scope, issues, chapters, total, byRule, truncated, wordList, ... }
     proofreadScope: 'current', // 校对范围：current = 当前章；book = 整本
     proofreadBusy: false, // 校对进行中（防重复触发）
@@ -390,8 +407,13 @@
       void resetWriteTimer({ flush: true });
     }
     // 标记层只在写作页显示；切回书架 / 阅读页就收起（开关状态保留，回来还在）
-    if (view === 'editor') scheduleMarksRender(0);
-    else hideEditorMarks();
+    // 查找高亮是「当前章」的：离开写作页就结束会话（回来不会对着旧位置亮着）
+    if (view === 'editor') {
+      scheduleMarksRender(0);
+    } else {
+      hideEditorMarks();
+      if (state.find.total) clearFindSession();
+    }
     renderSelectionStats();
     updateFocusBar();
   }
@@ -1801,6 +1823,8 @@
     state.marks.timer = setTimeout(() => {
       state.marks.timer = null;
       renderEditorMarks();
+      // 查找高亮层和标记层共用同一套对齐 / 重画时机（字体、页宽、窗口大小变了也跟着对齐）
+      if (state.find.total) renderFindHighlights();
     }, Math.max(0, Number(delay) || 0));
   }
 
@@ -1821,9 +1845,9 @@
     renderLongParaChip();
   }
 
-  // 把影子层改成和编辑区正文框完全一样的位置、大小、字体度量；返回实测值（测试钩子也用）
-  function syncMarksLayout() {
-    const overlay = $('editor-marks');
+  // 把影子层改成和编辑区正文框完全一样的位置、大小、字体度量；返回实测值（测试钩子也用）。
+  // 标记层（#editor-marks）和查找高亮层（#editor-find-marks）共用这一份对齐逻辑。
+  function syncEditorOverlay(overlay) {
     if (!overlay || overlay.classList.contains('hidden')) return null;
     const styles = getComputedStyle(editorEl);
     const px = (value) => {
@@ -1852,6 +1876,10 @@
     overlay.scrollTop = editorEl.scrollTop;
     overlay.scrollLeft = editorEl.scrollLeft;
     return { width, height, padding };
+  }
+
+  function syncMarksLayout() {
+    return syncEditorOverlay($('editor-marks'));
   }
 
   function syncMarksScroll() {
@@ -2117,7 +2145,14 @@
   }
 
   function setupEditorMarks() {
-    editorEl.addEventListener('scroll', syncMarksScroll, { passive: true });
+    editorEl.addEventListener(
+      'scroll',
+      () => {
+        syncMarksScroll();
+        syncFindOverlayScroll();
+      },
+      { passive: true }
+    );
     editorEl.addEventListener('compositionstart', () => {
       state.marks.composing = true;
     });
@@ -2130,6 +2165,7 @@
         renderSelectionStats();
         updateCaretParagraph();
         syncMarksScroll();
+        syncFindOverlayScroll();
         // 键盘 / 鼠标移动光标后，打字机模式跟着把光标行放回 1/3 处
         if (focusActive() && state.focus.typewriter) scheduleTypewriterAlign(20);
       });
@@ -2144,6 +2180,215 @@
     }
     $('status-long-para').addEventListener('click', () => jumpToNextLongParagraph());
     renderMarksMenu();
+  }
+
+  // ---------- 查找会话（v0.8-11，提案 N11）----------
+  // 当前章的「上一处 / 下一处」+「结果持续高亮」：
+  //   - 全部命中画在 #editor-find-marks 影子层上（和标记层同一套对齐逻辑），当前那处颜色更重；
+  //   - 上一处 / 下一处只移动光标 / 选区 + 换 class，不重画正文，也不碰编辑区内容；
+  //   - 会话只记在内存里：改正文、切章、换书、离开写作页就结束；不写配置、不写书库。
+  //   - 命中太多时只画当前附近一屏（find-logic.highlightWindow），导航仍对全部命中有效。
+  function findOverlayEl() {
+    return $('editor-find-marks');
+  }
+
+  function findPanelOpen() {
+    const backdrop = $('find-backdrop');
+    return Boolean(backdrop && !backdrop.classList.contains('hidden'));
+  }
+
+  function findSessionActive() {
+    return Boolean(state.find.total > 0 && state.find.matches.length && state.view === 'editor');
+  }
+
+  // 会话是否就是查找框里现在这组条件（词 + 大小写）：是的话回车 / 下一处直接走，不重新查。
+  function findSessionMatchesOptions(options) {
+    return (
+      state.find.total > 0 &&
+      state.find.query === String(options.query == null ? '' : options.query) &&
+      state.find.caseSensitive === Boolean(options.caseSensitive)
+    );
+  }
+
+  function hideFindHighlights() {
+    const overlay = findOverlayEl();
+    if (!overlay) return;
+    overlay.classList.add('hidden');
+    overlay.textContent = '';
+    state.find.windowKey = '';
+    state.find.highlighted = 0;
+  }
+
+  function clearFindSession({ toastHint = false } = {}) {
+    hideFindHighlights();
+    state.find.query = '';
+    state.find.caseSensitive = false;
+    state.find.matches = [];
+    state.find.index = -1;
+    state.find.total = 0;
+    state.find.windowStart = 0;
+    state.find.windowEnd = 0;
+    state.find.truncated = false;
+    updateFindNavUi();
+    if (toastHint) toast('已结束查找高亮（正文没改，也没写盘）');
+  }
+
+  function findNavCountText() {
+    return findLogic.formatCounter(state.find.index, state.find.total);
+  }
+
+  function updateFindNavUi() {
+    const count = $('find-nav-count');
+    if (count) count.textContent = findNavCountText();
+    renderFindStatusChip();
+  }
+
+  // 状态栏小标签：有查找会话时显示「查找 3/12」，点一下下一处；Esc 清除。
+  function renderFindStatusChip() {
+    const chip = $('status-find');
+    if (!chip) return;
+    const active = Boolean(state.find.total > 0);
+    chip.classList.toggle('hidden', !active);
+    if (!active) {
+      chip.textContent = '查找';
+      chip.title = '';
+      return;
+    }
+    chip.textContent = `查找 ${findLogic.formatCounter(state.find.index, state.find.total)}`;
+    chip.title =
+      `查找「${state.find.query}」：第 ${state.find.index + 1}/${state.find.total} 处` +
+      `${state.find.truncated ? `（命中太多，正文里只高亮当前附近 ${state.find.highlighted} 处）` : ''}\n` +
+      '单击 = 下一处；F3 / Shift+F3 = 下一处 / 上一处；Esc = 清除高亮。只显示，不改正文、不写盘。';
+  }
+
+  function syncFindOverlayScroll() {
+    const overlay = findOverlayEl();
+    if (!overlay || overlay.classList.contains('hidden')) return;
+    overlay.scrollTop = editorEl.scrollTop;
+    overlay.scrollLeft = editorEl.scrollLeft;
+  }
+
+  // 把当前命中标成「正在看的那一处」：只切 class，不重画整层（和当前段落高亮同一个做法）。
+  function markFindCurrentHit() {
+    const overlay = findOverlayEl();
+    if (!overlay) return;
+    const previous = overlay.querySelector('.find-hit-current');
+    if (previous) previous.classList.remove('find-hit-current');
+    if (state.find.index < 0) return;
+    const next = overlay.querySelector(`.find-hit[data-ordinal="${state.find.index}"]`);
+    if (next) next.classList.add('find-hit-current');
+  }
+
+  // 画当前章全部命中（超过一屏时只画当前附近的窗口）。
+  // 正文 / 窗口没变就只更新「当前这处」的 class，移动光标不会重画整层。
+  function renderFindHighlights({ force = false } = {}) {
+    const overlay = findOverlayEl();
+    if (!overlay) return;
+    if (!findSessionActive() || !state.bookPath || state.index < 0) {
+      hideFindHighlights();
+      renderFindStatusChip();
+      return;
+    }
+    const win = findLogic.highlightWindow(state.find.matches, state.find.index, {
+      max: findLogic.MAX_HIGHLIGHT_ITEMS
+    });
+    state.find.windowStart = win.windowStart;
+    state.find.windowEnd = win.windowEnd;
+    state.find.truncated = win.truncated;
+    state.find.highlighted = win.items.length;
+    const key = [
+      editorEl.value.length,
+      state.find.query,
+      state.find.caseSensitive ? 1 : 0,
+      win.windowStart,
+      win.windowEnd
+    ].join('|');
+    if (!force && key === state.find.windowKey) {
+      syncEditorOverlay(overlay);
+      markFindCurrentHit();
+      renderFindStatusChip();
+      return;
+    }
+    state.find.windowKey = key;
+    overlay.classList.remove('hidden');
+    syncEditorOverlay(overlay);
+    overlay.textContent = '';
+    const runs = findLogic.highlightRuns(editorEl.value, win.items);
+    const fragment = document.createDocumentFragment();
+    for (const run of runs) {
+      if (!run.hit) {
+        fragment.appendChild(document.createTextNode(run.text));
+        continue;
+      }
+      const span = document.createElement('span');
+      span.className = 'find-hit';
+      span.dataset.ordinal = String(run.ordinal);
+      span.textContent = run.text;
+      fragment.appendChild(span);
+    }
+    overlay.appendChild(fragment);
+    syncFindOverlayScroll();
+    markFindCurrentHit();
+    renderFindStatusChip();
+  }
+
+  // 把光标 / 选区放到第 index 处命中上（只移动选区与滚动，不改正文）。
+  function selectFindMatch(index) {
+    if (!state.find.total) return null;
+    const safe = Math.min(Math.max(Math.floor(Number(index) || 0), 0), state.find.total - 1);
+    state.find.index = safe;
+    const match = state.find.matches[safe];
+    const start = Math.min(match.index, editorEl.value.length);
+    editorEl.focus();
+    editorEl.setSelectionRange(start, Math.min(start + match.length, editorEl.value.length));
+    scrollCaretIntoView(start);
+    renderFindHighlights();
+    updateFindNavUi();
+    return { index: safe, match };
+  }
+
+  // 用一组命中开始新的查找会话（查询结果来自 text:find-all，已含全部命中）。
+  function startFindSession(query, caseSensitive, matches, index = 0) {
+    const list = Array.isArray(matches)
+      ? matches
+          .filter((item) => item && Number.isFinite(Number(item.index)) && Number(item.length) > 0)
+          .map((item) => ({ index: Math.max(0, Math.floor(Number(item.index))), length: Math.floor(Number(item.length)) }))
+      : [];
+    state.find.query = String(query == null ? '' : query);
+    state.find.caseSensitive = Boolean(caseSensitive);
+    state.find.matches = list;
+    state.find.total = list.length;
+    state.find.index = list.length ? Math.min(Math.max(Math.floor(Number(index) || 0), 0), list.length - 1) : -1;
+    state.find.windowKey = '';
+    renderFindHighlights({ force: true });
+    updateFindNavUi();
+    return state.find;
+  }
+
+  // 上一处 / 下一处：没有会话（或查找框里换了条件）就先查一遍并选中第一处；否则移动到相邻命中。
+  async function stepFind(direction) {
+    const options = readFindOptions();
+    if (!options.query.trim()) {
+      $('find-summary').textContent = '先在查找框里输入内容';
+      return { ok: false };
+    }
+    if (!findSessionMatchesOptions(options)) {
+      await runFind();
+      return { ok: false, searched: true };
+    }
+    const step = findLogic.stepMatch(state.find.matches, state.find.index, direction);
+    if (!step) return { ok: false };
+    selectFindMatch(step.index);
+    const match = state.find.matches[step.index];
+    const wrapHint = step.wrapped
+      ? direction < 0
+        ? '（已到开头，回到最后一处）'
+        : '（已到末尾，回到第 1 处）'
+      : '';
+    $('find-summary').textContent =
+      `第 ${step.index + 1}/${step.total} 处 · 第 ${findLogic.lineOfIndex(editorEl.value, match.index)} 行${wrapHint}` +
+      `${state.find.truncated ? ' · 命中太多，正文里只高亮当前附近这一屏' : ''}`;
+    return { ok: true, index: step.index, total: step.total, wrapped: step.wrapped };
   }
 
   // ---------- 专注模式（提案 3.5）----------
@@ -3253,6 +3498,8 @@
 
   // ---------- 编辑区事件 ----------
   function onEditorInput() {
+    // 正文改了，查找高亮的位置就对不上了：立刻结束会话（不写盘、不提示，重新查一次即可）
+    if (state.find.total) clearFindSession();
     // 朗读读的是「打开那一刻」的正文：改了字就停，别让进度 / 跟随高亮对不上新正文
     if (state.tts.open) {
       closeTtsBar();
@@ -3286,6 +3533,8 @@
       state.saveError = null;
       editorEl.value = data.text;
       editorEl.scrollTop = 0;
+      // 换了一章：上一章的查找高亮（位置是旧正文的）直接结束
+      if (state.find.total) clearFindSession();
       // 专注模式下切了章：退出的还原点改到新章开头，不要把上一章的光标 / 滚动套过来
       if (state.focus.on) {
         state.focus.savedScrollTop = 0;
@@ -4370,6 +4619,8 @@
     state.saveError = null;
     state.baseText = '';
     editorEl.value = '';
+    // 回书架：查找会话跟着结束（高亮层只在写作页有意义）
+    if (state.find.total) clearFindSession();
     // 回到书架就切回全局显示设置
     state.config = effectiveConfig();
     applyEditorStyle();
@@ -4593,12 +4844,18 @@
     $('find-backdrop').classList.remove('hidden');
     $('find-query').focus();
     $('find-query').select();
+    // 打开面板时如果带来的词 / 大小写和上次会话对不上（例如带入了新的选中文字），先把旧高亮收起来
+    if (state.find.total && !findSessionMatchesOptions(readFindOptions())) clearFindSession();
     // 顺带看一眼这本书有没有「整本替换」的备份（有就显示「还原到替换前」入口）
     refreshReplaceBackups();
+    updateFindNavUi();
   }
 
   function closeFindPanel() {
     $('find-backdrop').classList.add('hidden');
+    // 关掉面板不结束查找会话：高亮留在正文上，F3 / Shift+F3 还能继续前后跳，Esc 才清除
+    syncFindOverlayScroll();
+    updateFindNavUi();
   }
 
   function readFindOptions() {
@@ -5140,6 +5397,25 @@
       const switched = await switchChapter(index);
       if (!switched || switched.ok === false) return;
     }
+    // 跳过来以后把这一章的命中全部高亮（v0.8-11，提案 N11）：清单是全书搜出来的，
+    // 这里按「编辑区里的最新正文」重新数一遍，未保存的修改也算。
+    const query = $('find-query').value;
+    const caseSensitive = $('find-case').checked;
+    if (query.trim()) {
+      try {
+        const res = await call(api.findAll, editorEl.value, query, { caseSensitive });
+        if (res.count) {
+          startFindSession(query, caseSensitive, res.matches, 0);
+          selectFindMatch(0);
+          toast(
+            `「${query}」在本章 ${res.count} 处，已高亮；F3 下一处 / Shift+F3 上一处，Esc 清除`
+          );
+          return;
+        }
+      } catch {
+        /* 高亮失败不影响已经跳过来的位置 */
+      }
+    }
     const match = result.matches && result.matches[0];
     if (!match) return;
     editorEl.focus();
@@ -5153,35 +5429,40 @@
     if (!options.query.trim()) {
       $('find-summary').textContent = '先在查找框里输入内容';
       $('find-results').innerHTML = '';
+      clearFindSession();
       return;
     }
     $('find-summary').textContent = '查找中…';
     try {
       if (options.scope === 'book') {
+        // 整本查找走结果清单（点一条跳过去）；当前章的高亮先收起来，免得和清单说的不是一回事
+        clearFindSession();
         const payload = await call(api.searchBook, state.bookPath, {
           query: options.query,
           caseSensitive: options.caseSensitive
         });
         $('find-summary').textContent = payload.totalMatches
-          ? `整本命中 ${payload.totalMatches} 处，分布在 ${payload.chapterCount} 章（点结果跳过去）`
+          ? `整本命中 ${payload.totalMatches} 处，分布在 ${payload.chapterCount} 章（点结果跳过去；跳过去后本章会高亮，F3 / Shift+F3 前后跳）`
           : `整本没有找到「${options.query}」`;
         renderFindResults(payload);
         return;
       }
-      const res = await call(api.findInText, editorEl.value, options.query, {
+      const res = await call(api.findAll, editorEl.value, options.query, {
         caseSensitive: options.caseSensitive
       });
       $('find-results').innerHTML = '';
       if (!res.count) {
+        clearFindSession();
         $('find-summary').textContent = `本章没有找到「${options.query}」`;
         return;
       }
-      $('find-summary').textContent = `本章命中 ${res.count} 处（已选中第 1 处）`;
-      const first = res.matches[0];
-      editorEl.focus();
-      const start = Math.min(first.index, editorEl.value.length);
-      editorEl.setSelectionRange(start, Math.min(start + first.length, editorEl.value.length));
-      scrollCaretIntoView(start);
+      startFindSession(options.query, options.caseSensitive, res.matches, 0);
+      selectFindMatch(0);
+      $('find-summary').textContent =
+        `本章命中 ${res.count} 处（第 1/${res.count} 处）` +
+        (state.find.truncated
+          ? `；命中太多，正文里只高亮当前附近 ${state.find.highlighted} 处`
+          : '');
     } catch (err) {
       $('find-summary').textContent = `查找失败：${err.message}`;
     }
@@ -7753,6 +8034,22 @@
       passive: true
     });
     $('btn-find-run').addEventListener('click', runFind);
+    $('btn-find-prev').addEventListener('click', () => void stepFind(-1));
+    $('btn-find-next').addEventListener('click', () => void stepFind(1));
+    $('status-find').addEventListener('click', () => {
+      if (findSessionActive()) void stepFind(1);
+    });
+    // 查找框里改了词 / 大小写 / 范围：旧的高亮已经对不上了，立刻收起来，按回车才重新查
+    const invalidateFindSession = () => {
+      if (state.find.total && !findSessionMatchesOptions(readFindOptions())) clearFindSession();
+      updateFindNavUi();
+    };
+    $('find-query').addEventListener('input', invalidateFindSession);
+    $('find-case').addEventListener('change', invalidateFindSession);
+    $('find-scope').addEventListener('change', () => {
+      clearFindSession();
+      $('find-results').innerHTML = '';
+    });
     $('btn-find-replace-one').addEventListener('click', runReplaceOne);
     $('btn-find-replace').addEventListener('click', runReplaceAll);
     $('btn-find-close').addEventListener('click', closeFindPanel);
@@ -7806,11 +8103,25 @@
           ? '已切到整本书：点「开始预检」按词表通读全书（只读，缺文件的章节会跳过）。'
           : '已切到当前这一章：点「开始预检」检查编辑区里的最新内容。';
     });
-    $('find-query').addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        runFind();
+    // 查找框回车：还没查过（或换了词）就查一遍并选中第一处；已经查过就走「下一处」。
+    // Shift+回车 = 上一处。stopPropagation 避免 document 上的 Enter 处理再跑一遍（那样会连跳两处）。
+    const onFindQueryEnter = (event) => {
+      const options = readFindOptions();
+      if (!options.query.trim()) {
+        $('find-summary').textContent = '先在查找框里输入内容';
+        return;
       }
+      if (options.scope === 'current' && findSessionMatchesOptions(options)) {
+        void stepFind(event.shiftKey ? -1 : 1);
+      } else {
+        void runFind();
+      }
+    };
+    $('find-query').addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      event.stopPropagation();
+      onFindQueryEnter(event);
     });
     $('find-replace').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
@@ -8067,7 +8378,7 @@
         }
         return;
       }
-      // 查找面板：Esc 关、回车查找；其他按键继续往下走（Ctrl+S 仍可保存）
+      // 查找面板：Esc 关、回车查找 / 下一处；其他按键继续往下走（Ctrl+S 仍可保存）
       if (!$('find-backdrop').classList.contains('hidden')) {
         if (event.key === 'Escape') {
           event.preventDefault();
@@ -8076,9 +8387,15 @@
         }
         if (event.key === 'Enter' && document.activeElement === $('find-query')) {
           event.preventDefault();
-          runFind();
+          onFindQueryEnter(event);
           return;
         }
+      }
+      // 查找高亮：面板关着时 Esc 先清高亮（再按才轮到专注模式 / 朗读等的 Esc）
+      if (!findPanelOpen() && state.find.total > 0 && event.key === 'Escape') {
+        event.preventDefault();
+        clearFindSession({ toastHint: true });
+        return;
       }
       // 灵感箱：Esc 关闭弹层；输入框里的 Ctrl+Enter 自己在 textarea 上处理
       if (!$('fragment-backdrop').classList.contains('hidden') && event.key === 'Escape') {
@@ -8120,6 +8437,14 @@
         if (state.view === 'editor' && state.bookPath) {
           event.preventDefault();
           toggleFocusMode();
+        }
+        return;
+      }
+      // 查找：F3 / Shift+F3 重复上次查找（写作页，面板关着也能用；到两端绕回）
+      if (event.key === 'F3' && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        if (state.view === 'editor' && state.bookPath && findSessionActive()) {
+          event.preventDefault();
+          void stepFind(event.shiftKey ? -1 : 1);
         }
         return;
       }
@@ -8659,6 +8984,83 @@
       async findReplaceOne() {
         return runReplaceOne();
       },
+      // 查找增强（v0.8-11，提案 N11）：当前章上一处 / 下一处 + 结果持续高亮
+      findSession: () => {
+        if (!state.find.total) return null;
+        return {
+          active: findSessionActive(),
+          query: state.find.query,
+          caseSensitive: state.find.caseSensitive,
+          index: state.find.index,
+          total: state.find.total,
+          windowStart: state.find.windowStart,
+          windowEnd: state.find.windowEnd,
+          highlighted: state.find.highlighted,
+          truncated: state.find.truncated
+        };
+      },
+      async findStep(direction) {
+        return stepFind(Number(direction) < 0 ? -1 : 1);
+      },
+      async findGoTo(index) {
+        return selectFindMatch(index);
+      },
+      findHighlightCount: () => document.querySelectorAll('#editor-find-marks .find-hit').length,
+      findCurrentOrdinal: () => {
+        const el = document.querySelector('#editor-find-marks .find-hit-current');
+        return el && el.dataset.ordinal != null ? Number(el.dataset.ordinal) : -1;
+      },
+      findOverlayVisible: () => !$('editor-find-marks').classList.contains('hidden'),
+      findOverlayScroll: () => {
+        const overlay = $('editor-find-marks');
+        return {
+          top: overlay.scrollTop,
+          left: overlay.scrollLeft,
+          editorTop: editorEl.scrollTop,
+          editorLeft: editorEl.scrollLeft
+        };
+      },
+      findHitRects(ordinal) {
+        const el = $('editor-find-marks').querySelector(
+          `.find-hit[data-ordinal="${Number(ordinal)}"]`
+        );
+        if (!el) return [];
+        return Array.from(el.getClientRects()).map((rect) => ({
+          top: rect.top,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        }));
+      },
+      findHitStyle(ordinal) {
+        const el =
+          ordinal == null
+            ? $('editor-find-marks').querySelector('.find-hit-current')
+            : $('editor-find-marks').querySelector(
+                `.find-hit[data-ordinal="${Number(ordinal)}"]`
+              );
+        if (!el) return null;
+        const styles = getComputedStyle(el);
+        return {
+          background: styles.backgroundColor,
+          boxShadow: styles.boxShadow,
+          color: styles.color
+        };
+      },
+      findNavCount: () => $('find-nav-count').textContent,
+      findChipText: () => $('status-find').textContent,
+      findChipVisible: () => !$('status-find').classList.contains('hidden'),
+      // 测试用：真的触发一次 input 事件（模拟作者改查找框里的词）
+      findTypeQuery(value) {
+        const input = $('find-query');
+        input.value = String(value == null ? '' : value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return input.value;
+      },
+      findClear() {
+        clearFindSession();
+        return true;
+      },
       // 校对（只报告，不改动）
       openProofreadPanel: () => openProofreadPanel(),
       closeProofreadPanel: () => closeProofreadPanel(),
@@ -8957,6 +9359,7 @@
       setEditorScroll(top) {
         editorEl.scrollTop = Math.max(0, Number(top) || 0);
         syncMarksScroll();
+        syncFindOverlayScroll();
         return editorEl.scrollTop;
       },
       longParaChipText: () => $('status-long-para').textContent,

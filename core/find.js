@@ -2,10 +2,15 @@
 // 只做「字面量」查找，不搞正则：作者写小说，正则一不小心就会误伤全稿。
 // 替换前由 storage 负责把原章节备份到书内 _trash，替换写盘仍是显式的「全部替换」动作。
 
-function findMatches(text, query, options = {}) {
+// 单章命中数上限：极端情况（搜一个「的」）兜底，别把内存 / IPC 打爆。
+// 到了上限还能多找出第 MAX_MATCHES + 1 处时，findMatchesAll 会明确回 truncated: true。
+const MAX_MATCHES = 5000;
+
+function scanMatches(text, query, options = {}, limit = MAX_MATCHES) {
   const source = String(text == null ? '' : text);
   const needleRaw = String(query == null ? '' : query);
-  if (!needleRaw) return [];
+  if (!needleRaw) return { matches: [], truncated: false };
+  const cap = Math.max(1, Math.floor(Number(limit) || MAX_MATCHES));
   const caseSensitive = Boolean(options.caseSensitive);
   let haystack = source;
   let needle = needleRaw;
@@ -22,11 +27,20 @@ function findMatches(text, query, options = {}) {
   for (;;) {
     const index = haystack.indexOf(needle, from);
     if (index < 0) break;
+    if (matches.length >= cap) return { matches, truncated: true };
     matches.push({ index, length: needleRaw.length });
     from = index + Math.max(1, needle.length);
-    if (matches.length >= 5000) break; // 单章极端情况兜底，别把内存打爆
   }
-  return matches;
+  return { matches, truncated: false };
+}
+
+function findMatches(text, query, options = {}) {
+  return scanMatches(text, query, options).matches;
+}
+
+// 需要知道「是不是被上限截断了」的时候用这个（例如渲染层的上一处 / 下一处）。
+function findMatchesAll(text, query, options = {}) {
+  return scanMatches(text, query, options);
 }
 
 function countMatches(text, query, options) {
@@ -79,4 +93,12 @@ function findNextMatch(text, query, fromIndex = 0, options = {}) {
   return { index, total: matches.length, match: matches[index] };
 }
 
-module.exports = { findMatches, countMatches, replaceAllLiteral, makeSnippet, findNextMatch };
+module.exports = {
+  MAX_MATCHES,
+  findMatches,
+  findMatchesAll,
+  countMatches,
+  replaceAllLiteral,
+  makeSnippet,
+  findNextMatch
+};

@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('api', {
   saveChapter: (bookPath, chapterId, text) => invoke('chapter:save', bookPath, chapterId, text),
   formatText: (text, options) => invoke('text:format', text, options),
   findInText: (text, query, options) => invoke('text:find', text, query, options),
+  // 当前章全部命中（v0.8-11，提案 N11）：上一处 / 下一处 + 结果持续高亮用；只算文本、不写盘
+  findAll: (text, query, options) => invoke('text:find-all', text, query, options),
   findNext: (text, query, fromIndex, options) =>
     invoke('text:find-next', text, query, fromIndex, options),
   replaceInText: (text, query, replacement, options) =>

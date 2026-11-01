@@ -934,6 +934,15 @@ function registerIpc() {
     };
   });
 
+  // 当前章全部命中（v0.8-11，提案 N11）：给「上一处 / 下一处 + 结果持续高亮」用。
+  // 和 text:find 的区别：不截断成 12 条、不带上下文，只回下标和长度；命中上限仍是 5000 处，
+  // 到上限还多找出一处时明确回 truncated（界面据此提示「命中太多」）。只算文本，不读盘、不写盘。
+  handle('text:find-all', async (text, query, options) => {
+    if (typeof text !== 'string') throw new Error('正文必须是文本');
+    const result = findLib.findMatchesAll(text, query, options);
+    return { count: result.matches.length, truncated: result.truncated, matches: result.matches };
+  });
+
   handle('text:replace', async (text, query, replacement, options) => {
     if (typeof text !== 'string') throw new Error('正文必须是文本');
     return findLib.replaceAllLiteral(text, query, replacement, options);
@@ -2161,6 +2170,50 @@ async function runAutomation() {
       } else if (screenshotDialog === 'find') {
         await automationWin.webContents.executeJavaScript(
           `window.__cwTest.openFindPanel(); window.__cwTest.setFindFields({ query: '风', scope: 'book' }); window.__cwTest.findRun();`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'find-nav') {
+        // 开发截图用：查找面板里的「当前章定位」一行（上一处 / 下一处 + 第 X / N 处）
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+             const text = window.__cwTest.text();
+             const counts = new Map();
+             for (const ch of text) {
+               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
+             }
+             let best = '';
+             let bestCount = 0;
+             for (const [ch, n] of counts) {
+               if (n > bestCount) { best = ch; bestCount = n; }
+             }
+             window.__cwTest.openFindPanel();
+             window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
+             window.__cwTest.findRun();
+           })()`,
+          true
+        );
+        await sleep(900);
+      } else if (screenshotDialog === 'find-highlight') {
+        // 开发截图用：查找增强（v0.8-11，提案 N11）——当前章全部命中高亮 + 状态栏「查找 1/N」。
+        // 先挑本章出现最多的一个汉字当查找词，查完把面板关掉，让正文里的高亮露出来（只读，不写盘）
+        await automationWin.webContents.executeJavaScript(
+          `(() => {
+             const text = window.__cwTest.text();
+             const counts = new Map();
+             for (const ch of text) {
+               if (/[\\u4e00-\\u9fa5]/.test(ch)) counts.set(ch, (counts.get(ch) || 0) + 1);
+             }
+             let best = '';
+             let bestCount = 0;
+             for (const [ch, n] of counts) {
+               if (n > bestCount) { best = ch; bestCount = n; }
+             }
+             window.__cwTest.openFindPanel();
+             window.__cwTest.setFindFields({ query: best || '的', scope: 'current' });
+             window.__cwTest.findRun();
+             window.__cwTest.closeFindPanel();
+           })()`,
           true
         );
         await sleep(900);

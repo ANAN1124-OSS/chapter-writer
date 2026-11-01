@@ -1,6 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { findMatches, countMatches, replaceAllLiteral, makeSnippet, findNextMatch } = require('../core/find');
+const {
+  MAX_MATCHES,
+  findMatches,
+  findMatchesAll,
+  countMatches,
+  replaceAllLiteral,
+  makeSnippet,
+  findNextMatch
+} = require('../core/find');
 
 test('查找：字面量匹配、多个结果、中文与英文', () => {
   assert.deepEqual(findMatches('阿明说：阿明走了', '阿明').map((m) => m.index), [0, 4]);
@@ -86,4 +94,19 @@ test('替换这一处：沿用字面量与大小写策略', () => {
   // 越界/非法 fromIndex：负数按 0；超过文末按「后面没有了」处理
   assert.equal(findNextMatch('阿明阿明', '阿明', -10).index, 0);
   assert.equal(findNextMatch('阿明阿明', '阿明', 999), null);
+});
+
+test('命中上限：正好到上限不算截断，再多一处就明确回 truncated', () => {
+  assert.equal(MAX_MATCHES, 5000);
+  const exact = findMatchesAll('a'.repeat(MAX_MATCHES), 'a');
+  assert.equal(exact.matches.length, MAX_MATCHES);
+  assert.equal(exact.truncated, false);
+
+  const over = findMatchesAll('a'.repeat(MAX_MATCHES + 3), 'a');
+  assert.equal(over.matches.length, MAX_MATCHES);
+  assert.equal(over.truncated, true);
+  // findMatches 照旧只回数组（老的调用方不用改）
+  assert.equal(findMatches('a'.repeat(MAX_MATCHES + 3), 'a').length, MAX_MATCHES);
+  assert.equal(findMatchesAll('', 'a').truncated, false);
+  assert.equal(findMatchesAll('abc', '').matches.length, 0);
 });

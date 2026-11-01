@@ -7557,6 +7557,392 @@ module.exports = async function runScenario(ctx) {
   );
   await exec("window.__cwTest.setMarksToggle('caretParagraph', false)");
 
+  // 50k. 查找增强（v0.8-11，提案 N11）：当前章「上一处 / 下一处」+ 结果持续高亮。
+  // 只移动选区 / 滚动 + 在只读影子层上画高亮：不改正文、不写盘、不写配置。
+  // 关掉面板后高亮还在、F3 / Shift+F3 还能继续跳，Esc 清除；命中太多时只画当前附近一屏。
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  await exec("window.__cwTest.newBook('查找增强测试书')");
+  await waitFor("window.__cwTest.view() === 'editor'");
+  const findBookPath = await exec('window.__cwTest.bookPathValue()');
+  const findMetaPath = path.join(findBookPath, '书目.json');
+  const findConfigPath = path.join(userData, 'config.json');
+  await exec("window.__cwTest.renameChapterAt(0, '雨夜')");
+  const findLine1 = '　　阿明推开门，阿明看见雨。';
+  const findLine2 = '　　巷口没有人，阿明把伞收起来。';
+  const findLine3 = '　　阿明说：Rain rain 都要停了。';
+  const findText = [findLine1, '', findLine2, '', findLine3].join('\n');
+  const findStart1 = findText.indexOf('阿明');
+  const findStart2 = findText.indexOf('阿明', findStart1 + 1);
+  const findStart3 = findText.indexOf('阿明', findStart2 + 1);
+  const findStart4 = findText.indexOf('阿明', findStart3 + 1);
+  const findRainLower = findText.indexOf('rain');
+  const findRainUpper = findText.indexOf('Rain');
+  await exec(`window.__cwTest.setText(${JSON.stringify(findText)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  // 第二章：整本查找跳过来以后，本章命中也要全部高亮
+  await exec("window.__cwTest.newChapter('归途')");
+  await waitFor("window.__cwTest.currentIndex() === 1");
+  const findChapter2 = '　　阿明在归途上想：阿明该回家了。';
+  await exec(`window.__cwTest.setText(${JSON.stringify(findChapter2)})`);
+  await exec('window.__cwTest.save()');
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor("window.__cwTest.currentIndex() === 0");
+  const findMetaBeforeJson = JSON.parse(await fs.readFile(findMetaPath, 'utf8'));
+  const findChapterFile = findMetaBeforeJson.chapters[0].file;
+  const findTxtPath = path.join(findBookPath, findChapterFile);
+  const findTxtBefore = await fs.stat(findTxtPath);
+  const findMetaBefore = await fs.readFile(findMetaPath, 'utf8');
+  const findConfigBefore = await fs.readFile(findConfigPath, 'utf8');
+  const findDirBefore = (await fs.readdir(findBookPath)).sort().join('|');
+
+  check(
+    '查找增强：默认没有查找会话，状态栏没有小标签、正文上没有高亮层',
+    (await exec('window.__cwTest.findSession()')) === null &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === false
+  );
+
+  // 50k-1. 当前章查找：全部命中都画出来，选中第 1 处，第 1/4 处
+  await exec('window.__cwTest.openFindPanel()');
+  await exec(
+    "window.__cwTest.setFindFields({ query: '阿明', scope: 'current', caseSensitive: false })"
+  );
+  await exec('window.__cwTest.findRun()');
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  const findFirst = await exec('window.__cwTest.findSession()');
+  check(
+    '查找增强：当前章查找列出全部 4 处并选中第 1 处（第 1/4 处）',
+    findFirst &&
+      findFirst.total === 4 &&
+      findFirst.index === 0 &&
+      (await exec('window.__cwTest.selection()')).start === findStart1,
+    findFirst
+  );
+  check(
+    '查找增强：本章所有命中都在只读影子层上高亮，当前那处单独标色（只有一处）',
+    (await exec('window.__cwTest.findHighlightCount()')) === 4 &&
+      (await exec('window.__cwTest.findCurrentOrdinal()')) === 0 &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === true
+  );
+  check(
+    '查找增强：面板显示「第 1/4 处」与快捷键行，正文仍是已保存状态',
+    (await exec('window.__cwTest.findSummary()')).includes('本章命中 4 处（第 1/4 处）') &&
+      (await exec("document.querySelector('.find-nav-hint').textContent")).includes('Enter / F3') &&
+      (await exec('window.__cwTest.findNavCount()')) === '1 / 4' &&
+      (await exec('window.__cwTest.dirty()')) === false
+  );
+  check(
+    '查找增强：状态栏出现「查找 1 / 4」小标签',
+    (await exec('window.__cwTest.findChipVisible()')) === true &&
+      (await exec('window.__cwTest.findChipText()')) === '查找 1 / 4'
+  );
+  const findStyleCurrent = await exec('window.__cwTest.findHitStyle()');
+  const findStyleOther = await exec('window.__cwTest.findHitStyle(1)');
+  check(
+    '查找增强：当前命中的底色比其它命中更重',
+    Boolean(findStyleCurrent) &&
+      Boolean(findStyleOther) &&
+      findStyleCurrent.background !== 'rgba(0, 0, 0, 0)' &&
+      findStyleCurrent.background !== findStyleOther.background &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 4
+  );
+
+  // 50k-2. 面板里的「上一处 / 下一处」按钮：只移动选区与当前高亮，命中总数不变
+  await exec("document.getElementById('btn-find-next').click()");
+  await waitFor('window.__cwTest.findSession().index === 1');
+  check(
+    '查找增强：点「下一处」到第 2 处（选区跟着走、4 处高亮都在）',
+    (await exec('window.__cwTest.selection()')).start === findStart2 &&
+      (await exec('window.__cwTest.findCurrentOrdinal()')) === 1 &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 4 &&
+      (await exec('window.__cwTest.findNavCount()')) === '2 / 4'
+  );
+  await exec("document.getElementById('btn-find-prev').click()");
+  await waitFor('window.__cwTest.findSession().index === 0');
+  check(
+    '查找增强：点「上一处」回到第 1 处',
+    (await exec('window.__cwTest.selection()')).start === findStart1 &&
+      (await exec('window.__cwTest.findCurrentOrdinal()')) === 0
+  );
+  await exec('window.__cwTest.findGoTo(3)');
+  await exec("document.getElementById('btn-find-next').click()");
+  await waitFor('window.__cwTest.findSummary().includes("已到末尾")');
+  check(
+    '查找增强：最后一处再按「下一处」绕回第 1 处，摘要说明绕回',
+    (await exec('window.__cwTest.selection()')).start === findStart1 &&
+      (await exec('window.__cwTest.findSession()')).index === 0 &&
+      (await exec('window.__cwTest.findSummary()')).includes('已到末尾，回到第 1 处')
+  );
+  await exec("document.getElementById('btn-find-prev').click()");
+  await waitFor('window.__cwTest.findSummary().includes("已到开头")');
+  check(
+    '查找增强：第 1 处再按「上一处」绕到最后一处',
+    (await exec('window.__cwTest.selection()')).start === findStart4 &&
+      (await exec('window.__cwTest.findSession()')).index === 3 &&
+      (await exec('window.__cwTest.findSummary()')).includes('已到开头，回到最后一处')
+  );
+
+  // 50k-3. 快捷键：查找框里 Enter / Shift+Enter，面板关着时 F3 / Shift+F3
+  await exec("document.getElementById('find-query').focus()");
+  await exec(
+    "document.getElementById('find-query').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession().index === 0');
+  check(
+    '查找增强：查找框里按 Enter = 下一处（绕回第 1 处，不必重新点「查找」）',
+    (await exec('window.__cwTest.selection()')).start === findStart1
+  );
+  await exec(
+    "document.getElementById('find-query').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession().index === 3');
+  check(
+    '查找增强：查找框里按 Shift+Enter = 上一处（绕到最后一处）',
+    (await exec('window.__cwTest.selection()')).start === findStart4
+  );
+  await exec('window.__cwTest.closeFindPanel()');
+  await waitFor('window.__cwTest.findPanelOpen() === false');
+  check(
+    '查找增强：关掉面板后高亮和状态栏标签都还在（结果持续高亮）',
+    (await exec('window.__cwTest.findOverlayVisible()')) === true &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 4 &&
+      (await exec('window.__cwTest.findChipVisible()')) === true &&
+      (await exec('window.__cwTest.findChipText()')) === '查找 4 / 4'
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession().index === 0');
+  check(
+    '查找增强：面板关着也能按 F3 跳到下一处（最后一处绕回第 1 处）',
+    (await exec('window.__cwTest.selection()')).start === findStart1 &&
+      (await exec('window.__cwTest.findChipText()')) === '查找 1 / 4'
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3', shiftKey: true, bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession().index === 3');
+  check(
+    '查找增强：Shift+F3 跳上一处（第 1 处绕到最后一处）',
+    (await exec('window.__cwTest.selection()')).start === findStart4
+  );
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：面板关着时 Esc 清除高亮和标签，正文一个字没动',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findHighlightCount()')) === 0 &&
+      (await exec('window.__cwTest.findChipVisible()')) === false &&
+      (await exec('window.__cwTest.text()')) === findText
+  );
+
+  // 50k-4. 大小写 / 改词 / 换范围：旧高亮立刻收起，不拿旧位置继续亮
+  await exec('window.__cwTest.openFindPanel()');
+  await exec(
+    "window.__cwTest.setFindFields({ query: 'rain', scope: 'current', caseSensitive: false })"
+  );
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 2");
+  check(
+    '查找增强：不区分大小写时 Rain / rain 都算（2 处，选中第 1 处）',
+    (await exec('window.__cwTest.findHighlightCount()')) === 2 &&
+      (await exec('window.__cwTest.selection()')).start === findRainUpper
+  );
+  await exec("window.__cwTest.setFindFields({ caseSensitive: true })");
+  await exec(
+    "document.getElementById('find-case').dispatchEvent(new Event('change', { bubbles: true }))"
+  );
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：改「区分大小写」后旧高亮立刻收起（不再对着旧结果亮）',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findChipVisible()')) === false
+  );
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 1");
+  check(
+    '查找增强：区分大小写后只剩小写 rain 一处',
+    (await exec('window.__cwTest.findHighlightCount()')) === 1 &&
+      (await exec('window.__cwTest.selection()')).start === findRainLower
+  );
+  await exec("window.__cwTest.findTypeQuery('巷口')");
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：在查找框里改词，旧高亮立刻收起',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false
+  );
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 1");
+  check(
+    '查找增强：重新查「巷口」只命中 1 处并高亮',
+    (await exec('window.__cwTest.findHighlightCount()')) === 1 &&
+      (await exec('window.__cwTest.selection()')).start === findText.indexOf('巷口')
+  );
+  // 主题：夜间有一套单独的命中高亮色（只预览，不写配置）
+  await exec("window.__cwTest.setFindFields({ query: '阿明' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  const findPaperHit = await exec('window.__cwTest.findHitStyle()');
+  await exec('window.__cwTest.openSettings()');
+  await exec("window.__cwTest.setSelect('settings-paper', 'night')");
+  await waitFor("window.__cwTest.displayStyle().paperClass.includes('theme-night')");
+  const findNightHit = await exec('window.__cwTest.findHitStyle()');
+  check(
+    '查找增强：夜间主题有单独的命中高亮色（暗底上不刺眼，只改显示）',
+    Boolean(findNightHit) &&
+      findNightHit.background !== findPaperHit.background &&
+      findNightHit.boxShadow.includes('inset')
+  );
+  await exec('window.__cwTest.closeSettings()');
+  await waitFor("!window.__cwTest.displayStyle().paperClass.includes('theme-night')");
+  check(
+    '查找增强：切换主题只是预览，取消后配置一个字节没写',
+    (await fs.readFile(findConfigPath, 'utf8')) === findConfigBefore
+  );
+
+  // 50k-5. 整本查找跳过来：本章命中全部高亮；换章自动结束
+  await exec("window.__cwTest.setFindFields({ query: '阿明', scope: 'book' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSummary().includes('整本命中')");
+  check(
+    '查找增强：整本查找仍按章列结果（2 章共 6 处）',
+    (await exec('window.__cwTest.findSummary()')).includes('整本命中 6 处，分布在 2 章') &&
+      (await exec('window.__cwTest.findResultCount()')) === 2
+  );
+  await exec('window.__cwTest.clickFindResult(1)');
+  await waitFor('window.__cwTest.currentIndex() === 1');
+  await waitFor('window.__cwTest.findHighlightCount() === 2');
+  check(
+    '查找增强：点整本结果跳到那一章后，本章命中全部高亮并选中第 1 处',
+    (await exec('window.__cwTest.findSession()')).total === 2 &&
+      (await exec('window.__cwTest.findChipText()')) === '查找 1 / 2' &&
+      (await exec('window.__cwTest.selection()')).start === findChapter2.indexOf('阿明')
+  );
+  await exec("window.__cwTest.switchTo(0, 'discard')");
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：换一章后高亮自动结束（不会拿上一章的位置亮着）',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.findChipVisible()')) === false
+  );
+
+  // 50k-6. 改正文结束会话；命中太多只画一屏；滚动同步
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '阿明', scope: 'current' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor('window.__cwTest.findHighlightCount() === 4');
+  const findEditedText = `${findText}\n\n　　后来他想起那把伞。`;
+  await exec(`window.__cwTest.setText(${JSON.stringify(findEditedText)})`);
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：改正文后高亮结束（位置对不上了），正文仍是未保存',
+    (await exec('window.__cwTest.dirty()')) === true &&
+      (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.text()')) === findEditedText
+  );
+  await exec(`window.__cwTest.setText(${JSON.stringify(findText)})`);
+  await waitFor("window.__cwTest.dirty() === false");
+  // 600 处命中：只画 500 处，当前命中仍在窗口里，导航序号仍是全局的
+  await exec(`window.__cwTest.setText(${JSON.stringify('阿明'.repeat(600))})`);
+  await waitFor('window.__cwTest.dirty() === true');
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '阿明', scope: 'current' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor("window.__cwTest.findSession() && window.__cwTest.findSession().total === 600");
+  const findBig = await exec('window.__cwTest.findSession()');
+  check(
+    '查找增强：命中太多（600 处）时只画一屏，摘要说明，当前命中仍在其中',
+    (await exec('window.__cwTest.findHighlightCount()')) === 500 &&
+      findBig.truncated === true &&
+      (await exec('window.__cwTest.findSummary()')).includes('命中太多') &&
+      (await exec('window.__cwTest.findCurrentOrdinal()')) === 0 &&
+      findBig.windowStart === 0 &&
+      findBig.windowEnd === 500
+  );
+  await exec('window.__cwTest.findGoTo(549)');
+  await waitFor('window.__cwTest.findCurrentOrdinal() === 549');
+  const findBigShifted = await exec('window.__cwTest.findSession()');
+  check(
+    '查找增强：跳到第 550 处时高亮窗口跟着移动，当前命中仍在高亮层里',
+    (await exec('window.__cwTest.findHighlightCount()')) === 500 &&
+      findBigShifted.windowStart > 0 &&
+      findBigShifted.windowStart <= 549 &&
+      findBigShifted.windowEnd > 549 &&
+      findBigShifted.windowEnd <= 600
+  );
+  const findScrolled = await exec('window.__cwTest.setEditorScroll(180)');
+  const findOverlayScroll = await exec('window.__cwTest.findOverlayScroll()');
+  check(
+    '查找增强：滚动正文时高亮层跟着滚（和标记层同一套同步）',
+    findScrolled > 0 &&
+      findOverlayScroll.top === findOverlayScroll.editorTop &&
+      Math.abs(findOverlayScroll.top - findScrolled) <= 1,
+    { findScrolled, findOverlayScroll }
+  );
+  await exec('window.__cwTest.setEditorScroll(0)');
+  // 恢复成磁盘上的正文（这一章没有保存过 600 处命中的临时内容）
+  await exec(`window.__cwTest.setText(${JSON.stringify(findText)})`);
+  await waitFor("window.__cwTest.dirty() === false");
+  await exec('window.__cwTest.closeFindPanel()');
+
+  // 50k-7. 全程只读；配置不新增查找字段；v0.4.1 旧书照常查找 / 高亮
+  const findTxtAfter = await fs.stat(findTxtPath);
+  const findMetaAfterJson = JSON.parse(await fs.readFile(findMetaPath, 'utf8'));
+  const findConfigAfterJson = JSON.parse(await fs.readFile(findConfigPath, 'utf8'));
+  const findConfigBeforeJson = JSON.parse(findConfigBefore);
+  delete findConfigAfterJson.lastBook; // 切章会正常记「上次打开的书 / 章」，和查找无关
+  delete findConfigBeforeJson.lastBook;
+  const findDirAfter = (await fs.readdir(findBookPath)).sort().join('|');
+  check(
+    '查找增强：全程只读（章节 txt 大小+mtime、书目 chapters、配置、书内文件都没变，无 _trash / 临时文件）',
+    findTxtAfter.size === findTxtBefore.size &&
+      findTxtAfter.mtimeMs === findTxtBefore.mtimeMs &&
+      JSON.stringify(findMetaAfterJson.chapters) === JSON.stringify(findMetaBeforeJson.chapters) &&
+      JSON.stringify(findConfigAfterJson) === JSON.stringify(findConfigBeforeJson) &&
+      findDirAfter === findDirBefore &&
+      !findDirAfter.includes('_trash') &&
+      !findDirAfter.includes('.tmp-'),
+    { txt: [findTxtBefore.size, findTxtAfter.size], meta: findMetaAfterJson.chapters.length }
+  );
+  check(
+    '查找增强：配置没有新增查找字段（会话只记内存，不写配置）',
+    ['findSession', 'findQuery', 'findHighlight', 'lastFind', 'findNav'].every(
+      (key) => !(key in findConfigAfterJson)
+    )
+  );
+  await exec('window.__cwTest.backToShelf()');
+  await waitFor("window.__cwTest.view() === 'shelf'");
+  const findLegacyMetaBefore = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  await exec(`window.__cwTest.openBookPath(${JSON.stringify(fragLegacyBookPath)})`);
+  await waitFor("window.__cwTest.view() === 'editor'");
+  await exec('window.__cwTest.openFindPanel()');
+  await exec("window.__cwTest.setFindFields({ query: '旧书', scope: 'current' })");
+  await exec('window.__cwTest.findRun()');
+  await waitFor('window.__cwTest.findHighlightCount() === 1');
+  const findLegacyMetaAfter = await fs.readFile(ttsLegacyMetaPath, 'utf8');
+  check(
+    '查找增强：没有 schemaVersion 的旧书照常查找 / 高亮，书目不被补字段',
+    (await exec('window.__cwTest.findSession()')).total === 1 &&
+      (await exec('window.__cwTest.selection()')).start === 0 &&
+      findLegacyMetaAfter === findLegacyMetaBefore &&
+      findLegacyMetaAfter.includes('"schemaVersion"') === false
+  );
+  await exec('window.__cwTest.closeFindPanel()');
+  await exec(
+    "document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))"
+  );
+  await waitFor('window.__cwTest.findSession() === null');
+  check(
+    '查找增强：旧书上 Esc 也能清除高亮，正文 / 书目不动',
+    (await exec('window.__cwTest.findOverlayVisible()')) === false &&
+      (await exec('window.__cwTest.text()')) === '旧书正文。'
+  );
+
   // 51. 专注模式（提案 3.5）：隐藏左栏与顶栏、F11 / 按钮进出、Esc 退出、打字机模式。
   // 全部只改显示（DOM class + textarea.scrollTop）：不改正文、不写盘、不写配置、不碰书目。
   await exec('window.__cwTest.backToShelf()');

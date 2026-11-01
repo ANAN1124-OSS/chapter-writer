@@ -133,6 +133,8 @@
                   placeholder="开始写作…（只有按 Ctrl+S 或点「保存」才会写盘）"></textarea>
         <!-- 只读标记层：不可见字符 / 超长段落只画在这里，正文一个字节都不改（和编辑区同排版，跟着滚动） -->
         <div id="editor-marks" class="editor-marks hidden" aria-hidden="true"></div>
+        <!-- 查找结果高亮层（v0.8-11，提案 N11）：当前章所有命中画在这里，只读、不参与编辑 / 选择 -->
+        <div id="editor-find-marks" class="editor-marks find-marks hidden" aria-hidden="true"></div>
         <!-- 超长段落的左侧黄线画在正文左边距里，逐行跟随滚动 -->
         <div id="editor-marks-gutter" class="editor-marks-gutter hidden" aria-hidden="true"></div>
         <footer class="statusbar">
@@ -149,6 +151,7 @@
             <span class="goal-track" id="status-goal-track"><i id="status-goal-fill"></i></span>
           </span>
           <button id="status-long-para" class="status-long hidden" type="button">超长段落</button>
+          <button id="status-find" class="status-find hidden" type="button" title="查找高亮：单击跳到下一处；F3 下一处 / Shift+F3 上一处；Esc 清除">查找</button>
           <span id="char-count" class="muted small" title="本章字数（不含空白），未保存的编辑也算"></span>
           <span class="kbd">Ctrl+G 跳章</span>
           <span class="kbd">Ctrl+S 保存</span>
@@ -260,6 +263,14 @@
         <button id="btn-find-run" class="btn ghost" type="button">查找</button>
         <button id="btn-find-replace-one" class="btn ghost" type="button" title="只替换光标处的这一处，然后跳到下一处（只用于当前章，不写盘）">替换这一处</button>
         <button id="btn-find-replace" class="btn primary" type="button">全部替换</button>
+      </div>
+      <!-- 当前章逐处定位（v0.8-11，提案 N11）：只移动光标 / 选区 + 画只读高亮，不改正文 -->
+      <div class="find-row find-nav-row">
+        <span class="find-nav-label">当前章定位</span>
+        <button id="btn-find-prev" class="btn ghost tiny" type="button" title="上一处（Shift+Enter / Shift+F3；到开头会绕到最后一处）">↑ 上一处</button>
+        <button id="btn-find-next" class="btn ghost tiny" type="button" title="下一处（Enter / F3；到末尾会绕到第一处）">↓ 下一处</button>
+        <span class="find-nav-count" id="find-nav-count">—</span>
+        <span class="muted small find-nav-hint">Enter / F3 下一处 · Shift+Enter / Shift+F3 上一处；关掉面板后也能按</span>
       </div>
       <div class="find-summary muted small" id="find-summary"></div>
       <div class="find-results" id="find-results"></div>
@@ -881,6 +892,7 @@
   <script src="../core/template.js"></script>
   <script src="../core/s2t.js"></script>
   <script src="editor-logic.js"></script>
+  <script src="find-logic.js"></script>
   <script src="focus-logic.js"></script>
   <script src="reading-logic.js"></script>
 <script src="renderer.js"></script>
